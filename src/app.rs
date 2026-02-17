@@ -56,7 +56,7 @@ impl AppState {
         })
     }
 
-    pub async fn reload_on_signal_loop(self) {
+    pub async fn reload_on_signal_loop(&self) {
         loop {
             self.reload_notify.notified().await;
             let result = self.config_store.reload(self.strict_security).await;

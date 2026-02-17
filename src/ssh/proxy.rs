@@ -91,8 +91,8 @@ where
         .await
         .map_err(|e| CentralSshError::Ssh(format!("failed to request shell: {e}")))?;
 
-    let mut upstream_reader = channel.make_reader();
-    let mut upstream_writer = channel.make_writer();
+    let target_stream = channel.into_stream();
+    let (mut upstream_reader, mut upstream_writer) = io::split(target_stream);
 
     let (mut local_reader, mut local_writer) = io::split(stream);
 
@@ -107,7 +107,8 @@ where
         .await
         .map_err(|_| CentralSshError::InputTimeout)??;
 
-    let _ = channel.close().await;
+    drop(upstream_reader);
+    drop(upstream_writer);
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "session complete", "en")
         .await;

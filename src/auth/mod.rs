@@ -203,6 +203,8 @@ impl AuthEngine {
             DEFAULT_TOTP_SKEW,
             DEFAULT_TOTP_PERIOD,
             secret_bytes,
+            None,
+            String::new(),
         )
         .map_err(|e| CentralSshError::InvalidConfig(format!("failed to build totp: {e}")))
     }
@@ -217,8 +219,20 @@ impl AuthEngine {
     }
 
     pub fn otpauth_url(&self, issuer: &str, account: &str, secret: &str) -> Result<String> {
-        let mut totp = self.build_totp(secret)?;
-        totp.issuer = Some(issuer.to_string());
+        let secret_bytes = Secret::Encoded(secret.to_owned())
+            .to_bytes()
+            .map_err(|e| CentralSshError::InvalidConfig(format!("invalid totp secret: {e}")))?;
+
+        let totp = TOTP::new(
+            TotpAlgorithm::SHA1,
+            DEFAULT_TOTP_DIGITS,
+            DEFAULT_TOTP_SKEW,
+            DEFAULT_TOTP_PERIOD,
+            secret_bytes,
+            Some(issuer.to_string()),
+            account.to_string(),
+        )
+        .map_err(|e| CentralSshError::InvalidConfig(format!("failed to build totp: {e}")))?;
         Ok(totp.get_url())
     }
 

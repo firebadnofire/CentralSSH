@@ -188,11 +188,17 @@ pub async fn run_gateway_server(
 
     let config = Arc::new(config);
     let server = GatewayServer::new(state);
+    let listen_socket: SocketAddr = listen_addr.parse().map_err(|e| {
+        CentralSshError::InvalidConfig(format!("invalid listen address '{listen_addr}': {e}"))
+    })?;
 
-    server::run(config, listen_addr, server).await.map_err(|e| {
-        error!(error = %e, "gateway server stopped with error");
-        CentralSshError::Ssh(e.to_string())
-    })
+    server
+        .run_on_address(config, listen_socket)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "gateway server stopped with error");
+            CentralSshError::Ssh(e.to_string())
+        })
 }
 
 fn ensure_server_host_key(path: &Path) -> Result<()> {
