@@ -1,0 +1,20 @@
+{
+  "users": [
+    {
+      "name": "alice",
+      "password": "TemporaryPassword123!",
+      "totp_secret": null,
+      "must_change_password": true,
+      "allowed_servers": ["git", "httpd"],
+      "remote_users": {
+        "git": "gitdeploy",
+        "httpd": "webops"
+      }
+    }
+  ],
+  "settings": {
+    "user_key_root": "/etc/centralssh/users",
+    "known_hosts_path": "/etc/centralssh/known_hosts",
+    "audit_log_path": "/var/log/centralssh/audit.jsonl"
+  }
+}
