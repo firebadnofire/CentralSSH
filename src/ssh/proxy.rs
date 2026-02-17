@@ -76,7 +76,7 @@ where
         ));
     }
 
-    let mut channel = session
+    let channel = session
         .channel_open_session()
         .await
         .map_err(|e| CentralSshError::Ssh(format!("failed to open target session channel: {e}")))?;

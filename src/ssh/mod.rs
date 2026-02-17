@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use russh::server::{self, Auth, Msg, Session};
+use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
 use ssh_key::{LineEnding, PrivateKey};
 use tracing::{error, warn};
@@ -195,7 +195,7 @@ pub async fn run_gateway_server(
     server
         .run_on_address(config, listen_socket)
         .await
-        .map_err(|e| {
+        .map_err(|e: russh::Error| {
             error!(error = %e, "gateway server stopped with error");
             CentralSshError::Ssh(e.to_string())
         })
