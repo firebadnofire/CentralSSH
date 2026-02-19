@@ -101,7 +101,7 @@ impl server::Handler for GatewayHandler {
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        session.channel_success(channel);
+        let _ = session.channel_success(channel);
         Ok(())
     }
 
@@ -110,11 +110,11 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        session.channel_success(channel);
+        let _ = session.channel_success(channel);
 
         let maybe_channel = self.pending_session_channels.lock().await.remove(&channel);
         let Some(channel_handle) = maybe_channel else {
-            session.channel_failure(channel);
+            let _ = session.channel_failure(channel);
             return Ok(());
         };
 
@@ -124,6 +124,9 @@ impl server::Handler for GatewayHandler {
 
         tokio::spawn(async move {
             if let Err(err) = crate::app::handle_stream_session(stream, state, source_ip).await {
+                if matches!(err, crate::error::CentralSshError::InputCanceled) {
+                    return;
+                }
                 warn!(error = %err, source_ip = %source_ip, "session terminated with error");
             }
         });
@@ -137,7 +140,7 @@ impl server::Handler for GatewayHandler {
         _data: &[u8],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        session.channel_failure(channel);
+        let _ = session.channel_failure(channel);
         Ok(())
     }
 
@@ -147,7 +150,7 @@ impl server::Handler for GatewayHandler {
         _name: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        session.channel_failure(channel);
+        let _ = session.channel_failure(channel);
         Ok(())
     }
 
@@ -158,7 +161,7 @@ impl server::Handler for GatewayHandler {
         _variable_value: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        session.channel_failure(channel);
+        let _ = session.channel_failure(channel);
         Ok(())
     }
 
@@ -167,7 +170,7 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
-        session.channel_failure(channel);
+        let _ = session.channel_failure(channel);
         Ok(false)
     }
 }
@@ -187,7 +190,7 @@ pub async fn run_gateway_server(
     config.keys.push(host_key);
 
     let config = Arc::new(config);
-    let server = GatewayServer::new(state);
+    let mut server = GatewayServer::new(state);
     let listen_socket: SocketAddr = listen_addr.parse().map_err(|e| {
         CentralSshError::InvalidConfig(format!("invalid listen address '{listen_addr}': {e}"))
     })?;
@@ -195,7 +198,7 @@ pub async fn run_gateway_server(
     server
         .run_on_address(config, listen_socket)
         .await
-        .map_err(|e: russh::Error| {
+        .map_err(|e| {
             error!(error = %e, "gateway server stopped with error");
             CentralSshError::Ssh(e.to_string())
         })

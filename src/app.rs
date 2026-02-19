@@ -100,17 +100,23 @@ where
     let mut attempt_count = 0usize;
 
     while attempt_count < 5 && authenticated_user.is_none() {
-        let username =
-            ui::prompt_line(&mut stream, "Username: ", state.auth.pre_auth_timeout(), 64)
-                .await?
-                .trim()
-                .to_string();
+        let username = ui::prompt_line(
+            &mut stream,
+            "Username: ",
+            state.auth.pre_auth_timeout(),
+            64,
+            ui::EchoMode::Visible,
+        )
+        .await?
+        .trim()
+        .to_string();
 
         let password = ui::prompt_line(
             &mut stream,
             "Password: ",
             state.auth.pre_auth_timeout(),
             256,
+            ui::EchoMode::Hidden,
         )
         .await?
         .trim()
@@ -162,14 +168,35 @@ where
                     })
                     .await?;
 
-                run_first_login_flows_if_needed(
+                if let Err(err) = run_first_login_flows_if_needed(
                     &mut stream,
                     state.clone(),
                     &session_id,
                     source_ip,
                     &mut user,
                 )
-                .await?;
+                .await
+                {
+                    let message = match &err {
+                        CentralSshError::InputCanceled => String::new(),
+                        CentralSshError::InvalidConfig(reason) => {
+                            format!("\r\nCredential update failed: {reason}\r\n")
+                        }
+                        CentralSshError::SecurityPolicy { message, .. } => {
+                            format!(
+                                "\r\nCredential update blocked by security policy: {message}\r\n"
+                            )
+                        }
+                        _ => "\r\nCredential update failed. Contact an administrator.\r\n"
+                            .to_string(),
+                    };
+
+                    if !message.is_empty() {
+                        let _ = ui::write_text(&mut stream, &message).await;
+                    }
+
+                    return Err(err);
+                }
 
                 // TOTP challenge is always required before menu access.
                 let code = ui::prompt_line(
@@ -177,6 +204,7 @@ where
                     "TOTP Code: ",
                     state.auth.pre_auth_timeout(),
                     16,
+                    ui::EchoMode::Hidden,
                 )
                 .await?;
 
@@ -300,7 +328,13 @@ where
         }
 
         ui::write_text(&mut stream, &ui::render_server_menu(&user.name, &entries)).await?;
-        let selection_raw = ui::read_line(&mut stream, state.auth.menu_timeout(), 16).await?;
+        let selection_raw = ui::read_line(
+            &mut stream,
+            state.auth.menu_timeout(),
+            16,
+            ui::EchoMode::Visible,
+        )
+        .await?;
         let selection = selection_raw.trim();
 
         if matches!(selection, "q" | "Q" | "quit" | "exit") {
@@ -446,16 +480,30 @@ where
 {
     if user.must_change_password {
         ui::write_text(stream, "\r\nPassword change required.\r\n").await?;
+        let enforce_password_policy = state
+            .config_store
+            .snapshot()
+            .await
+            .config
+            .settings
+            .enforce_password_policy
+            .unwrap_or(true);
 
         loop {
-            let new_password =
-                ui::prompt_line(stream, "New password: ", state.auth.pre_auth_timeout(), 256)
-                    .await?;
+            let new_password = ui::prompt_line(
+                stream,
+                "New password: ",
+                state.auth.pre_auth_timeout(),
+                256,
+                ui::EchoMode::Hidden,
+            )
+            .await?;
             let confirm_password = ui::prompt_line(
                 stream,
                 "Confirm password: ",
                 state.auth.pre_auth_timeout(),
                 256,
+                ui::EchoMode::Hidden,
             )
             .await?;
 
@@ -464,15 +512,42 @@ where
                 continue;
             }
 
-            state
-                .auth
-                .enforce_password_policy(new_password.trim(), &user.password)?;
+            let new_password_trimmed = new_password.trim();
+            if enforce_password_policy {
+                match state
+                    .auth
+                    .enforce_password_policy(new_password_trimmed, &user.password)
+                {
+                    Ok(()) => {}
+                    Err(CentralSshError::InvalidConfig(message)) => {
+                        let feedback = format!("\r\n{message}\r\n");
+                        ui::write_text(stream, &feedback).await?;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            } else if new_password_trimmed.is_empty() {
+                ui::write_text(
+                    stream,
+                    "\r\npassword cannot be empty when policy is disabled\r\n",
+                )
+                .await?;
+                continue;
+            }
 
-            let new_hash = state.auth.hash_password(new_password.trim())?;
-            state
+            let new_hash = state.auth.hash_password(new_password_trimmed)?;
+            if let Err(err) = state
                 .config_store
                 .update_user_credentials(&user.name, Some(new_hash.clone()), None, Some(false))
+                .await
+            {
+                ui::write_text(
+                    stream,
+                    "\r\nFailed to persist password change. Contact an administrator.\r\n",
+                )
                 .await?;
+                return Err(err);
+            }
 
             user.password = new_hash;
             user.must_change_password = false;
@@ -513,6 +588,7 @@ where
                 "Enter verification code: ",
                 state.auth.pre_auth_timeout(),
                 16,
+                ui::EchoMode::Hidden,
             )
             .await?;
 

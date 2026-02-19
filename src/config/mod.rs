@@ -24,6 +24,7 @@ pub struct SettingsConfig {
     pub user_key_root: Option<PathBuf>,
     pub known_hosts_path: Option<PathBuf>,
     pub audit_log_path: Option<PathBuf>,
+    pub enforce_password_policy: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -343,19 +344,30 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     drop(temp_file);
 
     if let Some(meta) = &metadata {
-        #[allow(clippy::cast_possible_wrap)]
-        let chown_result = unsafe {
-            libc::chown(
-                std::ffi::CString::new(temp_path.to_string_lossy().into_owned())
-                    .map_err(|_| CentralSshError::InvalidConfig("invalid temp path".to_string()))?
-                    .as_ptr(),
-                meta.uid(),
-                meta.gid(),
-            )
-        };
+        let euid = unsafe { libc::geteuid() };
+        let egid = unsafe { libc::getegid() };
 
-        if chown_result != 0 {
-            return Err(CentralSshError::Io(std::io::Error::last_os_error()));
+        if euid == 0 {
+            let c_temp_path = std::ffi::CString::new(temp_path.to_string_lossy().into_owned())
+                .map_err(|_| CentralSshError::InvalidConfig("invalid temp path".to_string()))?;
+
+            #[allow(clippy::cast_possible_wrap)]
+            let chown_result = unsafe { libc::chown(c_temp_path.as_ptr(), meta.uid(), meta.gid()) };
+
+            if chown_result != 0 {
+                return Err(CentralSshError::Io(std::io::Error::last_os_error()));
+            }
+        } else if meta.uid() != euid || meta.gid() != egid {
+            return Err(CentralSshError::SecurityPolicy {
+                path: path.to_path_buf(),
+                message: format!(
+                    "cannot preserve owner {}:{} as unprivileged uid {}:{}",
+                    meta.uid(),
+                    meta.gid(),
+                    euid,
+                    egid
+                ),
+            });
         }
     }
 

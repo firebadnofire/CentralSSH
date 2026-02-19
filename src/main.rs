@@ -21,7 +21,35 @@ use reload::install_sighup_reload_notifier;
 use tracing::{info, warn};
 
 #[derive(Debug, Parser, Clone)]
-#[command(author, version, about = "CentralSSH hardened SSH gateway")]
+#[command(
+    author,
+    version,
+    about = "CentralSSH hardened SSH gateway",
+    long_about = "CentralSSH is an OpenSSH-compatible hardened SSH gateway. It never exposes a local shell and uses an internal auth/menu flow before proxying to approved targets.",
+    after_help = "Troubleshooting:
+  Startup error: \"I/O error: No such file or directory (os error 2)\"
+    Cause: default config paths do not exist.
+    Defaults:
+      --config      /etc/centralssh/config.json
+      --servers     /etc/centralssh/servers.json
+      --known-hosts /etc/centralssh/known_hosts
+      --user-key-root /etc/centralssh/users
+      --audit-log   /var/log/centralssh/audit.jsonl
+
+  Dev quick-start (non-strict mode):
+    mkdir -p ./tmp/users ./examples
+    touch ./examples/known_hosts
+    centralssh --config ./examples/config.json --servers ./examples/servers.json --known-hosts ./examples/known_hosts --user-key-root ./tmp/users --audit-log ./tmp/audit.jsonl --enforce-strict-security false
+
+  Production mode requirements:
+    - root-owned config/known_hosts/audit files
+    - mode 600 for files
+    - mode 700 for user key root directory
+
+  Password policy:
+    - settings.enforce_password_policy defaults to true
+    - set false only for controlled/testing environments"
+)]
 struct Cli {
     #[arg(long, env = "CENTRALSSH_LISTEN", default_value = DEFAULT_LISTEN)]
     listen: String,
@@ -85,6 +113,7 @@ async fn run() -> Result<()> {
     let config_store = ConfigStore::load(paths.clone(), cli.enforce_strict_security).await?;
     let auth = AuthEngine::new()?;
     let audit = AuditLogger::new(paths.audit_log_path.clone(), cli.enforce_strict_security)?;
+    info!(audit_log = %audit.path().display(), "audit logger initialized");
     let reload_notify = Arc::new(tokio::sync::Notify::new());
 
     let app = Arc::new(AppState {

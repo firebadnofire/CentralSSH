@@ -40,8 +40,8 @@ pub enum CentralSshError {
     #[error("timeout waiting for user input")]
     InputTimeout,
 
-    #[error("unsupported operation: {0}")]
-    Unsupported(String),
+    #[error("input cancelled by user")]
+    InputCanceled,
 }
 
 pub type Result<T> = std::result::Result<T, CentralSshError>;
