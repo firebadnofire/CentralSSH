@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+prog="$(basename "$0")"
+known_hosts="${CENTRALSSH_KNOWN_HOSTS:-/etc/centralssh/known_hosts}"
+
+usage() {
+	echo "Usage: ${prog} <server IP or domain>" >&2
+	echo "Fetches ssh-ed25519/rsa/ecdsa host keys and appends missing keys to ${known_hosts}." >&2
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+	usage
+	exit 0
+fi
+
+if [ $# -ne 1 ]; then
+	usage
+	exit 1
+fi
+
+target="$1"
+
+if ! command -v ssh-keyscan >/dev/null 2>&1; then
+	echo "${prog}: ssh-keyscan is required but not found in PATH." >&2
+	exit 1
+fi
+
+parent_dir="$(dirname "${known_hosts}")"
+mkdir -p "${parent_dir}"
+
+tmp_file="$(mktemp "${known_hosts}.tmp.XXXXXX")"
+scan_file="$(mktemp "${known_hosts}.scan.XXXXXX")"
+
+cleanup() {
+	rm -f "${tmp_file}" "${scan_file}"
+}
+trap cleanup EXIT INT TERM HUP
+
+if [ -f "${known_hosts}" ]; then
+	cat "${known_hosts}" > "${tmp_file}"
+else
+	: > "${tmp_file}"
+fi
+
+if ! ssh-keyscan -T 5 -t ed25519,rsa,ecdsa "${target}" > "${scan_file}" 2>/dev/null; then
+	if [ ! -s "${scan_file}" ]; then
+		echo "${prog}: failed to fetch host keys from '${target}'." >&2
+		exit 1
+	fi
+fi
+
+if [ ! -s "${scan_file}" ]; then
+	echo "${prog}: no supported host keys returned by '${target}'." >&2
+	exit 1
+fi
+
+added=0
+while IFS= read -r key_line; do
+	[ -n "${key_line}" ] || continue
+	if ! grep -Fqx "${key_line}" "${tmp_file}"; then
+		printf '%s\n' "${key_line}" >> "${tmp_file}"
+		added=$((added + 1))
+	fi
+done < "${scan_file}"
+
+chmod 0600 "${tmp_file}"
+mv "${tmp_file}" "${known_hosts}"
+
+if [ "${added}" -eq 0 ]; then
+	echo "${target}: known_hosts already up to date (${known_hosts})"
+else
+	echo "${target}: added ${added} key(s) to ${known_hosts}"
+fi

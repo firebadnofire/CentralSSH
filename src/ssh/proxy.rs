@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, check_known_hosts_path, load_secret_key};
-use tokio::io::{self, AsyncRead, AsyncWrite};
+use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time;
 
 use crate::error::{CentralSshError, Result};
@@ -97,9 +97,20 @@ where
     let (mut local_reader, mut local_writer) = io::split(stream);
 
     let transfer_future = async {
-        let client_to_target = io::copy(&mut local_reader, &mut upstream_writer);
-        let target_to_client = io::copy(&mut upstream_reader, &mut local_writer);
-        let _ = tokio::try_join!(client_to_target, target_to_client)?;
+        let copy_result = {
+            let client_to_target = io::copy(&mut local_reader, &mut upstream_writer);
+            let target_to_client = io::copy(&mut upstream_reader, &mut local_writer);
+            tokio::pin!(client_to_target);
+            tokio::pin!(target_to_client);
+
+            tokio::select! {
+                result = &mut client_to_target => result,
+                result = &mut target_to_client => result,
+            }
+        };
+
+        let _ = upstream_writer.shutdown().await;
+        let _ = copy_result?;
         Ok::<(), std::io::Error>(())
     };
 

@@ -47,6 +47,7 @@ sudo make install
 `make install`:
 
 - installs binary to `/usr/local/sbin/centralssh`
+- installs helper tool `/usr/local/bin/cssh-keyscan`
 - creates `/etc/centralssh` layout if missing
 - installs default config examples if missing
 - creates `/etc/centralssh/known_hosts` if missing
@@ -100,11 +101,14 @@ CentralSSH reads from `/etc/centralssh/` by default.
       "password": "TemporaryPassword123!",
       "totp_secret": null,
       "must_change_password": true,
-      "allowed_servers": ["git", "httpd"],
-      "remote_users": {
-        "git": "gitdeploy",
-        "httpd": "webops"
-      }
+      "allowed_servers": ["git", "httpd"]
+    },
+    {
+      "name": "bob",
+      "password": "AnotherTempPass123!",
+      "totp_secret": null,
+      "must_change_password": true,
+      "allowed_servers": ["dns"]
     }
   ],
   "settings": {
@@ -118,12 +122,13 @@ CentralSSH reads from `/etc/centralssh/` by default.
 
 Fields:
 
+- `users`: array of user records; add one object per CentralSSH user
 - `users[].name`: CentralSSH login username
 - `users[].password`: Argon2 hash or bootstrap plaintext (migrated at startup)
 - `users[].totp_secret`: base32 TOTP secret, or `null` to force enrollment
 - `users[].must_change_password`: force password change at first successful login
 - `users[].allowed_servers`: list of server names this user can access
-- `users[].remote_users`: optional map of server name -> remote SSH username
+- outbound target SSH username is always the authenticated CentralSSH username
 - `settings.enforce_password_policy`: optional boolean, defaults to `true`; set `false` to disable strict password policy checks during forced password change
 
 ### `servers.json`
@@ -196,6 +201,18 @@ Show CLI help:
 
 ```bash
 /usr/local/sbin/centralssh --help
+```
+
+Populate known_hosts for a target:
+
+```bash
+sudo cssh-keyscan <server IP or domain>
+```
+
+Example:
+
+```bash
+sudo cssh-keyscan 192.168.122.123
 ```
 
 ## Troubleshooting

@@ -36,8 +36,6 @@ pub struct UserRecord {
     pub must_change_password: bool,
     #[serde(default)]
     pub allowed_servers: Vec<String>,
-    #[serde(default)]
-    pub remote_users: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -235,15 +233,6 @@ pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<
                 )));
             }
         }
-
-        for server_name in user.remote_users.keys() {
-            if !servers.servers.contains_key(server_name) {
-                return Err(CentralSshError::InvalidConfig(format!(
-                    "user '{}' has remote_users entry for unknown server '{}'",
-                    user.name, server_name
-                )));
-            }
-        }
     }
 
     Ok(())
@@ -396,7 +385,6 @@ mod tests {
                 totp_secret: Some("abc".to_string()),
                 must_change_password: false,
                 allowed_servers: vec!["git".to_string()],
-                remote_users: HashMap::new(),
             }],
             settings: SettingsConfig::default(),
         };
@@ -420,7 +408,6 @@ mod tests {
                 totp_secret: Some("abc".to_string()),
                 must_change_password: false,
                 allowed_servers: vec!["git".to_string()],
-                remote_users: HashMap::new(),
             }],
             settings: SettingsConfig::default(),
         };

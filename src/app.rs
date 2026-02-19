@@ -351,11 +351,7 @@ where
         };
 
         let (target_name, target_ip) = entries[index].clone();
-        let remote_user = user
-            .remote_users
-            .get(&target_name)
-            .cloned()
-            .unwrap_or_else(|| user.name.clone());
+        let remote_user = user.name.clone();
 
         let private_key_path = state
             .config_store

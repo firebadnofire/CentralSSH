@@ -5,11 +5,14 @@
       "password": "TemporaryPassword123!",
       "totp_secret": null,
       "must_change_password": true,
-      "allowed_servers": ["git", "httpd"],
-      "remote_users": {
-        "git": "gitdeploy",
-        "httpd": "webops"
-      }
+      "allowed_servers": ["git", "httpd"]
+    },
+    {
+      "name": "bob",
+      "password": "AnotherTempPass123!",
+      "totp_secret": null,
+      "must_change_password": true,
+      "allowed_servers": ["dns"]
     }
   ],
   "settings": {

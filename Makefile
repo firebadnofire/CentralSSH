@@ -1,4 +1,5 @@
 APP=centralssh
+KEYSCAN_TOOL=cssh-keyscan
 
 PREFIX?=/usr/local
 SBINDIR?=$(PREFIX)/sbin
@@ -15,7 +16,7 @@ CARGO?=cargo
 INSTALL?=install
 
 .PHONY: all build clean install uninstall \
-	install-bin install-layout install-config install-service \
+	install-bin install-tools install-layout install-config install-service \
 	install-service-freebsd install-service-linux check-build
 
 all: build
@@ -26,7 +27,7 @@ build:
 clean:
 	$(CARGO) clean
 
-install: check-build install-bin install-layout install-config install-service
+install: check-build install-bin install-tools install-layout install-config install-service
 	@echo "Installed $(APP)."
 	@echo "FreeBSD start: service centralssh start"
 	@echo "systemd start: systemctl start centralssh"
@@ -40,6 +41,10 @@ check-build:
 install-bin:
 	$(INSTALL) -d $(DESTDIR)$(SBINDIR)
 	$(INSTALL) -m 0755 target/release/$(APP) $(DESTDIR)$(SBINDIR)/$(APP)
+
+install-tools:
+	$(INSTALL) -d $(DESTDIR)$(BINDIR)
+	$(INSTALL) -m 0755 tools/$(KEYSCAN_TOOL) $(DESTDIR)$(BINDIR)/$(KEYSCAN_TOOL)
 
 install-layout:
 	$(INSTALL) -d -m 0700 $(DESTDIR)$(SYSCONFDIR)/users
@@ -82,5 +87,6 @@ install-service-linux:
 
 uninstall:
 	rm -f $(DESTDIR)$(SBINDIR)/$(APP)
+	rm -f $(DESTDIR)$(BINDIR)/$(KEYSCAN_TOOL)
 	rm -f $(DESTDIR)$(FREEBSD_RC_DIR)/centralssh
 	rm -f $(DESTDIR)$(SYSTEMD_UNIT_DIR)/centralssh.service
