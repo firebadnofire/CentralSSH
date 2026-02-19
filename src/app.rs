@@ -32,6 +32,12 @@ pub struct BootstrapReport {
     pub key_reconciliation: Vec<KeyProvisionResult>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TransportAuthContext {
+    pub username: String,
+    pub totp_verified: bool,
+}
+
 impl AppState {
     pub async fn bootstrap(&self) -> Result<BootstrapReport> {
         let migrated_passwords = self
@@ -89,6 +95,7 @@ pub async fn handle_stream_session<S>(
     mut stream: S,
     state: Arc<AppState>,
     source_ip: IpAddr,
+    transport_auth: Option<TransportAuthContext>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -98,6 +105,24 @@ where
 
     let mut authenticated_user = None;
     let mut attempt_count = 0usize;
+    let mut used_transport_auth = false;
+    let mut totp_verified = false;
+
+    if let Some(transport_auth) = transport_auth {
+        let snapshot = state.config_store.snapshot().await;
+        if let Some(user) = snapshot
+            .config
+            .users
+            .iter()
+            .find(|candidate| candidate.name == transport_auth.username)
+        {
+            authenticated_user = Some(user.clone());
+            totp_verified = transport_auth.totp_verified;
+            used_transport_auth = true;
+        } else {
+            return Err(CentralSshError::AuthenticationFailed);
+        }
+    }
 
     while attempt_count < 5 && authenticated_user.is_none() {
         let username = ui::prompt_line(
@@ -247,6 +272,7 @@ where
                     })
                     .await?;
 
+                totp_verified = true;
                 authenticated_user = Some(user);
             }
             Err(err) => {
@@ -292,6 +318,102 @@ where
         .await?;
         return Err(CentralSshError::AuthenticationFailed);
     };
+
+    if used_transport_auth {
+        let had_totp_before = user.totp_secret.is_some();
+        if let Err(err) = run_first_login_flows_if_needed(
+            &mut stream,
+            state.clone(),
+            &session_id,
+            source_ip,
+            &mut user,
+        )
+        .await
+        {
+            let message = match &err {
+                CentralSshError::InputCanceled => String::new(),
+                CentralSshError::InvalidConfig(reason) => {
+                    format!("\r\nCredential update failed: {reason}\r\n")
+                }
+                CentralSshError::SecurityPolicy { message, .. } => {
+                    format!("\r\nCredential update blocked by security policy: {message}\r\n")
+                }
+                _ => "\r\nCredential update failed. Contact an administrator.\r\n".to_string(),
+            };
+
+            if !message.is_empty() {
+                let _ = ui::write_text(&mut stream, &message).await;
+            }
+
+            return Err(err);
+        }
+
+        let snapshot = state.config_store.snapshot().await;
+        if let Some(fresh_user) = snapshot
+            .config
+            .users
+            .iter()
+            .find(|candidate| candidate.name == user.name)
+        {
+            user = fresh_user.clone();
+        } else {
+            return Err(CentralSshError::AuthorizationDenied);
+        }
+
+        if !had_totp_before && user.totp_secret.is_some() {
+            // TOTP enrollment flow includes successful code verification.
+            totp_verified = true;
+        }
+
+        if !totp_verified {
+            let code = ui::prompt_line(
+                &mut stream,
+                "TOTP Code: ",
+                state.auth.pre_auth_timeout(),
+                16,
+                ui::EchoMode::Hidden,
+            )
+            .await?;
+
+            let secret = user
+                .totp_secret
+                .clone()
+                .ok_or_else(|| CentralSshError::InvalidConfig("missing TOTP secret".to_string()))?;
+
+            if let Err(err) = state.auth.verify_totp_code(&secret, code.trim()) {
+                state
+                    .audit
+                    .log(AuditEvent {
+                        timestamp: Utc::now(),
+                        event_type: "auth_totp".to_string(),
+                        session_id: session_id.clone(),
+                        source_ip: Some(source_ip.to_string()),
+                        username: Some(user.name.clone()),
+                        target_server: None,
+                        result: AuditResult::Failure,
+                        reason_code: Some(err.to_string()),
+                    })
+                    .await?;
+
+                ui::write_text(&mut stream, "\r\nInvalid authentication credentials.\r\n").await?;
+                return Err(CentralSshError::AuthenticationFailed);
+            }
+
+            state
+                .audit
+                .log(AuditEvent {
+                    timestamp: Utc::now(),
+                    event_type: "auth_totp".to_string(),
+                    session_id: session_id.clone(),
+                    source_ip: Some(source_ip.to_string()),
+                    username: Some(user.name.clone()),
+                    target_server: None,
+                    result: AuditResult::Success,
+                    reason_code: None,
+                })
+                .await?;
+        }
+    }
 
     loop {
         let snapshot = state.config_store.snapshot().await;

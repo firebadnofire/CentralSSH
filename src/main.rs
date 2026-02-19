@@ -157,5 +157,11 @@ async fn run() -> Result<()> {
     let probe_listener = std::net::TcpListener::bind(&cli.listen)?;
     drop(probe_listener);
 
-    ssh::run_gateway_server(&cli.listen, &host_key_path, app).await
+    ssh::run_gateway_server(
+        &cli.listen,
+        &host_key_path,
+        app,
+        cli.enforce_strict_security,
+    )
+    .await
 }

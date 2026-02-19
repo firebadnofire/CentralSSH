@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -211,11 +212,19 @@ pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<
         ));
     }
 
+    let mut seen_usernames = HashSet::new();
     for user in &config.users {
-        if user.name.trim().is_empty() {
-            return Err(CentralSshError::InvalidConfig(
-                "user name cannot be empty".to_string(),
-            ));
+        if !is_valid_username(&user.name) {
+            return Err(CentralSshError::InvalidConfig(format!(
+                "invalid user name '{}': use 1-64 chars from [a-zA-Z0-9._-]",
+                user.name
+            )));
+        }
+        if !seen_usernames.insert(user.name.clone()) {
+            return Err(CentralSshError::InvalidConfig(format!(
+                "duplicate user name '{}'",
+                user.name
+            )));
         }
 
         if user.allowed_servers.is_empty() {
@@ -236,6 +245,14 @@ pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<
     }
 
     Ok(())
+}
+
+fn is_valid_username(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 pub fn validate_file_security(
@@ -391,6 +408,61 @@ mod tests {
 
         let servers = ServersFile {
             servers: HashMap::new(),
+        };
+
+        let result = validate_semantics(&config, &servers);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_semantics_rejects_duplicate_usernames() {
+        let config = ConfigFile {
+            users: vec![
+                UserRecord {
+                    name: "alice".to_string(),
+                    password: "$argon2id$dummy".to_string(),
+                    totp_secret: Some("abc".to_string()),
+                    must_change_password: false,
+                    allowed_servers: vec!["git".to_string()],
+                },
+                UserRecord {
+                    name: "alice".to_string(),
+                    password: "$argon2id$dummy2".to_string(),
+                    totp_secret: Some("xyz".to_string()),
+                    must_change_password: false,
+                    allowed_servers: vec!["git".to_string()],
+                },
+            ],
+            settings: SettingsConfig::default(),
+        };
+
+        let mut servers_map = HashMap::new();
+        servers_map.insert("git".to_string(), "192.0.2.10".to_string());
+        let servers = ServersFile {
+            servers: servers_map,
+        };
+
+        let result = validate_semantics(&config, &servers);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_semantics_rejects_invalid_username_chars() {
+        let config = ConfigFile {
+            users: vec![UserRecord {
+                name: "../alice".to_string(),
+                password: "$argon2id$dummy".to_string(),
+                totp_secret: Some("abc".to_string()),
+                must_change_password: false,
+                allowed_servers: vec!["git".to_string()],
+            }],
+            settings: SettingsConfig::default(),
+        };
+
+        let mut servers_map = HashMap::new();
+        servers_map.insert("git".to_string(), "192.0.2.10".to_string());
+        let servers = ServersFile {
+            servers: servers_map,
         };
 
         let result = validate_semantics(&config, &servers);

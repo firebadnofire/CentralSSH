@@ -123,7 +123,7 @@ CentralSSH reads from `/etc/centralssh/` by default.
 Fields:
 
 - `users`: array of user records; add one object per CentralSSH user
-- `users[].name`: CentralSSH login username
+- `users[].name`: CentralSSH login username (`[a-zA-Z0-9._-]`, 1-64 chars)
 - `users[].password`: Argon2 hash or bootstrap plaintext (migrated at startup)
 - `users[].totp_secret`: base32 TOTP secret, or `null` to force enrollment
 - `users[].must_change_password`: force password change at first successful login
@@ -214,6 +214,12 @@ Example:
 ```bash
 sudo cssh-keyscan 192.168.122.123
 ```
+
+`cssh-keyscan` behavior:
+
+- New host: shows a TOFU confirmation dialog before writing keys.
+- New host with key overlap: TOFU dialog lists overlapping existing hostnames for matching key material.
+- Existing host: if scanned keys include any new key not already trusted for that host, it halts immediately and refuses to modify `known_hosts`.
 
 ## Troubleshooting
 

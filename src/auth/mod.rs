@@ -20,6 +20,12 @@ const DUMMY_PASSWORD: &str = "centralssh-dummy-password";
 const DEFAULT_TOTP_DIGITS: usize = 6;
 const DEFAULT_TOTP_PERIOD: u64 = 30;
 const DEFAULT_TOTP_SKEW: u8 = 1;
+const USER_RATE_LIMIT_CAPACITY: f64 = 10.0;
+const USER_RATE_LIMIT_REFILL_PER_SEC: f64 = 1.0 / 30.0;
+const IP_RATE_LIMIT_CAPACITY: f64 = 30.0;
+const IP_RATE_LIMIT_REFILL_PER_SEC: f64 = 1.0;
+const RATE_LIMIT_MAX_ENTRIES: usize = 8192;
+const RATE_LIMIT_IDLE_TTL: Duration = Duration::from_secs(60 * 30);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RateLimitKey {
@@ -71,6 +77,7 @@ impl TokenBucket {
 pub struct AuthEngine {
     argon2: Argon2<'static>,
     rate_limits: std::sync::Arc<Mutex<HashMap<RateLimitKey, TokenBucket>>>,
+    ip_rate_limits: std::sync::Arc<Mutex<HashMap<IpAddr, TokenBucket>>>,
     dummy_hash: std::sync::Arc<String>,
 }
 
@@ -85,6 +92,7 @@ impl AuthEngine {
         Ok(Self {
             argon2,
             rate_limits: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            ip_rate_limits: std::sync::Arc::new(Mutex::new(HashMap::new())),
             dummy_hash: std::sync::Arc::new(dummy_hash),
         })
     }
@@ -106,16 +114,41 @@ impl AuthEngine {
     }
 
     pub async fn consume_rate_limit_token(&self, ip: IpAddr, username: &str) -> Result<()> {
+        self.consume_ip_rate_limit_token(ip).await?;
+
         let key = RateLimitKey {
             ip,
             username: username.to_ascii_lowercase(),
         };
 
+        let now = Instant::now();
         let mut guard = self.rate_limits.lock().await;
-        let bucket = guard
-            .entry(key)
-            .or_insert_with(|| TokenBucket::new(10.0, 1.0 / 30.0));
+        prune_buckets(&mut guard, now);
+        if !guard.contains_key(&key) && guard.len() >= RATE_LIMIT_MAX_ENTRIES {
+            return Err(CentralSshError::RateLimitExceeded);
+        }
+        let bucket = guard.entry(key).or_insert_with(|| {
+            TokenBucket::new(USER_RATE_LIMIT_CAPACITY, USER_RATE_LIMIT_REFILL_PER_SEC)
+        });
 
+        if bucket.consume_one() {
+            Ok(())
+        } else {
+            Err(CentralSshError::RateLimitExceeded)
+        }
+    }
+
+    async fn consume_ip_rate_limit_token(&self, ip: IpAddr) -> Result<()> {
+        let now = Instant::now();
+        let mut guard = self.ip_rate_limits.lock().await;
+        prune_buckets(&mut guard, now);
+        if !guard.contains_key(&ip) && guard.len() >= RATE_LIMIT_MAX_ENTRIES {
+            return Err(CentralSshError::RateLimitExceeded);
+        }
+
+        let bucket = guard.entry(ip).or_insert_with(|| {
+            TokenBucket::new(IP_RATE_LIMIT_CAPACITY, IP_RATE_LIMIT_REFILL_PER_SEC)
+        });
         if bucket.consume_one() {
             Ok(())
         } else {
@@ -262,6 +295,13 @@ fn secure_username_match(left: &str, right: &str) -> bool {
     }
 
     constant_time_eq::constant_time_eq(left.as_bytes(), right.as_bytes())
+}
+
+fn prune_buckets<K>(buckets: &mut HashMap<K, TokenBucket>, now: Instant)
+where
+    K: std::hash::Hash + Eq,
+{
+    buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) <= RATE_LIMIT_IDLE_TTL);
 }
 
 #[cfg(test)]

@@ -1,18 +1,19 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use russh::server::{self, Auth, Msg, Server as _, Session};
-use russh::{Channel, ChannelId};
+use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use ssh_key::{LineEnding, PrivateKey};
 use tracing::{error, warn};
 
-use crate::app::AppState;
+use crate::app::{AppState, TransportAuthContext};
 use crate::error::{CentralSshError, Result};
 
 pub mod proxy;
@@ -27,6 +28,21 @@ struct GatewayHandler {
     state: Arc<AppState>,
     peer_ip: IpAddr,
     pending_session_channels: Arc<tokio::sync::Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    keyboard_auth_state: Option<KeyboardAuthState>,
+    transport_authenticated_username: Option<String>,
+    transport_totp_verified: bool,
+}
+
+#[derive(Debug, Clone)]
+enum KeyboardAuthState {
+    AwaitUsername,
+    AwaitPassword {
+        username: String,
+    },
+    AwaitTotp {
+        username: String,
+        totp_secret: String,
+    },
 }
 
 impl GatewayServer {
@@ -45,6 +61,30 @@ impl server::Server for GatewayServer {
                 .map(|address| address.ip())
                 .unwrap_or(IpAddr::from([0, 0, 0, 0])),
             pending_session_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            keyboard_auth_state: None,
+            transport_authenticated_username: None,
+            transport_totp_verified: false,
+        }
+    }
+}
+
+impl GatewayHandler {
+    fn keyboard_interactive_methods() -> MethodSet {
+        MethodSet::from(&[MethodKind::KeyboardInteractive][..])
+    }
+
+    fn reject_to_keyboard_interactive() -> Auth {
+        Auth::Reject {
+            proceed_with_methods: Some(Self::keyboard_interactive_methods()),
+            partial_success: false,
+        }
+    }
+
+    fn keyboard_prompt(prompt: &'static str, echo: bool) -> Auth {
+        Auth::Partial {
+            name: Cow::Borrowed("CentralSSH Gateway"),
+            instructions: Cow::Borrowed(""),
+            prompts: Cow::Owned(vec![(Cow::Borrowed(prompt), echo)]),
         }
     }
 }
@@ -53,9 +93,7 @@ impl server::Handler for GatewayHandler {
     type Error = russh::Error;
 
     async fn auth_none(&mut self, _user: &str) -> std::result::Result<Auth, Self::Error> {
-        // Transport authentication is intentionally minimal. CentralSSH performs
-        // all credential checks through the internal login flow before access.
-        Ok(Auth::Accept)
+        Ok(Self::reject_to_keyboard_interactive())
     }
 
     async fn auth_publickey(
@@ -74,7 +112,102 @@ impl server::Handler for GatewayHandler {
         _user: &str,
         _password: &str,
     ) -> std::result::Result<Auth, Self::Error> {
-        Ok(Auth::Accept)
+        Ok(Self::reject_to_keyboard_interactive())
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        _user: &str,
+        _submethods: &str,
+        response: Option<server::Response<'a>>,
+    ) -> std::result::Result<Auth, Self::Error> {
+        if self.transport_authenticated_username.is_some() {
+            return Ok(Auth::Accept);
+        }
+
+        let Some(mut response) = response else {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitUsername);
+            return Ok(Self::keyboard_prompt("Username: ", true));
+        };
+
+        let response_text = response
+            .next()
+            .map(|value| String::from_utf8_lossy(value.as_ref()).trim().to_string())
+            .unwrap_or_default();
+
+        match self
+            .keyboard_auth_state
+            .clone()
+            .unwrap_or(KeyboardAuthState::AwaitUsername)
+        {
+            KeyboardAuthState::AwaitUsername => {
+                if response_text.is_empty() {
+                    self.keyboard_auth_state = Some(KeyboardAuthState::AwaitUsername);
+                    return Ok(Self::keyboard_prompt("Username: ", true));
+                }
+                self.keyboard_auth_state = Some(KeyboardAuthState::AwaitPassword {
+                    username: response_text,
+                });
+                Ok(Self::keyboard_prompt("Password: ", false))
+            }
+            KeyboardAuthState::AwaitPassword { username } => {
+                if self
+                    .state
+                    .auth
+                    .consume_rate_limit_token(self.peer_ip, &username)
+                    .await
+                    .is_err()
+                {
+                    self.keyboard_auth_state = None;
+                    return Ok(Self::reject_to_keyboard_interactive());
+                }
+
+                let snapshot = self.state.config_store.snapshot().await;
+                match self.state.auth.verify_password_constant_time(
+                    &snapshot.config.users,
+                    &username,
+                    response_text.as_str(),
+                ) {
+                    Ok(user) => {
+                        if let Some(totp_secret) = user.totp_secret.clone() {
+                            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitTotp {
+                                username: user.name.clone(),
+                                totp_secret,
+                            });
+                            Ok(Self::keyboard_prompt("TOTP Code: ", false))
+                        } else {
+                            self.transport_authenticated_username = Some(user.name);
+                            self.transport_totp_verified = false;
+                            self.keyboard_auth_state = None;
+                            Ok(Auth::Accept)
+                        }
+                    }
+                    Err(_) => {
+                        self.keyboard_auth_state = None;
+                        Ok(Self::reject_to_keyboard_interactive())
+                    }
+                }
+            }
+            KeyboardAuthState::AwaitTotp {
+                username,
+                totp_secret,
+            } => {
+                if self
+                    .state
+                    .auth
+                    .verify_totp_code(&totp_secret, response_text.as_str())
+                    .is_ok()
+                {
+                    self.transport_authenticated_username = Some(username);
+                    self.transport_totp_verified = true;
+                    self.keyboard_auth_state = None;
+                    Ok(Auth::Accept)
+                } else {
+                    self.keyboard_auth_state = None;
+                    Ok(Self::reject_to_keyboard_interactive())
+                }
+            }
+        }
     }
 
     async fn channel_open_session(
@@ -121,9 +254,18 @@ impl server::Handler for GatewayHandler {
         let stream = channel_handle.into_stream();
         let state = self.state.clone();
         let source_ip = self.peer_ip;
+        let transport_auth = self
+            .transport_authenticated_username
+            .as_ref()
+            .map(|username| TransportAuthContext {
+                username: username.clone(),
+                totp_verified: self.transport_totp_verified,
+            });
 
         tokio::spawn(async move {
-            if let Err(err) = crate::app::handle_stream_session(stream, state, source_ip).await {
+            if let Err(err) =
+                crate::app::handle_stream_session(stream, state, source_ip, transport_auth).await
+            {
                 if matches!(err, crate::error::CentralSshError::InputCanceled) {
                     return;
                 }
@@ -179,10 +321,15 @@ pub async fn run_gateway_server(
     listen_addr: &str,
     host_key_path: &Path,
     state: Arc<AppState>,
+    strict_security: bool,
 ) -> Result<()> {
     ensure_server_host_key(host_key_path)?;
+    if strict_security {
+        validate_host_key_security(host_key_path)?;
+    }
 
     let mut config = server::Config::default();
+    config.methods = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
     config.auth_rejection_time = Duration::from_secs(3);
 
     let host_key = russh::keys::load_secret_key(host_key_path, None)
@@ -229,5 +376,38 @@ fn ensure_server_host_key(path: &Path) -> Result<()> {
     file.write_all(encoded.as_bytes())?;
     file.sync_all()?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn validate_host_key_security(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CentralSshError::SecurityPolicy {
+            path: path.to_path_buf(),
+            message: "host key path must not be a symlink".to_string(),
+        });
+    }
+    if !metadata.is_file() {
+        return Err(CentralSshError::SecurityPolicy {
+            path: path.to_path_buf(),
+            message: "host key path is not a regular file".to_string(),
+        });
+    }
+
+    let mode = metadata.mode() & 0o777;
+    if mode != 0o600 {
+        return Err(CentralSshError::SecurityPolicy {
+            path: path.to_path_buf(),
+            message: format!("host key mode must be 600, found {:o}", mode),
+        });
+    }
+
+    if metadata.uid() != 0 {
+        return Err(CentralSshError::SecurityPolicy {
+            path: path.to_path_buf(),
+            message: format!("host key owner uid must be 0, found {}", metadata.uid()),
+        });
+    }
+
     Ok(())
 }

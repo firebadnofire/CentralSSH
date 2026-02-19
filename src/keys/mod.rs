@@ -36,6 +36,13 @@ pub fn reconcile_user_keys(
 }
 
 pub fn ensure_user_keypair(user_key_root: &Path, username: &str) -> Result<KeyProvisionResult> {
+    if !is_safe_username_component(username) {
+        return Err(CentralSshError::InvalidConfig(format!(
+            "invalid username '{}' for key provisioning",
+            username
+        )));
+    }
+
     let user_dir = user_key_root.join(username);
     let private_key_path = user_dir.join("id_ed25519");
     let public_key_path = user_dir.join("id_ed25519.pub");
@@ -107,4 +114,16 @@ fn enforce_key_permissions(private_key_path: &Path, public_key_path: &Path) -> R
     fs::set_permissions(private_key_path, fs::Permissions::from_mode(0o600))?;
     fs::set_permissions(public_key_path, fs::Permissions::from_mode(0o644))?;
     Ok(())
+}
+
+fn is_safe_username_component(username: &str) -> bool {
+    if username.is_empty() {
+        return false;
+    }
+    if username.contains('/') || username.contains('\\') || username == "." || username == ".." {
+        return false;
+    }
+    Path::new(username)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
 }

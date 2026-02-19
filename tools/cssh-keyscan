@@ -21,51 +21,150 @@ fi
 
 target="$1"
 
-if ! command -v ssh-keyscan >/dev/null 2>&1; then
-	echo "${prog}: ssh-keyscan is required but not found in PATH." >&2
+if ! command -v ssh-keyscan >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+	echo "${prog}: ssh-keyscan and ssh-keygen are required but not found in PATH." >&2
 	exit 1
 fi
 
 parent_dir="$(dirname "${known_hosts}")"
 mkdir -p "${parent_dir}"
 
-tmp_file="$(mktemp "${known_hosts}.tmp.XXXXXX")"
+base_file="$(mktemp "${known_hosts}.base.XXXXXX")"
+raw_scan_file="$(mktemp "${known_hosts}.rawscan.XXXXXX")"
 scan_file="$(mktemp "${known_hosts}.scan.XXXXXX")"
+target_existing_file="$(mktemp "${known_hosts}.target-existing.XXXXXX")"
+result_file="$(mktemp "${known_hosts}.result.XXXXXX")"
 
 cleanup() {
-	rm -f "${tmp_file}" "${scan_file}"
+	rm -f "${base_file}" "${raw_scan_file}" "${scan_file}" "${target_existing_file}" "${result_file}"
 }
 trap cleanup EXIT INT TERM HUP
 
 if [ -f "${known_hosts}" ]; then
-	cat "${known_hosts}" > "${tmp_file}"
+	cat "${known_hosts}" > "${base_file}"
 else
-	: > "${tmp_file}"
+	: > "${base_file}"
 fi
 
-if ! ssh-keyscan -T 5 -t ed25519,rsa,ecdsa "${target}" > "${scan_file}" 2>/dev/null; then
-	if [ ! -s "${scan_file}" ]; then
+if ! ssh-keyscan -q -T 5 -t ed25519,rsa,ecdsa "${target}" > "${raw_scan_file}" 2>/dev/null; then
+	if [ ! -s "${raw_scan_file}" ]; then
 		echo "${prog}: failed to fetch host keys from '${target}'." >&2
 		exit 1
 	fi
 fi
+
+# Keep only real known_hosts key rows; discard comments/protocol banners.
+awk '
+NF >= 3 &&
+$1 !~ /^#/ &&
+$2 ~ /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)$/ {
+	print
+}
+' "${raw_scan_file}" > "${scan_file}"
 
 if [ ! -s "${scan_file}" ]; then
 	echo "${prog}: no supported host keys returned by '${target}'." >&2
 	exit 1
 fi
 
+sort -u "${scan_file}" -o "${scan_file}"
+
+awk -v target="${target}" '
+function match_target(hostfield, tgt,    i, n, alt, hosts) {
+  alt = "[" tgt "]:22"
+  n = split(hostfield, hosts, ",")
+  for (i = 1; i <= n; i++) {
+    if (hosts[i] == tgt || hosts[i] == alt) {
+      return 1
+    }
+  }
+  return 0
+}
+match_target($1, target) { print }
+' "${base_file}" > "${target_existing_file}"
+
+if [ -s "${target_existing_file}" ]; then
+	while IFS= read -r key_line; do
+		[ -n "${key_line}" ] || continue
+		key_type="$(printf '%s\n' "${key_line}" | awk '{print $2}')"
+		key_blob="$(printf '%s\n' "${key_line}" | awk '{print $3}')"
+
+		if ! awk -v t="${key_type}" -v k="${key_blob}" '
+			$2 == t && $3 == k { found = 1 }
+			END { exit(found ? 0 : 1) }
+		' "${target_existing_file}"; then
+			echo "${prog}: SECURITY ALERT: host '${target}' presented a new ${key_type} key." >&2
+			echo "${prog}: refusing update because '${target}' is already present in ${known_hosts}." >&2
+			echo "${prog}: investigate key rotation or possible MITM before modifying known_hosts." >&2
+			exit 1
+		fi
+	done < "${scan_file}"
+
+	echo "${target}: known host keys already trusted (${known_hosts})"
+	exit 0
+fi
+
+if [ ! -t 0 ]; then
+	echo "${prog}: TOFU confirmation required for new host '${target}' (interactive terminal required)." >&2
+	exit 1
+fi
+
+echo "TOFU review for '${target}'"
+echo "No existing known_hosts entry for this host."
+echo ""
+echo "Observed host keys:"
+
+idx=0
+while IFS= read -r key_line; do
+	[ -n "${key_line}" ] || continue
+	idx=$((idx + 1))
+
+	key_type="$(printf '%s\n' "${key_line}" | awk '{print $2}')"
+	key_blob="$(printf '%s\n' "${key_line}" | awk '{print $3}')"
+	fingerprint="$(printf '%s\n' "${key_line}" | ssh-keygen -lf - 2>/dev/null | awk '{print $2" "$4}' || true)"
+	[ -n "${fingerprint}" ] || fingerprint="fingerprint unavailable"
+
+	overlap_hosts="$(
+		awk -v t="${key_type}" -v k="${key_blob}" '
+			$2 == t && $3 == k {
+				n = split($1, hosts, ",")
+				for (i = 1; i <= n; i++) {
+					print hosts[i]
+				}
+			}
+		' "${base_file}" | sort -u | paste -sd "," -
+	)"
+
+	echo "  [${idx}] ${key_type} ${fingerprint}"
+	if [ -n "${overlap_hosts}" ]; then
+		echo "      overlaps existing host entries: ${overlap_hosts}"
+	fi
+done < "${scan_file}"
+
+echo ""
+printf "Accept and add these keys to %s? [y/N]: " "${known_hosts}"
+IFS= read -r answer
+case "${answer}" in
+	y|Y|yes|YES)
+		;;
+	*)
+		echo "${prog}: aborted by user."
+		exit 1
+		;;
+esac
+
+cat "${base_file}" > "${result_file}"
 added=0
 while IFS= read -r key_line; do
 	[ -n "${key_line}" ] || continue
-	if ! grep -Fqx "${key_line}" "${tmp_file}"; then
-		printf '%s\n' "${key_line}" >> "${tmp_file}"
+	if ! grep -Fqx "${key_line}" "${result_file}"; then
+		printf '%s\n' "${key_line}" >> "${result_file}"
 		added=$((added + 1))
 	fi
 done < "${scan_file}"
 
-chmod 0600 "${tmp_file}"
-mv "${tmp_file}" "${known_hosts}"
+chmod 0600 "${result_file}"
+mv "${result_file}" "${known_hosts}"
 
 if [ "${added}" -eq 0 ]; then
 	echo "${target}: known_hosts already up to date (${known_hosts})"
