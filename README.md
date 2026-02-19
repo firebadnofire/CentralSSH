@@ -209,15 +209,28 @@ Populate known_hosts for a target:
 sudo cssh-keyscan <server IP or domain>
 ```
 
-Example:
+Example (interactive TOFU):
 
 ```bash
 sudo cssh-keyscan 192.168.122.123
 ```
 
+Example (scriptable with known key blob):
+
+```bash
+sudo cssh-keyscan 192.168.122.123 'AAAAC3NzaC1lZDI1NTE5AAAAIHiKldTfYnX3R0tRkMA6Xy1z9NJ+IGp8H7wQy2kCoGM/'
+```
+
+Example (scriptable with typed fingerprint):
+
+```bash
+sudo cssh-keyscan 192.168.122.123 'ssh-ed25519 SHA256:FXTNTbOFUWoYI7C4ND351UCvqSY8fhafJsjqqxInbUo'
+```
+
 `cssh-keyscan` behavior:
 
 - New host: shows a TOFU confirmation dialog before writing keys.
+- New host with an expected key/fingerprint argument: requires at least one scanned key to match, then skips TOFU prompt and writes keys (supports raw blob, fingerprint-only, `type + blob`, and `type + fingerprint`).
 - New host with key overlap: TOFU dialog lists overlapping existing hostnames for matching key material.
 - Existing host: if scanned keys include any new key not already trusted for that host, it halts immediately and refuses to modify `known_hosts`.
 
