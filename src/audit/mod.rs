@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
+use crate::config::validate_path_has_no_symlinks;
 use crate::error::{CentralSshError, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,8 +39,23 @@ pub struct AuditLogger {
 
 impl AuditLogger {
     pub fn new(path: PathBuf, enforce_strict_security: bool) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = path.parent().ok_or_else(|| {
+            CentralSshError::InvalidConfig(format!(
+                "audit log path has no parent: {}",
+                path.display()
+            ))
+        })?;
+        validate_path_has_no_symlinks(parent)?;
+
+        fs::create_dir_all(parent)?;
+
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() {
+                return Err(CentralSshError::SecurityPolicy {
+                    path: path.clone(),
+                    message: "audit log path must not be a symlink".to_string(),
+                });
+            }
         }
 
         let file = OpenOptions::new()
@@ -52,6 +68,8 @@ impl AuditLogger {
 
         if enforce_strict_security {
             validate_audit_file_security(&path)?;
+        } else {
+            validate_path_has_no_symlinks(&path)?;
         }
 
         Ok(Self {
@@ -74,9 +92,22 @@ impl AuditLogger {
 }
 
 fn validate_audit_file_security(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)?;
-    let mode = metadata.mode() & 0o777;
+    validate_path_has_no_symlinks(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CentralSshError::SecurityPolicy {
+            path: path.to_path_buf(),
+            message: "audit log path must not be a symlink".to_string(),
+        });
+    }
+    if !metadata.is_file() {
+        return Err(CentralSshError::SecurityPolicy {
+            path: path.to_path_buf(),
+            message: "audit log path is not a regular file".to_string(),
+        });
+    }
 
+    let mode = metadata.mode() & 0o777;
     if mode != 0o600 {
         return Err(CentralSshError::SecurityPolicy {
             path: path.to_path_buf(),

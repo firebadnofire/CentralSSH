@@ -2,16 +2,14 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use crate::config::UserRecord;
+use crate::error::{CentralSshError, Result};
 use argon2::password_hash::rand_core::RngCore;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base32::Alphabet;
 use tokio::sync::Mutex;
 use totp_rs::{Algorithm as TotpAlgorithm, Secret, TOTP};
-use zeroize::Zeroizing;
-
-use crate::config::UserRecord;
-use crate::error::{CentralSshError, Result};
 
 const ARGON_MEMORY_KIB: u32 = 65_536;
 const ARGON_ITERATIONS: u32 = 3;
@@ -267,22 +265,6 @@ impl AuthEngine {
         )
         .map_err(|e| CentralSshError::InvalidConfig(format!("failed to build totp: {e}")))?;
         Ok(totp.get_url())
-    }
-
-    pub fn zeroize_password(password: String) -> Zeroizing<String> {
-        Zeroizing::new(password)
-    }
-
-    pub fn pre_auth_timeout(&self) -> Duration {
-        Duration::from_secs(60)
-    }
-
-    pub fn menu_timeout(&self) -> Duration {
-        Duration::from_secs(60 * 10)
-    }
-
-    pub fn proxy_idle_timeout(&self) -> Duration {
-        Duration::from_secs(60 * 30)
     }
 }
 

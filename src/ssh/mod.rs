@@ -1,19 +1,21 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use russh::server::{self, Auth, Msg, Server as _, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig};
 use ssh_key::{LineEnding, PrivateKey};
 use tracing::{error, warn};
+use zeroize::Zeroizing;
 
-use crate::app::{AppState, TransportAuthContext};
+use crate::app::AppState;
+use crate::audit::{AuditEvent, AuditResult};
+use crate::config::UserRecord;
 use crate::error::{CentralSshError, Result};
 
 pub mod proxy;
@@ -23,25 +25,43 @@ struct GatewayServer {
     state: Arc<AppState>,
 }
 
-#[derive(Clone)]
 struct GatewayHandler {
     state: Arc<AppState>,
     peer_ip: IpAddr,
-    pending_session_channels: Arc<tokio::sync::Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    session_id: String,
     keyboard_auth_state: Option<KeyboardAuthState>,
-    transport_authenticated_username: Option<String>,
-    transport_totp_verified: bool,
+    authenticated_username: Option<String>,
+    pending_target: Option<proxy::SelectedTarget>,
+    proxy_session: Option<proxy::ProxySession>,
 }
 
-#[derive(Debug, Clone)]
+struct PendingAuthContext {
+    user: UserRecord,
+    new_password_hash: Option<String>,
+}
+
 enum KeyboardAuthState {
-    AwaitUsername,
     AwaitPassword {
         username: String,
     },
-    AwaitTotp {
-        username: String,
-        totp_secret: String,
+    AwaitNewPassword {
+        context: PendingAuthContext,
+        enforce_password_policy: bool,
+    },
+    AwaitConfirmPassword {
+        context: PendingAuthContext,
+        enforce_password_policy: bool,
+        candidate_password: Zeroizing<String>,
+    },
+    AwaitExistingTotp {
+        context: PendingAuthContext,
+    },
+    AwaitEnrollmentTotp {
+        context: PendingAuthContext,
+        secret: String,
+    },
+    AwaitSelection {
+        context: PendingAuthContext,
     },
 }
 
@@ -60,10 +80,11 @@ impl server::Server for GatewayServer {
             peer_ip: peer_addr
                 .map(|address| address.ip())
                 .unwrap_or(IpAddr::from([0, 0, 0, 0])),
-            pending_session_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_id: uuid::Uuid::new_v4().to_string(),
             keyboard_auth_state: None,
-            transport_authenticated_username: None,
-            transport_totp_verified: false,
+            authenticated_username: None,
+            pending_target: None,
+            proxy_session: None,
         }
     }
 }
@@ -80,12 +101,489 @@ impl GatewayHandler {
         }
     }
 
-    fn keyboard_prompt(prompt: &'static str, echo: bool) -> Auth {
+    fn keyboard_prompt(instructions: String, prompt: &'static str, echo: bool) -> Auth {
         Auth::Partial {
             name: Cow::Borrowed("CentralSSH Gateway"),
-            instructions: Cow::Borrowed(""),
+            instructions: Cow::Owned(instructions),
             prompts: Cow::Owned(vec![(Cow::Borrowed(prompt), echo)]),
         }
+    }
+
+    fn password_prompt(username: &str) -> Auth {
+        Self::keyboard_prompt(
+            format!("CentralSSH Gateway\nUser: {username}\n"),
+            "Password: ",
+            false,
+        )
+    }
+
+    fn new_password_prompt(username: &str, message: Option<&str>) -> Auth {
+        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        if let Some(message) = message {
+            instructions.push('\n');
+            instructions.push_str(message);
+            instructions.push('\n');
+        }
+        instructions.push_str("\nPassword change required before target access.\n");
+        Self::keyboard_prompt(instructions, "New password: ", false)
+    }
+
+    fn confirm_password_prompt(username: &str) -> Auth {
+        Self::keyboard_prompt(
+            format!("CentralSSH Gateway\nUser: {username}\n\nConfirm your new password.\n"),
+            "Confirm password: ",
+            false,
+        )
+    }
+
+    fn totp_prompt(username: &str, message: Option<&str>) -> Auth {
+        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        if let Some(message) = message {
+            instructions.push('\n');
+            instructions.push_str(message);
+            instructions.push('\n');
+        }
+        instructions.push_str("\nEnter the current TOTP code.\n");
+        Self::keyboard_prompt(instructions, "TOTP Code: ", false)
+    }
+
+    fn enrollment_prompt(username: &str, secret: &str, url: &str, message: Option<&str>) -> Auth {
+        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        if let Some(message) = message {
+            instructions.push('\n');
+            instructions.push_str(message);
+            instructions.push('\n');
+        }
+        instructions.push_str(
+            "\nTOTP enrollment is required before target access.\n\
+Add this account to your authenticator app and enter the resulting code.\n\n",
+        );
+        instructions.push_str("Secret: ");
+        instructions.push_str(secret);
+        instructions.push('\n');
+        instructions.push_str("URI: ");
+        instructions.push_str(url);
+        instructions.push('\n');
+        Self::keyboard_prompt(instructions, "Verification code: ", false)
+    }
+
+    async fn selection_prompt(&self, username: &str, error_message: Option<&str>) -> Result<Auth> {
+        let entries = self.allowed_server_entries(username).await?;
+        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        if let Some(message) = error_message {
+            instructions.push('\n');
+            instructions.push_str(message);
+            instructions.push('\n');
+        }
+        instructions.push_str("\nSelect a server:\n\n");
+        for (index, (name, host)) in entries.iter().enumerate() {
+            instructions.push_str(&format!("{} ) {} ({})\n", index + 1, name, host));
+        }
+
+        Ok(Self::keyboard_prompt(
+            instructions,
+            "Enter selection: ",
+            true,
+        ))
+    }
+
+    async fn allowed_server_entries(&self, username: &str) -> Result<Vec<(String, String)>> {
+        let snapshot = self.state.config_store.snapshot().await;
+        let user = snapshot
+            .config
+            .users
+            .iter()
+            .find(|candidate| candidate.name == username)
+            .ok_or(CentralSshError::AuthorizationDenied)?;
+
+        let entries = user
+            .allowed_servers
+            .iter()
+            .filter_map(|server_name| {
+                snapshot
+                    .servers
+                    .servers
+                    .get(server_name)
+                    .map(|host| (server_name.clone(), host.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        if entries.is_empty() {
+            return Err(CentralSshError::AuthorizationDenied);
+        }
+
+        Ok(entries)
+    }
+
+    async fn log_event(
+        &self,
+        event_type: &str,
+        username: Option<&str>,
+        target_server: Option<&str>,
+        result: AuditResult,
+        reason_code: Option<String>,
+    ) {
+        let _ = self
+            .state
+            .audit
+            .log(AuditEvent {
+                timestamp: Utc::now(),
+                event_type: event_type.to_string(),
+                session_id: self.session_id.clone(),
+                source_ip: Some(self.peer_ip.to_string()),
+                username: username.map(ToOwned::to_owned),
+                target_server: target_server.map(ToOwned::to_owned),
+                result,
+                reason_code,
+            })
+            .await;
+    }
+
+    async fn handle_password_response(
+        &mut self,
+        username: String,
+        password: String,
+    ) -> std::result::Result<Auth, russh::Error> {
+        if let Err(error) = self
+            .state
+            .auth
+            .consume_rate_limit_token(self.peer_ip, &username)
+            .await
+        {
+            self.log_event(
+                "auth_attempt",
+                Some(&username),
+                None,
+                AuditResult::Blocked,
+                Some(error.to_string()),
+            )
+            .await;
+            return Ok(Self::reject_to_keyboard_interactive());
+        }
+
+        let snapshot = self.state.config_store.snapshot().await;
+        match self.state.auth.verify_password_constant_time(
+            &snapshot.config.users,
+            &username,
+            password.as_str(),
+        ) {
+            Ok(user) => {
+                self.log_event(
+                    "auth_password",
+                    Some(&username),
+                    None,
+                    AuditResult::Success,
+                    None,
+                )
+                .await;
+
+                let context = PendingAuthContext {
+                    user,
+                    new_password_hash: None,
+                };
+
+                if context.user.must_change_password {
+                    self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
+                        context,
+                        enforce_password_policy: snapshot
+                            .config
+                            .settings
+                            .enforce_password_policy
+                            .unwrap_or(true),
+                    });
+                    Ok(Self::new_password_prompt(&username, None))
+                } else if context.user.totp_secret.is_some() {
+                    self.keyboard_auth_state =
+                        Some(KeyboardAuthState::AwaitExistingTotp { context });
+                    Ok(Self::totp_prompt(&username, None))
+                } else {
+                    let secret = self.state.auth.generate_totp_secret();
+                    let url = self
+                        .state
+                        .auth
+                        .otpauth_url("CentralSSH", &username, &secret)
+                        .map_err(|error| {
+                            russh::Error::IO(std::io::Error::other(error.to_string()))
+                        })?;
+                    self.keyboard_auth_state = Some(KeyboardAuthState::AwaitEnrollmentTotp {
+                        context,
+                        secret: secret.clone(),
+                    });
+                    Ok(Self::enrollment_prompt(&username, &secret, &url, None))
+                }
+            }
+            Err(error) => {
+                self.log_event(
+                    "auth_attempt",
+                    Some(&username),
+                    None,
+                    AuditResult::Failure,
+                    Some(error.to_string()),
+                )
+                .await;
+                Ok(Self::reject_to_keyboard_interactive())
+            }
+        }
+    }
+
+    async fn handle_new_password_response(
+        &mut self,
+        context: PendingAuthContext,
+        enforce_password_policy: bool,
+        new_password: String,
+    ) -> std::result::Result<Auth, russh::Error> {
+        let username = context.user.name.clone();
+        self.keyboard_auth_state = Some(KeyboardAuthState::AwaitConfirmPassword {
+            candidate_password: Zeroizing::new(new_password),
+            context,
+            enforce_password_policy,
+        });
+        Ok(Self::confirm_password_prompt(&username))
+    }
+
+    async fn handle_confirm_password_response(
+        &mut self,
+        mut context: PendingAuthContext,
+        enforce_password_policy: bool,
+        candidate_password: Zeroizing<String>,
+        confirmation: String,
+    ) -> std::result::Result<Auth, russh::Error> {
+        let username = context.user.name.clone();
+
+        if candidate_password.as_str() != confirmation {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
+                context,
+                enforce_password_policy,
+            });
+            return Ok(Self::new_password_prompt(
+                &username,
+                Some("Passwords do not match."),
+            ));
+        }
+
+        let new_password = candidate_password.trim();
+        if enforce_password_policy {
+            if let Err(error) = self
+                .state
+                .auth
+                .enforce_password_policy(new_password, &context.user.password)
+            {
+                let message = match error {
+                    CentralSshError::InvalidConfig(message) => message,
+                    other => other.to_string(),
+                };
+                self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
+                    context,
+                    enforce_password_policy,
+                });
+                return Ok(Self::new_password_prompt(&username, Some(&message)));
+            }
+        } else if new_password.is_empty() {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
+                context,
+                enforce_password_policy,
+            });
+            return Ok(Self::new_password_prompt(
+                &username,
+                Some("Password must not be empty."),
+            ));
+        }
+
+        context.new_password_hash = Some(
+            self.state
+                .auth
+                .hash_password(new_password)
+                .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?,
+        );
+
+        if context.user.totp_secret.is_some() {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitExistingTotp { context });
+            Ok(Self::totp_prompt(&username, None))
+        } else {
+            let secret = self.state.auth.generate_totp_secret();
+            let url = self
+                .state
+                .auth
+                .otpauth_url("CentralSSH", &username, &secret)
+                .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitEnrollmentTotp {
+                context,
+                secret: secret.clone(),
+            });
+            Ok(Self::enrollment_prompt(&username, &secret, &url, None))
+        }
+    }
+
+    async fn commit_pending_updates(
+        &mut self,
+        context: &mut PendingAuthContext,
+        new_totp_secret: Option<String>,
+    ) -> std::result::Result<(), russh::Error> {
+        let new_password_hash = context.new_password_hash.clone();
+        self.state
+            .config_store
+            .update_user_credentials(
+                &context.user.name,
+                new_password_hash.clone(),
+                new_totp_secret.clone(),
+                Some(false),
+            )
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+
+        if let Some(password_hash) = new_password_hash {
+            context.user.password = password_hash;
+            context.user.must_change_password = false;
+            self.log_event(
+                "password_change",
+                Some(&context.user.name),
+                None,
+                AuditResult::Success,
+                None,
+            )
+            .await;
+        }
+
+        if let Some(secret) = new_totp_secret {
+            context.user.totp_secret = Some(secret);
+            self.log_event(
+                "totp_enrollment",
+                Some(&context.user.name),
+                None,
+                AuditResult::Success,
+                None,
+            )
+            .await;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_existing_totp_response(
+        &mut self,
+        mut context: PendingAuthContext,
+        code: String,
+    ) -> std::result::Result<Auth, russh::Error> {
+        let username = context.user.name.clone();
+        let secret = context
+            .user
+            .totp_secret
+            .clone()
+            .ok_or_else(|| russh::Error::IO(std::io::Error::other("missing TOTP secret")))?;
+
+        if let Err(error) = self.state.auth.verify_totp_code(&secret, code.trim()) {
+            self.log_event(
+                "auth_totp",
+                Some(&username),
+                None,
+                AuditResult::Failure,
+                Some(error.to_string()),
+            )
+            .await;
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitExistingTotp { context });
+            return Ok(Self::totp_prompt(&username, Some("Invalid TOTP code.")));
+        }
+
+        self.log_event(
+            "auth_totp",
+            Some(&username),
+            None,
+            AuditResult::Success,
+            None,
+        )
+        .await;
+
+        if context.new_password_hash.is_some() || context.user.must_change_password {
+            self.commit_pending_updates(&mut context, None).await?;
+        }
+
+        self.keyboard_auth_state = Some(KeyboardAuthState::AwaitSelection { context });
+        self.selection_prompt(&username, None)
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))
+    }
+
+    async fn handle_enrollment_response(
+        &mut self,
+        mut context: PendingAuthContext,
+        secret: String,
+        code: String,
+    ) -> std::result::Result<Auth, russh::Error> {
+        let username = context.user.name.clone();
+        if let Err(error) = self.state.auth.verify_totp_code(&secret, code.trim()) {
+            self.log_event(
+                "auth_totp",
+                Some(&username),
+                None,
+                AuditResult::Failure,
+                Some(error.to_string()),
+            )
+            .await;
+
+            let url = self
+                .state
+                .auth
+                .otpauth_url("CentralSSH", &username, &secret)
+                .map_err(|inner| russh::Error::IO(std::io::Error::other(inner.to_string())))?;
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitEnrollmentTotp {
+                context,
+                secret: secret.clone(),
+            });
+            return Ok(Self::enrollment_prompt(
+                &username,
+                &secret,
+                &url,
+                Some("Invalid TOTP code."),
+            ));
+        }
+
+        self.log_event(
+            "auth_totp",
+            Some(&username),
+            None,
+            AuditResult::Success,
+            None,
+        )
+        .await;
+        self.commit_pending_updates(&mut context, Some(secret))
+            .await?;
+
+        self.keyboard_auth_state = Some(KeyboardAuthState::AwaitSelection { context });
+        self.selection_prompt(&username, None)
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))
+    }
+
+    async fn handle_selection_response(
+        &mut self,
+        context: PendingAuthContext,
+        selection: String,
+    ) -> std::result::Result<Auth, russh::Error> {
+        let username = context.user.name.clone();
+        let entries = self
+            .allowed_server_entries(&username)
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+
+        let index = match selection.trim().parse::<usize>() {
+            Ok(value) if value > 0 && value <= entries.len() => value - 1,
+            _ => {
+                self.keyboard_auth_state = Some(KeyboardAuthState::AwaitSelection { context });
+                return self
+                    .selection_prompt(&username, Some("Invalid selection."))
+                    .await
+                    .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())));
+            }
+        };
+
+        let (target_name, target_host) = entries[index].clone();
+        self.pending_target = Some(proxy::SelectedTarget {
+            name: target_name,
+            host: target_host,
+        });
+        self.authenticated_username = Some(username);
+        self.keyboard_auth_state = None;
+        Ok(Auth::Accept)
     }
 }
 
@@ -101,10 +599,7 @@ impl server::Handler for GatewayHandler {
         _user: &str,
         _public_key: &russh::keys::ssh_key::PublicKey,
     ) -> std::result::Result<Auth, Self::Error> {
-        Ok(Auth::Reject {
-            proceed_with_methods: None,
-            partial_success: false,
-        })
+        Ok(Self::reject_to_keyboard_interactive())
     }
 
     async fn auth_password(
@@ -117,17 +612,24 @@ impl server::Handler for GatewayHandler {
 
     async fn auth_keyboard_interactive<'a>(
         &'a mut self,
-        _user: &str,
+        user: &str,
         _submethods: &str,
         response: Option<server::Response<'a>>,
     ) -> std::result::Result<Auth, Self::Error> {
-        if self.transport_authenticated_username.is_some() {
+        if self.authenticated_username.is_some() && self.proxy_session.is_some() {
             return Ok(Auth::Accept);
         }
 
+        let username = user.trim().to_string();
+        if username.is_empty() {
+            return Ok(Self::reject_to_keyboard_interactive());
+        }
+
         let Some(mut response) = response else {
-            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitUsername);
-            return Ok(Self::keyboard_prompt("Username: ", true));
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitPassword {
+                username: username.clone(),
+            });
+            return Ok(Self::password_prompt(&username));
         };
 
         let response_text = response
@@ -137,75 +639,112 @@ impl server::Handler for GatewayHandler {
 
         match self
             .keyboard_auth_state
-            .clone()
-            .unwrap_or(KeyboardAuthState::AwaitUsername)
-        {
-            KeyboardAuthState::AwaitUsername => {
-                if response_text.is_empty() {
-                    self.keyboard_auth_state = Some(KeyboardAuthState::AwaitUsername);
-                    return Ok(Self::keyboard_prompt("Username: ", true));
-                }
-                self.keyboard_auth_state = Some(KeyboardAuthState::AwaitPassword {
-                    username: response_text,
-                });
-                Ok(Self::keyboard_prompt("Password: ", false))
-            }
+            .take()
+            .unwrap_or(KeyboardAuthState::AwaitPassword {
+                username: username.clone(),
+            }) {
             KeyboardAuthState::AwaitPassword { username } => {
-                if self
-                    .state
-                    .auth
-                    .consume_rate_limit_token(self.peer_ip, &username)
-                    .await
-                    .is_err()
-                {
-                    self.keyboard_auth_state = None;
-                    return Ok(Self::reject_to_keyboard_interactive());
-                }
-
-                let snapshot = self.state.config_store.snapshot().await;
-                match self.state.auth.verify_password_constant_time(
-                    &snapshot.config.users,
-                    &username,
-                    response_text.as_str(),
-                ) {
-                    Ok(user) => {
-                        if let Some(totp_secret) = user.totp_secret.clone() {
-                            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitTotp {
-                                username: user.name.clone(),
-                                totp_secret,
-                            });
-                            Ok(Self::keyboard_prompt("TOTP Code: ", false))
-                        } else {
-                            self.transport_authenticated_username = Some(user.name);
-                            self.transport_totp_verified = false;
-                            self.keyboard_auth_state = None;
-                            Ok(Auth::Accept)
-                        }
-                    }
-                    Err(_) => {
-                        self.keyboard_auth_state = None;
-                        Ok(Self::reject_to_keyboard_interactive())
-                    }
-                }
+                self.handle_password_response(username, response_text).await
             }
-            KeyboardAuthState::AwaitTotp {
-                username,
-                totp_secret,
+            KeyboardAuthState::AwaitNewPassword {
+                context,
+                enforce_password_policy,
             } => {
-                if self
-                    .state
-                    .auth
-                    .verify_totp_code(&totp_secret, response_text.as_str())
-                    .is_ok()
-                {
-                    self.transport_authenticated_username = Some(username);
-                    self.transport_totp_verified = true;
-                    self.keyboard_auth_state = None;
-                    Ok(Auth::Accept)
-                } else {
-                    self.keyboard_auth_state = None;
-                    Ok(Self::reject_to_keyboard_interactive())
-                }
+                self.handle_new_password_response(context, enforce_password_policy, response_text)
+                    .await
+            }
+            KeyboardAuthState::AwaitConfirmPassword {
+                context,
+                enforce_password_policy,
+                candidate_password,
+            } => {
+                self.handle_confirm_password_response(
+                    context,
+                    enforce_password_policy,
+                    candidate_password,
+                    response_text,
+                )
+                .await
+            }
+            KeyboardAuthState::AwaitExistingTotp { context } => {
+                self.handle_existing_totp_response(context, response_text)
+                    .await
+            }
+            KeyboardAuthState::AwaitEnrollmentTotp { context, secret } => {
+                self.handle_enrollment_response(context, secret, response_text)
+                    .await
+            }
+            KeyboardAuthState::AwaitSelection { context } => {
+                self.handle_selection_response(context, response_text).await
+            }
+        }
+    }
+
+    async fn auth_succeeded(
+        &mut self,
+        session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        let Some(username) = self.authenticated_username.clone() else {
+            session.disconnect(
+                russh::Disconnect::ByApplication,
+                "authentication completed without a selected identity",
+                "en",
+            )?;
+            return Ok(());
+        };
+        let Some(target) = self.pending_target.clone() else {
+            session.disconnect(
+                russh::Disconnect::ByApplication,
+                "authentication completed without a selected target",
+                "en",
+            )?;
+            return Ok(());
+        };
+
+        self.log_event(
+            "server_selected",
+            Some(&username),
+            Some(&target.name),
+            AuditResult::Success,
+            None,
+        )
+        .await;
+
+        match proxy::ProxySession::connect(
+            self.state.clone(),
+            self.session_id.clone(),
+            self.peer_ip,
+            username.clone(),
+            target.clone(),
+            session.handle(),
+        )
+        .await
+        {
+            Ok(proxy_session) => {
+                self.log_event(
+                    "proxy_start",
+                    Some(&username),
+                    Some(&target.name),
+                    AuditResult::Success,
+                    None,
+                )
+                .await;
+                self.proxy_session = Some(proxy_session);
+                Ok(())
+            }
+            Err(error) => {
+                self.log_event(
+                    "proxy_start",
+                    Some(&username),
+                    Some(&target.name),
+                    AuditResult::Failure,
+                    Some(error.to_string()),
+                )
+                .await;
+
+                let message = format!("Failed to connect to target {}: {}", target.name, error);
+                session.disconnect(russh::Disconnect::ByApplication, &message, "en")?;
+                Ok(())
             }
         }
     }
@@ -215,26 +754,75 @@ impl server::Handler for GatewayHandler {
         channel: Channel<Msg>,
         _session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
-        let id = channel.id();
-        self.pending_session_channels
-            .lock()
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(false);
+        };
+
+        match proxy_session.open_session_channel(channel).await {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                warn!(error = %error, "failed to open target session channel");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        originator_address: &str,
+        originator_port: u32,
+        _session: &mut Session,
+    ) -> std::result::Result<bool, Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(false);
+        };
+
+        match proxy_session
+            .open_direct_tcpip_channel(
+                channel,
+                host_to_connect,
+                port_to_connect,
+                originator_address,
+                originator_port,
+            )
             .await
-            .insert(id, channel);
-        Ok(true)
+        {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                warn!(error = %error, "failed to open direct-tcpip target channel");
+                Ok(false)
+            }
+        }
     }
 
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
-        _col_width: u32,
-        _row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        _modes: &[(russh::Pty, u32)],
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let _ = session.channel_success(channel);
+        if let Some(proxy_session) = &self.proxy_session {
+            if proxy_session
+                .request_pty(
+                    channel, term, col_width, row_height, pix_width, pix_height, modes,
+                )
+                .await
+                .is_err()
+            {
+                let _ = session.channel_failure(channel);
+            }
+        } else {
+            let _ = session.channel_failure(channel);
+        }
+
         Ok(())
     }
 
@@ -243,35 +831,13 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let _ = session.channel_success(channel);
-
-        let maybe_channel = self.pending_session_channels.lock().await.remove(&channel);
-        let Some(channel_handle) = maybe_channel else {
-            let _ = session.channel_failure(channel);
-            return Ok(());
-        };
-
-        let stream = channel_handle.into_stream();
-        let state = self.state.clone();
-        let source_ip = self.peer_ip;
-        let transport_auth = self
-            .transport_authenticated_username
-            .as_ref()
-            .map(|username| TransportAuthContext {
-                username: username.clone(),
-                totp_verified: self.transport_totp_verified,
-            });
-
-        tokio::spawn(async move {
-            if let Err(err) =
-                crate::app::handle_stream_session(stream, state, source_ip, transport_auth).await
-            {
-                if matches!(err, crate::error::CentralSshError::InputCanceled) {
-                    return;
-                }
-                warn!(error = %err, source_ip = %source_ip, "session terminated with error");
+        if let Some(proxy_session) = &self.proxy_session {
+            if proxy_session.request_shell(channel).await.is_err() {
+                let _ = session.channel_failure(channel);
             }
-        });
+        } else {
+            let _ = session.channel_failure(channel);
+        }
 
         Ok(())
     }
@@ -279,31 +845,89 @@ impl server::Handler for GatewayHandler {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _data: &[u8],
+        data: &[u8],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let _ = session.channel_failure(channel);
+        if let Some(proxy_session) = &self.proxy_session {
+            if proxy_session.request_exec(channel, data).await.is_err() {
+                let _ = session.channel_failure(channel);
+            }
+        } else {
+            let _ = session.channel_failure(channel);
+        }
+
         Ok(())
     }
 
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
-        _name: &str,
+        name: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let _ = session.channel_failure(channel);
+        if let Some(proxy_session) = &self.proxy_session {
+            if proxy_session
+                .request_subsystem(channel, name)
+                .await
+                .is_err()
+            {
+                let _ = session.channel_failure(channel);
+            }
+        } else {
+            let _ = session.channel_failure(channel);
+        }
+
         Ok(())
     }
 
     async fn env_request(
         &mut self,
         channel: ChannelId,
-        _variable_name: &str,
-        _variable_value: &str,
+        variable_name: &str,
+        variable_value: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let _ = session.channel_failure(channel);
+        if let Some(proxy_session) = &self.proxy_session {
+            if proxy_session
+                .request_env(channel, variable_name, variable_value)
+                .await
+                .is_err()
+            {
+                let _ = session.channel_failure(channel);
+            }
+        } else {
+            let _ = session.channel_failure(channel);
+        }
+
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        _session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        if let Some(proxy_session) = &self.proxy_session {
+            let _ = proxy_session
+                .request_window_change(channel, col_width, row_height, pix_width, pix_height)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn signal(
+        &mut self,
+        channel: ChannelId,
+        signal: Sig,
+        _session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        if let Some(proxy_session) = &self.proxy_session {
+            let _ = proxy_session.request_signal(channel, signal).await;
+        }
         Ok(())
     }
 
@@ -315,11 +939,87 @@ impl server::Handler for GatewayHandler {
         let _ = session.channel_failure(channel);
         Ok(false)
     }
+
+    async fn data(
+        &mut self,
+        _channel: ChannelId,
+        _data: &[u8],
+        _session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn extended_data(
+        &mut self,
+        _channel: ChannelId,
+        _code: u32,
+        _data: &[u8],
+        _session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        _session: &mut Session,
+    ) -> std::result::Result<bool, Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(false);
+        };
+
+        match proxy_session.tcpip_forward(address, *port).await {
+            Ok(allocated_port) => {
+                *port = allocated_port;
+                Ok(true)
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to establish remote forwarding on target");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn cancel_tcpip_forward(
+        &mut self,
+        address: &str,
+        port: u32,
+        _session: &mut Session,
+    ) -> std::result::Result<bool, Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(false);
+        };
+
+        match proxy_session.cancel_tcpip_forward(address, port).await {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                warn!(error = %error, "failed to cancel remote forwarding on target");
+                Ok(false)
+            }
+        }
+    }
 }
 
 pub async fn run_gateway_server(
     listen_addr: &str,
-    host_key_path: &Path,
+    host_key_path: &std::path::Path,
     state: Arc<AppState>,
     strict_security: bool,
 ) -> Result<()> {
@@ -333,25 +1033,25 @@ pub async fn run_gateway_server(
     config.auth_rejection_time = Duration::from_secs(3);
 
     let host_key = russh::keys::load_secret_key(host_key_path, None)
-        .map_err(|e| CentralSshError::Ssh(format!("failed to load host key: {e}")))?;
+        .map_err(|error| CentralSshError::Ssh(format!("failed to load host key: {error}")))?;
     config.keys.push(host_key);
 
     let config = Arc::new(config);
     let mut server = GatewayServer::new(state);
-    let listen_socket: SocketAddr = listen_addr.parse().map_err(|e| {
-        CentralSshError::InvalidConfig(format!("invalid listen address '{listen_addr}': {e}"))
+    let listen_socket: SocketAddr = listen_addr.parse().map_err(|error| {
+        CentralSshError::InvalidConfig(format!("invalid listen address '{listen_addr}': {error}"))
     })?;
 
     server
         .run_on_address(config, listen_socket)
         .await
-        .map_err(|e| {
-            error!(error = %e, "gateway server stopped with error");
-            CentralSshError::Ssh(e.to_string())
+        .map_err(|error| {
+            error!(error = %error, "gateway server stopped with error");
+            CentralSshError::Ssh(error.to_string())
         })
 }
 
-fn ensure_server_host_key(path: &Path) -> Result<()> {
+fn ensure_server_host_key(path: &std::path::Path) -> Result<()> {
     if path.exists() {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         return Ok(());
@@ -362,11 +1062,13 @@ fn ensure_server_host_key(path: &Path) -> Result<()> {
     }
 
     let host_key = PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
-        .map_err(|e| CentralSshError::InvalidConfig(format!("failed to create host key: {e}")))?;
+        .map_err(|error| {
+            CentralSshError::InvalidConfig(format!("failed to create host key: {error}"))
+        })?;
 
-    let encoded = host_key
-        .to_openssh(LineEnding::LF)
-        .map_err(|e| CentralSshError::InvalidConfig(format!("failed to encode host key: {e}")))?;
+    let encoded = host_key.to_openssh(LineEnding::LF).map_err(|error| {
+        CentralSshError::InvalidConfig(format!("failed to encode host key: {error}"))
+    })?;
 
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -379,7 +1081,7 @@ fn ensure_server_host_key(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_host_key_security(path: &Path) -> Result<()> {
+fn validate_host_key_security(path: &std::path::Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         return Err(CentralSshError::SecurityPolicy {

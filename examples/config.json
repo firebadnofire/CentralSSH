@@ -16,7 +16,7 @@
     }
   ],
   "settings": {
-    "user_key_root": "/etc/centralssh/users",
+    "user_key_root": "/var/lib/centralssh/keys",
     "known_hosts_path": "/etc/centralssh/known_hosts",
     "audit_log_path": "/var/log/centralssh/audit.jsonl",
     "enforce_password_policy": true

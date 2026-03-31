@@ -33,15 +33,6 @@ pub enum CentralSshError {
 
     #[error("ssh error: {0}")]
     Ssh(String),
-
-    #[error("channel closed")]
-    ChannelClosed,
-
-    #[error("timeout waiting for user input")]
-    InputTimeout,
-
-    #[error("input cancelled by user")]
-    InputCanceled,
 }
 
 pub type Result<T> = std::result::Result<T, CentralSshError>;
