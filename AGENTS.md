@@ -1,0 +1,521 @@
+# Secure SSH Gateway Proxy (Rust)
+
+## Purpose
+
+This project implements a **security‑focused SSH gateway / jump proxy** designed for highly sandboxed environments (such as FreeBSD jails). The gateway authenticates users, enforces access controls, and proxies SSH connections to internal hosts without granting shell access or exposing the underlying system.
+
+This is a **security appliance component**, not a general purpose SSH server.
+
+## Protocol Boundary (Mandatory)
+
+CentralSSH is strictly an SSH server.
+
+- It MUST remain fully compatible with OpenSSH clients.
+- It MUST NOT require custom protocol extensions.
+- It MUST accept only standard SSH channel types needed for its gateway flow.
+- It MUST deny non-goal channel/request types (exec, subsystem, forwarding, agent forwarding, etc.).
+
+---
+
+## Core Goals
+
+### Authentication
+
+The gateway must support:
+
+- Username + password authentication
+- Time‑based One Time Password (TOTP) 2FA
+- Secure password storage using:
+  - Salted
+  - Memory‑hard password hashing
+  - Industry‑standard algorithms (Argon2id preferred)
+
+Passwords MUST NOT be stored using:
+
+- Raw hashes
+- SHA‑2 alone
+- Fast hashing algorithms
+
+---
+
+### Access Workflow
+
+1. User connects to gateway.
+2. Authenticates with password + OTP.
+3. Receives a list of allowed SSH targets.
+4. Selects a target.
+5. Gateway proxies the connection using a securely stored private key.
+
+Users must NEVER receive:
+
+- Shell access to gateway
+- Filesystem access
+- Command execution capability
+
+The gateway is strictly a connection broker.
+
+---
+
+## Security Principles
+
+### Isolation
+
+The gateway must operate under the assumption that:
+
+- It runs inside a jail/container.
+- It must not rely on host system trust.
+- It must minimize privileges.
+
+Private keys must be:
+
+- Stored outside user‑accessible paths
+- Owned by root
+- Readable only by the daemon process
+
+---
+
+### Minimal Attack Surface
+
+The gateway must:
+
+- Use a single static Rust binary where possible
+- Avoid external runtime dependencies
+- Avoid shell invocation
+- Avoid system command execution
+- Avoid dynamic plugin loading
+
+---
+
+### Explicit State Safety
+
+Authentication and connection logic must enforce:
+
+- Strict authentication state transitions
+- No implicit trust between steps
+- No fallback authentication paths
+
+---
+
+## Login Model and User Experience
+
+### Connection Entry
+
+Users connect using standard SSH clients:
+
+```bash
+ssh -p 7788 bastian.com
+```
+
+Port 7788 runs the custom Rust gateway service, which presents a **text-based interactive interface (TUI)** over the SSH session.
+
+The gateway acts as an SSH server only for transport purposes. It does NOT provide a shell.
+
+---
+
+### Authentication Flow
+
+1. User connects via SSH.
+2. Gateway presents a TUI login prompt.
+3. User enters:
+   - Username
+   - Password
+   - TOTP code
+4. Credentials are validated against local configuration.
+5. On success, the server selection screen is shown.
+
+---
+
+## Configuration Files
+
+All configuration is stored in `/etc/centralssh/`.
+
+### 1. User Configuration
+
+File: `/etc/centralssh/config.json`
+
+Defines:
+
+- User identity
+- Credential state
+- Authorized server access
+
+Example structure:
+
+```json
+{
+  "users": [
+    {
+      "name": "alice",
+      "password": "ARGON2_HASH_OR_BOOTSTRAP",
+      "totp_secret": null,
+      "must_change_password": true,
+      "allowed_servers": ["git", "httpd"]
+    }
+  ]
+}
+```
+
+Notes:
+
+- Must be a single valid JSON document.
+- Arrays must be used instead of multiple root objects.
+- Each user record must be explicitly defined.
+
+---
+
+### Credential Lifecycle
+
+The gateway manages credential state internally.
+
+#### Bootstrap Mode
+
+Administrators may provision users with either:
+
+- A plaintext temporary password OR
+- A pre‑generated Argon2 hash
+
+If a plaintext password is provided:
+
+- The gateway MUST hash it with Argon2id on first load.
+- The plaintext MUST never be written back to disk.
+- The configuration file MUST be rewritten immediately after hashing.
+
+All bootstrap accounts must set:
+
+```
+"must_change_password": true
+```
+
+---
+
+#### Config File Mutation Requirements
+
+The gateway is NOT read‑only with respect to configuration.
+
+It MUST be capable of safely modifying `/etc/centralssh/config.json` to:
+
+- Replace bootstrap plaintext passwords with Argon2 hashes
+- Persist newly generated TOTP secrets
+- Update `must_change_password` flags
+- Store updated password hashes after user changes
+
+All writes must follow secure update rules:
+
+1. Write to a temporary file in the same directory.
+2. fsync the file.
+3. Atomically rename into place.
+4. Preserve original file ownership and permissions.
+
+Partial writes or in‑place edits are strictly forbidden.
+
+---
+
+#### First Login Flow
+
+On first successful authentication:
+
+1. User is forced to change password.
+2. Password is hashed with Argon2id using:
+   - Unique random salt
+   - Memory‑hard parameters
+3. User is forced to enroll TOTP.
+4. A new TOTP secret is generated by the gateway.
+5. Secret is stored securely in the config file.
+6. `must_change_password` is set to false.
+7. The config file is atomically rewritten.
+
+The user cannot access any servers until this process completes.
+
+---
+
+#### Password Storage Rules
+
+Passwords must be stored as:
+
+- Argon2id hashes
+- Unique per‑user salts
+- Memory‑hard parameters appropriate for server hardware
+
+Passwords must NEVER be stored as:
+
+- Plaintext
+- SHA hashes
+- Reversible encryption
+
+---
+
+#### TOTP Secret Storage
+
+TOTP secrets must:
+
+- Be generated by the gateway
+- Be random high‑entropy values
+- Be stored base32 encoded
+- Never be logged
+
+The gateway must support:
+
+- Standard RFC 6238 TOTP
+- 30‑second time windows
+- Limited clock drift tolerance
+
+---
+
+#### Security Guarantees
+
+The credential system must ensure:
+
+- Admins cannot retrieve user passwords
+- Passwords cannot be downgraded to plaintext
+- TOTP cannot be disabled after enrollment
+- Credential changes require authentication
+
+---
+
+### 2. Server Mapping Configuration
+
+File: `/etc/centralssh/servers.json`
+
+Defines the mapping between server names and their internal IP addresses.
+
+Example structure:
+
+```json
+{
+  "servers": {
+    "git": "192.168.86.44",
+    "httpd": "192.168.86.41",
+    "dns": "192.168.86.53"
+  }
+}
+```
+
+---
+
+## TUI Behavior
+
+After successful authentication, the TUI presents:
+
+- Gateway banner
+- Authenticated username
+- Numbered list of allowed servers
+
+Example:
+
+```
+CentralSSH Gateway
+User: alice
+
+Select a server:
+
+1) git (192.168.86.44)
+2) httpd (192.168.86.41)
+
+Enter selection: _
+```
+
+The list is generated dynamically by:
+
+1. Reading allowed server names from `config.json`
+2. Resolving IPs from `servers.json`
+
+---
+
+## Selection Flow
+
+When a user selects a server:
+
+1. Gateway validates the selection index.
+2. Loads the corresponding SSH private key.
+3. Establishes an outbound SSH connection.
+4. Begins bidirectional stream proxying.
+
+At no point does the user gain:
+
+- Command execution on the gateway
+- Access to config files
+- Visibility of private keys
+
+---
+
+## Security Constraints for Config Files
+
+All config files must:
+
+- Be owned by root
+- Have mode 600 permissions
+- Never be writable by the daemon user
+
+Private key directories must:
+
+- Be outside `/etc/centralssh`
+- Have strict root-only access
+
+---
+
+## Data Storage
+
+Configuration must be stored in simple, auditable formats.
+
+### Allowed
+
+- JSON flat files
+- Explicit structured schemas
+- File permission enforcement
+
+### Required Stored Data
+
+- User records
+- Password hashes (Argon2id)
+- TOTP secrets
+- Authorized target server lists
+- Mapping of users to allowed servers
+
+---
+
+## Core Components
+
+### 1. Authentication Engine
+
+Responsibilities:
+
+- Password verification
+- TOTP validation
+- Rate limiting
+- Authentication state tracking
+
+---
+
+### 2. Authorization Engine
+
+Responsibilities:
+
+- Determining accessible servers
+- Enforcing per‑user access lists
+- Preventing unauthorized routing
+
+---
+
+### 3. SSH Proxy Engine
+
+Responsibilities:
+
+- Establish SSH connection to target
+- Relay encrypted traffic
+- Prevent command injection
+- Never expose private keys
+
+---
+
+### 4. Secure Key Manager
+
+Responsibilities:
+
+- Loading private keys securely
+- Ensuring keys never leave memory
+- Enforcing strict filesystem permissions
+
+---
+
+## Non‑Goals (Explicitly Out of Scope)
+
+The following MUST NOT be implemented:
+
+### Not an SSH Server Replacement
+
+- No shell access
+- No SFTP support
+- No port forwarding
+- No terminal features
+
+---
+
+### No Feature Creep
+
+The gateway must NOT include:
+
+- Web interfaces
+- GUI dashboards
+- REST APIs
+- User self‑registration
+- Password reset flows
+
+All user provisioning is offline.
+
+---
+
+### No Weak Security Practices
+
+The following are forbidden:
+
+- Storing plaintext secrets
+- Using SHA‑only password hashing
+- Embedding private keys in config
+- Logging sensitive authentication data
+- Disabling OTP for convenience
+
+---
+
+### No System Integration Risks
+
+The gateway must NOT:
+
+- Invoke shell commands
+- Depend on external system utilities
+- Modify host system configuration
+- Assume root access beyond startup
+
+---
+
+## Threat Model
+
+The system must assume:
+
+- Attackers may control network input
+- Attackers may attempt brute force authentication
+- Attackers may gain read access to config files
+- Attackers may attempt to exploit protocol parsing
+
+The system must protect against:
+
+- Credential theft
+- Key exfiltration
+- Privilege escalation
+- Unauthorized lateral movement
+
+---
+
+## Recommended Rust Libraries
+
+Suggested components:
+
+- argon2 – password hashing
+- oath / totp‑rs – TOTP verification
+- russh or ssh2 – SSH client implementation
+- serde – config parsing
+- zeroize – secure memory handling
+
+---
+
+## Success Criteria
+
+The project is considered complete when:
+
+- Users can authenticate securely
+- Only authorized SSH targets are accessible
+- No shell or system access is exposed
+- Private keys remain protected
+- The gateway operates entirely as a secure proxy
+
+---
+
+## Guiding Philosophy
+
+This project prioritizes:
+
+- Security over convenience
+- Explicit design over automation
+- Minimal features over extensibility
+- Predictable behavior over flexibility
+
+It is a hardened infrastructure component, not a user‑friendly application.

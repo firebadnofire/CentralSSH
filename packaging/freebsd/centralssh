@@ -1,0 +1,77 @@
+#!/bin/sh
+# PROVIDE: centralssh
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="centralssh"
+rcvar="${name}_enable"
+
+load_rc_config "$name"
+
+: ${centralssh_enable:="NO"}
+: ${centralssh_user:="root"}
+: ${centralssh_group:="wheel"}
+: ${centralssh_config:="/etc/centralssh/config.json"}
+: ${centralssh_servers:="/etc/centralssh/servers.json"}
+: ${centralssh_known_hosts:="/etc/centralssh/known_hosts"}
+: ${centralssh_user_key_root:="/etc/centralssh/users"}
+: ${centralssh_audit_log:="/var/log/centralssh/audit.jsonl"}
+: ${centralssh_listen:="0.0.0.0:7788"}
+
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/sbin/centralssh"
+command="/usr/sbin/daemon"
+command_args="-p ${pidfile} -u ${centralssh_user} ${procname} --listen ${centralssh_listen} --config ${centralssh_config} --servers ${centralssh_servers} --known-hosts ${centralssh_known_hosts} --user-key-root ${centralssh_user_key_root} --audit-log ${centralssh_audit_log}"
+
+required_files="${centralssh_config} ${centralssh_servers} ${centralssh_known_hosts}"
+start_precmd="${name}_prestart"
+restart_cmd="${name}_restart"
+
+centralssh_prestart()
+{
+	if [ -f "${pidfile}" ]; then
+		_pid="$(cat "${pidfile}" 2>/dev/null)"
+		if [ -n "${_pid}" ] && ! kill -0 "${_pid}" 2>/dev/null; then
+			rm -f "${pidfile}"
+		fi
+	fi
+}
+
+centralssh_wait_for_exit()
+{
+	_pid="$(cat "${pidfile}" 2>/dev/null)"
+	if [ -z "${_pid}" ]; then
+		return 0
+	fi
+
+	_i=0
+	while kill -0 "${_pid}" 2>/dev/null; do
+		_i=$(( _i + 1 ))
+		if [ "${_i}" -ge 100 ]; then
+			echo "${name} did not stop cleanly (pid=${_pid})."
+			return 1
+		fi
+		sleep 0.1
+	done
+
+	return 0
+}
+
+centralssh_restart()
+{
+	run_rc_command stop || true
+	centralssh_wait_for_exit || return 1
+
+	if [ -f "${pidfile}" ]; then
+		_pid="$(cat "${pidfile}" 2>/dev/null)"
+		if [ -z "${_pid}" ] || ! kill -0 "${_pid}" 2>/dev/null; then
+			rm -f "${pidfile}"
+		fi
+	fi
+
+	run_rc_command start
+}
+
+run_rc_command "$1"

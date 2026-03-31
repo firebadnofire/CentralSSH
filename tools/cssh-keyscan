@@ -1,0 +1,305 @@
+#!/bin/sh
+set -eu
+
+prog="$(basename "$0")"
+known_hosts="${CENTRALSSH_KNOWN_HOSTS:-/etc/centralssh/known_hosts}"
+
+usage() {
+	echo "Usage: ${prog} <server IP or domain> [expected key]" >&2
+	echo "Fetches ssh-ed25519/rsa/ecdsa host keys and appends missing keys to ${known_hosts}." >&2
+	echo "Optional expected key formats (at least one scanned key must match):" >&2
+	echo "  <base64-key-blob>" >&2
+	echo "  <algorithm> <base64-key-blob>" >&2
+	echo "  SHA256:<fingerprint> or MD5:<fingerprint>" >&2
+	echo "  <algorithm> SHA256:<fingerprint> or <algorithm> MD5:<fingerprint>" >&2
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+	usage
+	exit 0
+fi
+
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+	usage
+	exit 1
+fi
+
+target="$1"
+expected_input="${2:-}"
+
+if ! command -v ssh-keyscan >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+	echo "${prog}: ssh-keyscan and ssh-keygen are required but not found in PATH." >&2
+	exit 1
+fi
+
+parent_dir="$(dirname "${known_hosts}")"
+mkdir -p "${parent_dir}"
+
+base_file="$(mktemp "${known_hosts}.base.XXXXXX")"
+raw_scan_file="$(mktemp "${known_hosts}.rawscan.XXXXXX")"
+scan_file="$(mktemp "${known_hosts}.scan.XXXXXX")"
+scan_meta_file="$(mktemp "${known_hosts}.scan-meta.XXXXXX")"
+target_existing_file="$(mktemp "${known_hosts}.target-existing.XXXXXX")"
+expected_matches_file="$(mktemp "${known_hosts}.expected-matches.XXXXXX")"
+result_file="$(mktemp "${known_hosts}.result.XXXXXX")"
+
+cleanup() {
+	rm -f "${base_file}" "${raw_scan_file}" "${scan_file}" "${scan_meta_file}" "${target_existing_file}" "${expected_matches_file}" "${result_file}"
+}
+trap cleanup EXIT INT TERM HUP
+
+if [ -f "${known_hosts}" ]; then
+	cat "${known_hosts}" > "${base_file}"
+else
+	: > "${base_file}"
+fi
+
+if ! ssh-keyscan -q -T 5 -t ed25519,rsa,ecdsa "${target}" > "${raw_scan_file}" 2>/dev/null; then
+	if [ ! -s "${raw_scan_file}" ]; then
+		echo "${prog}: failed to fetch host keys from '${target}'." >&2
+		exit 1
+	fi
+fi
+
+# Keep only real known_hosts key rows; discard comments/protocol banners.
+awk '
+NF >= 3 &&
+$1 !~ /^#/ &&
+$2 ~ /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)$/ {
+	print
+}
+' "${raw_scan_file}" > "${scan_file}"
+
+if [ ! -s "${scan_file}" ]; then
+	echo "${prog}: no supported host keys returned by '${target}'." >&2
+	exit 1
+fi
+
+sort -u "${scan_file}" -o "${scan_file}"
+
+: > "${scan_meta_file}"
+while IFS= read -r key_line; do
+	[ -n "${key_line}" ] || continue
+
+	key_type="$(printf '%s\n' "${key_line}" | awk '{print $2}')"
+	key_blob="$(printf '%s\n' "${key_line}" | awk '{print $3}')"
+	fingerprint_sha256="$(printf '%s\n' "${key_line}" | ssh-keygen -l -E sha256 -f - 2>/dev/null | awk '{print $2}' || true)"
+	fingerprint_md5="$(printf '%s\n' "${key_line}" | ssh-keygen -l -E md5 -f - 2>/dev/null | awk '{print $2}' || true)"
+
+	printf '%s\t%s\t%s\t%s\t%s\n' "${key_type}" "${key_blob}" "${fingerprint_sha256}" "${fingerprint_md5}" "${key_line}" >> "${scan_meta_file}"
+done < "${scan_file}"
+
+if [ ! -s "${scan_meta_file}" ]; then
+	echo "${prog}: unable to parse scanned host keys for '${target}'." >&2
+	exit 1
+fi
+
+expected_mode=""
+expected_type=""
+expected_value=""
+if [ -n "${expected_input}" ]; then
+	expected_trimmed="$(printf '%s\n' "${expected_input}" | awk '{$1=$1; print}')"
+	if [ -z "${expected_trimmed}" ]; then
+		echo "${prog}: expected key argument is empty after trimming whitespace." >&2
+		exit 1
+	fi
+
+	if ! expected_spec="$(
+		printf '%s\n' "${expected_trimmed}" | awk '
+function is_type(x) {
+	return x == "ssh-ed25519" || x == "ssh-rsa" || x == "ecdsa-sha2-nistp256"
+}
+function is_fingerprint(x) {
+	return x ~ /^(SHA256:[A-Za-z0-9+\/=]+|MD5:[0-9A-Fa-f:]+)$/
+}
+function is_blob(x) {
+	return x ~ /^[A-Za-z0-9+\/=]+$/
+}
+{
+	if (NF == 1) {
+		if (is_fingerprint($1)) {
+			print "fingerprint\t\t" $1
+			exit 0
+		}
+		if (is_blob($1)) {
+			print "blob\t\t" $1
+			exit 0
+		}
+		exit 1
+	}
+	if (NF == 2 && is_type($1)) {
+		if (is_fingerprint($2)) {
+			print "typed_fingerprint\t" $1 "\t" $2
+			exit 0
+		}
+		if (is_blob($2)) {
+			print "typed_blob\t" $1 "\t" $2
+			exit 0
+		}
+		exit 1
+	}
+	if (NF >= 3 && is_type($2)) {
+		if (is_fingerprint($3)) {
+			print "typed_fingerprint\t" $2 "\t" $3
+			exit 0
+		}
+		if (is_blob($3)) {
+			print "typed_blob\t" $2 "\t" $3
+			exit 0
+		}
+		exit 1
+	}
+	exit 1
+}
+'
+	)"; then
+		echo "${prog}: unsupported expected key format." >&2
+		echo "${prog}: accepted formats include base64 blob, fingerprint, '<algo> <blob>', and '<algo> <fingerprint>'." >&2
+		exit 1
+	fi
+
+	expected_mode="$(printf '%s\n' "${expected_spec}" | awk -F '\t' '{print $1}')"
+	expected_type="$(printf '%s\n' "${expected_spec}" | awk -F '\t' '{print $2}')"
+	expected_value="$(printf '%s\n' "${expected_spec}" | awk -F '\t' '{print $3}')"
+fi
+
+awk -v target="${target}" '
+function match_target(hostfield, tgt,    i, n, alt, hosts) {
+  alt = "[" tgt "]:22"
+  n = split(hostfield, hosts, ",")
+  for (i = 1; i <= n; i++) {
+    if (hosts[i] == tgt || hosts[i] == alt) {
+      return 1
+    }
+  }
+  return 0
+}
+match_target($1, target) { print }
+' "${base_file}" > "${target_existing_file}"
+
+host_already_known=0
+if [ -s "${target_existing_file}" ]; then
+	host_already_known=1
+	while IFS= read -r key_line; do
+		[ -n "${key_line}" ] || continue
+		key_type="$(printf '%s\n' "${key_line}" | awk '{print $2}')"
+		key_blob="$(printf '%s\n' "${key_line}" | awk '{print $3}')"
+
+		if ! awk -v t="${key_type}" -v k="${key_blob}" '
+			$2 == t && $3 == k { found = 1 }
+			END { exit(found ? 0 : 1) }
+		' "${target_existing_file}"; then
+			echo "${prog}: SECURITY ALERT: host '${target}' presented a new ${key_type} key." >&2
+			echo "${prog}: refusing update because '${target}' is already present in ${known_hosts}." >&2
+			echo "${prog}: investigate key rotation or possible MITM before modifying known_hosts." >&2
+			exit 1
+		fi
+	done < "${scan_file}"
+fi
+
+auto_accept=0
+if [ -n "${expected_mode}" ]; then
+	awk -F '\t' -v mode="${expected_mode}" -v expected_type="${expected_type}" -v expected_value="${expected_value}" '
+function is_match() {
+	if (mode == "blob") {
+		return $2 == expected_value
+	}
+	if (mode == "fingerprint") {
+		return $3 == expected_value || $4 == expected_value
+	}
+	if (mode == "typed_blob") {
+		return $1 == expected_type && $2 == expected_value
+	}
+	if (mode == "typed_fingerprint") {
+		return $1 == expected_type && ($3 == expected_value || $4 == expected_value)
+	}
+	return 0
+}
+is_match() { print $5 }
+' "${scan_meta_file}" > "${expected_matches_file}"
+
+	if [ ! -s "${expected_matches_file}" ]; then
+		echo "${prog}: expected key material did not match any scanned key for '${target}'." >&2
+		echo "${prog}: refusing to trust host '${target}'." >&2
+		exit 1
+	fi
+
+	match_count="$(wc -l < "${expected_matches_file}" | awk '{print $1}')"
+	echo "${target}: verified expected key material against ${match_count} scanned key(s)."
+	auto_accept=1
+fi
+
+if [ "${host_already_known}" -eq 1 ]; then
+	echo "${target}: known host keys already trusted (${known_hosts})"
+	exit 0
+fi
+
+if [ "${auto_accept}" -eq 0 ]; then
+	if [ ! -t 0 ]; then
+		echo "${prog}: TOFU confirmation required for new host '${target}' (interactive terminal required)." >&2
+		exit 1
+	fi
+
+	echo "TOFU review for '${target}'"
+	echo "No existing known_hosts entry for this host."
+	echo ""
+	echo "Observed host keys:"
+
+	idx=0
+	while IFS="$(printf '\t')" read -r key_type key_blob fingerprint_sha256 fingerprint_md5 key_line; do
+		[ -n "${key_line}" ] || continue
+		idx=$((idx + 1))
+
+		fingerprint="${fingerprint_sha256}"
+		[ -n "${fingerprint}" ] || fingerprint="fingerprint unavailable"
+
+		overlap_hosts="$(
+			awk -v t="${key_type}" -v k="${key_blob}" '
+				$2 == t && $3 == k {
+					n = split($1, hosts, ",")
+					for (i = 1; i <= n; i++) {
+						print hosts[i]
+					}
+				}
+			' "${base_file}" | sort -u | paste -sd "," -
+		)"
+
+		echo "  [${idx}] ${key_type} ${fingerprint}"
+		if [ -n "${overlap_hosts}" ]; then
+			echo "      overlaps existing host entries: ${overlap_hosts}"
+		fi
+	done < "${scan_meta_file}"
+
+	echo ""
+	printf "Accept and add these keys to %s? [y/N]: " "${known_hosts}"
+	IFS= read -r answer
+	case "${answer}" in
+		y|Y|yes|YES)
+			;;
+		*)
+			echo "${prog}: aborted by user."
+			exit 1
+			;;
+	esac
+else
+	echo "${target}: expected key supplied, TOFU prompt skipped."
+fi
+
+cat "${base_file}" > "${result_file}"
+added=0
+while IFS= read -r key_line; do
+	[ -n "${key_line}" ] || continue
+	if ! grep -Fqx "${key_line}" "${result_file}"; then
+		printf '%s\n' "${key_line}" >> "${result_file}"
+		added=$((added + 1))
+	fi
+done < "${scan_file}"
+
+chmod 0600 "${result_file}"
+mv "${result_file}" "${known_hosts}"
+
+if [ "${added}" -eq 0 ]; then
+	echo "${target}: known_hosts already up to date (${known_hosts})"
+else
+	echo "${target}: added ${added} key(s) to ${known_hosts}"
+fi
