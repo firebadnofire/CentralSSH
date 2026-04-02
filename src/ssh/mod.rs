@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use russh::server::{self, Auth, Msg, Server as _, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig};
+use russh::{client, Channel, ChannelId, MethodKind, MethodSet, Sig};
 use ssh_key::{LineEnding, PrivateKey};
 use tracing::{error, warn};
 use zeroize::Zeroizing;
@@ -19,6 +19,9 @@ use crate::config::UserRecord;
 use crate::error::{CentralSshError, Result};
 
 pub mod proxy;
+
+const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
+const SSH_KEEPALIVE_MAX: usize = 3;
 
 #[derive(Clone)]
 struct GatewayServer {
@@ -587,6 +590,21 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
     }
 }
 
+fn apply_server_transport_config(config: &mut server::Config) {
+    // Russh defaults to a 10-minute inactivity timeout, which breaks quiet
+    // long-lived exec sessions. Keep them alive with infrequent SSH keepalives
+    // instead of a hard idle reap.
+    config.inactivity_timeout = None;
+    config.keepalive_interval = Some(SSH_KEEPALIVE_INTERVAL);
+    config.keepalive_max = SSH_KEEPALIVE_MAX;
+}
+
+fn apply_client_transport_config(config: &mut client::Config) {
+    config.inactivity_timeout = None;
+    config.keepalive_interval = Some(SSH_KEEPALIVE_INTERVAL);
+    config.keepalive_max = SSH_KEEPALIVE_MAX;
+}
+
 impl server::Handler for GatewayHandler {
     type Error = russh::Error;
 
@@ -801,25 +819,31 @@ impl server::Handler for GatewayHandler {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        term: &str,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-        modes: &[(russh::Pty, u32)],
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if let Some(proxy_session) = &self.proxy_session {
-            if proxy_session
-                .request_pty(
-                    channel, term, col_width, row_height, pix_width, pix_height, modes,
-                )
-                .await
-                .is_err()
-            {
-                let _ = session.channel_failure(channel);
-            }
-        } else {
+        if self.proxy_session.is_none() {
+            let _ = session.channel_failure(channel);
+        }
+
+        Ok(())
+    }
+
+    async fn x11_request(
+        &mut self,
+        channel: ChannelId,
+        _single_connection: bool,
+        _x11_auth_protocol: &str,
+        _x11_auth_cookie: &str,
+        _x11_screen_number: u32,
+        session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+        if self.proxy_session.is_none() {
             let _ = session.channel_failure(channel);
         }
 
@@ -831,11 +855,7 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if let Some(proxy_session) = &self.proxy_session {
-            if proxy_session.request_shell(channel).await.is_err() {
-                let _ = session.channel_failure(channel);
-            }
-        } else {
+        if self.proxy_session.is_none() {
             let _ = session.channel_failure(channel);
         }
 
@@ -845,14 +865,10 @@ impl server::Handler for GatewayHandler {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        data: &[u8],
+        _data: &[u8],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if let Some(proxy_session) = &self.proxy_session {
-            if proxy_session.request_exec(channel, data).await.is_err() {
-                let _ = session.channel_failure(channel);
-            }
-        } else {
+        if self.proxy_session.is_none() {
             let _ = session.channel_failure(channel);
         }
 
@@ -862,18 +878,10 @@ impl server::Handler for GatewayHandler {
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
-        name: &str,
+        _name: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if let Some(proxy_session) = &self.proxy_session {
-            if proxy_session
-                .request_subsystem(channel, name)
-                .await
-                .is_err()
-            {
-                let _ = session.channel_failure(channel);
-            }
-        } else {
+        if self.proxy_session.is_none() {
             let _ = session.channel_failure(channel);
         }
 
@@ -883,19 +891,11 @@ impl server::Handler for GatewayHandler {
     async fn env_request(
         &mut self,
         channel: ChannelId,
-        variable_name: &str,
-        variable_value: &str,
+        _variable_name: &str,
+        _variable_value: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if let Some(proxy_session) = &self.proxy_session {
-            if proxy_session
-                .request_env(channel, variable_name, variable_value)
-                .await
-                .is_err()
-            {
-                let _ = session.channel_failure(channel);
-            }
-        } else {
+        if self.proxy_session.is_none() {
             let _ = session.channel_failure(channel);
         }
 
@@ -904,39 +904,30 @@ impl server::Handler for GatewayHandler {
 
     async fn window_change_request(
         &mut self,
-        channel: ChannelId,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
+        _channel: ChannelId,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if let Some(proxy_session) = &self.proxy_session {
-            let _ = proxy_session
-                .request_window_change(channel, col_width, row_height, pix_width, pix_height)
-                .await;
-        }
         Ok(())
     }
 
     async fn signal(
         &mut self,
-        channel: ChannelId,
-        signal: Sig,
+        _channel: ChannelId,
+        _signal: Sig,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if let Some(proxy_session) = &self.proxy_session {
-            let _ = proxy_session.request_signal(channel, signal).await;
-        }
         Ok(())
     }
 
     async fn agent_request(
         &mut self,
-        channel: ChannelId,
-        session: &mut Session,
+        _channel: ChannelId,
+        _session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
-        let _ = session.channel_failure(channel);
         Ok(false)
     }
 
@@ -1031,6 +1022,7 @@ pub async fn run_gateway_server(
     let mut config = server::Config::default();
     config.methods = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
     config.auth_rejection_time = Duration::from_secs(3);
+    apply_server_transport_config(&mut config);
 
     let host_key = russh::keys::load_secret_key(host_key_path, None)
         .map_err(|error| CentralSshError::Ssh(format!("failed to load host key: {error}")))?;
@@ -1112,4 +1104,29 @@ fn validate_host_key_security(path: &std::path::Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_transport_config_disables_idle_reap_and_enables_sparse_keepalives() {
+        let mut config = server::Config::default();
+        apply_server_transport_config(&mut config);
+
+        assert_eq!(config.inactivity_timeout, None);
+        assert_eq!(config.keepalive_interval, Some(SSH_KEEPALIVE_INTERVAL));
+        assert_eq!(config.keepalive_max, SSH_KEEPALIVE_MAX);
+    }
+
+    #[test]
+    fn client_transport_config_disables_idle_reap_and_enables_sparse_keepalives() {
+        let mut config = client::Config::default();
+        apply_client_transport_config(&mut config);
+
+        assert_eq!(config.inactivity_timeout, None);
+        assert_eq!(config.keepalive_interval, Some(SSH_KEEPALIVE_INTERVAL));
+        assert_eq!(config.keepalive_max, SSH_KEEPALIVE_MAX);
+    }
 }

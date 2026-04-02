@@ -10,9 +10,8 @@ use argon2::password_hash::PasswordHash;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use totp_rs::Secret;
 
-use crate::auth::AuthEngine;
+use crate::auth::{AuthEngine, build_totp_from_secret};
 use crate::error::{CentralSshError, Result};
 
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:7788";
@@ -326,9 +325,7 @@ fn validate_password_field(user: &UserRecord) -> Result<()> {
 }
 
 fn validate_totp_secret(secret: &str) -> Result<()> {
-    Secret::Encoded(secret.to_string())
-        .to_bytes()
-        .map_err(|error| CentralSshError::InvalidConfig(format!("invalid TOTP secret: {error}")))?;
+    build_totp_from_secret(secret)?;
     Ok(())
 }
 
@@ -568,7 +565,7 @@ mod tests {
             users: vec![UserRecord {
                 name: "alice".to_string(),
                 password: "BootstrapPass123!".to_string(),
-                totp_secret: Some("JBSWY3DPEHPK3PXP".to_string()),
+                totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
                 must_change_password: true,
                 allowed_servers: vec!["git".to_string()],
             }],
@@ -627,6 +624,23 @@ mod tests {
 
         let result = validate_semantics(&config, &valid_servers());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_semantics_rejects_short_decodable_totp_secret() {
+        let mut config = valid_config();
+        config.users[0].totp_secret = Some("JBSWY3DPEHPK3PXP".to_string());
+
+        let result = validate_semantics(&config, &valid_servers());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_semantics_accepts_runtime_valid_totp_secret() {
+        let config = valid_config();
+
+        let result = validate_semantics(&config, &valid_servers());
+        assert!(result.is_ok());
     }
 
     #[test]

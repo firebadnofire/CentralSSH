@@ -38,7 +38,7 @@ use tracing::info;
   Dev quick-start (non-strict mode):
     mkdir -p ./tmp/keys ./examples
     touch ./examples/known_hosts
-    centralssh --config ./examples/config.json --servers ./examples/servers.json --known-hosts ./examples/known_hosts --user-key-root ./tmp/keys --audit-log ./tmp/audit.jsonl --enforce-strict-security false
+    CENTRALSSH_ENFORCE_STRICT_SECURITY=false centralssh --config ./examples/config.json --servers ./examples/servers.json --known-hosts ./examples/known_hosts --user-key-root ./tmp/keys --audit-log ./tmp/audit.jsonl
 
   Production mode requirements:
     - root-owned config, known_hosts, host key, and audit files

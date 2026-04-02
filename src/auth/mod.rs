@@ -224,20 +224,7 @@ impl AuthEngine {
     }
 
     pub fn build_totp(&self, base32_secret: &str) -> Result<TOTP> {
-        let secret_bytes = Secret::Encoded(base32_secret.to_owned())
-            .to_bytes()
-            .map_err(|e| CentralSshError::InvalidConfig(format!("invalid totp secret: {e}")))?;
-
-        TOTP::new(
-            TotpAlgorithm::SHA1,
-            DEFAULT_TOTP_DIGITS,
-            DEFAULT_TOTP_SKEW,
-            DEFAULT_TOTP_PERIOD,
-            secret_bytes,
-            None,
-            String::new(),
-        )
-        .map_err(|e| CentralSshError::InvalidConfig(format!("failed to build totp: {e}")))
+        build_totp_from_secret(base32_secret)
     }
 
     pub fn verify_totp_code(&self, base32_secret: &str, code: &str) -> Result<()> {
@@ -268,6 +255,23 @@ impl AuthEngine {
     }
 }
 
+pub fn build_totp_from_secret(base32_secret: &str) -> Result<TOTP> {
+    let secret_bytes = Secret::Encoded(base32_secret.to_owned())
+        .to_bytes()
+        .map_err(|error| CentralSshError::InvalidConfig(format!("invalid totp secret: {error}")))?;
+
+    TOTP::new(
+        TotpAlgorithm::SHA1,
+        DEFAULT_TOTP_DIGITS,
+        DEFAULT_TOTP_SKEW,
+        DEFAULT_TOTP_PERIOD,
+        secret_bytes,
+        None,
+        String::new(),
+    )
+    .map_err(|error| CentralSshError::InvalidConfig(format!("failed to build totp: {error}")))
+}
+
 fn secure_username_match(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         // Keep a constant-time compare on fixed bytes so mismatched lengths don't short-circuit.
@@ -289,6 +293,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_totp_from_secret_accepts_runtime_valid_secret() {
+        let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+        assert!(build_totp_from_secret(secret).is_ok());
+    }
+
+    #[test]
+    fn build_totp_from_secret_rejects_short_decodable_secret() {
+        let secret = "JBSWY3DPEHPK3PXP";
+        assert!(build_totp_from_secret(secret).is_err());
+    }
 
     #[tokio::test]
     async fn token_bucket_depletes() {

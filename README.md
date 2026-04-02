@@ -459,8 +459,18 @@ cargo run -- \
   --servers ./tmp/servers.json \
   --known-hosts ./tmp/known_hosts \
   --user-key-root ./tmp/users \
-  --audit-log ./tmp/audit.jsonl \
-  --enforce-strict-security false
+  --audit-log ./tmp/audit.jsonl
+```
+
+Disable strict-security checks for that run with:
+
+```bash
+CENTRALSSH_ENFORCE_STRICT_SECURITY=false cargo run -- \
+  --config ./tmp/config.json \
+  --servers ./tmp/servers.json \
+  --known-hosts ./tmp/known_hosts \
+  --user-key-root ./tmp/users \
+  --audit-log ./tmp/audit.jsonl
 ```
 
 Do not use this mode in production.
