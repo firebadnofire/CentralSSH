@@ -1,0 +1,720 @@
+# CentralSSH Operator Guide
+
+This guide is for the person who installs, configures, runs, and troubleshoots CentralSSH.
+It is based on the current repository state on 2026-05-01, not just the design spec.
+
+## 1. What CentralSSH is
+
+CentralSSH is an SSH gateway. Users connect to the gateway with a normal SSH client, authenticate to CentralSSH itself, choose an allowed target, and then the gateway opens a second SSH connection to the selected target using gateway-managed keys.
+
+The intended flow is:
+
+1. Client connects to CentralSSH.
+2. CentralSSH prompts for username, password, and TOTP.
+3. CentralSSH enforces first-login setup if needed.
+4. CentralSSH shows the list of authorized target servers.
+5. The user selects a server.
+6. CentralSSH connects to that server over SSH with the user's stored outbound key.
+7. CentralSSH relays SSH channels and requests between client and target.
+
+## 2. Current implementation status
+
+The operator should know that the repo currently contains both old and new assumptions.
+
+- The top-level spec in `AGENTS.md` requires transparent SSH proxying, including `exec`, SFTP, PTY forwarding, and forwarding support.
+- The current proxy code does relay `session`, `exec`, `subsystem`, PTY, `direct-tcpip`, and remote forwarding requests.
+- The current `README.md` still says `exec`, `subsystem`, and forwarding are denied. That is stale relative to the current code.
+- Agent forwarding is still rejected by policy.
+
+Practical conclusion: operate this build as a transparent SSH gateway in progress, not as a shell-only broker, but do not rely on the README alone for feature expectations.
+
+## 3. Runtime layout
+
+CentralSSH uses a small set of files and directories:
+
+- Main config: `/etc/centralssh/config.json`
+- Server map: `/etc/centralssh/servers.json`
+- Target host trust store: `/etc/centralssh/known_hosts`
+- Gateway host key: `/etc/centralssh/host_ed25519`
+- Audit log: `/var/log/centralssh/audit.jsonl`
+- Binary: `/usr/local/sbin/centralssh`
+- Host-key helper: `/usr/local/bin/cssh-keyscan`
+
+There is one important path discrepancy in the repo:
+
+- The compiled default outbound key root is `/var/lib/centralssh/keys`.
+- The packaged service files and parts of the README still pass `/etc/centralssh/users`.
+- The example config also points at `/var/lib/centralssh/keys`.
+
+Operator recommendation: pick one layout and standardize it everywhere. The cleaner choice is `/var/lib/centralssh/keys` for private keys and `/etc/centralssh` for config and trust data.
+
+## 4. Path precedence
+
+CentralSSH resolves its paths in this order:
+
+1. Explicit CLI flags
+2. Environment variables used by those flags
+3. `settings` overrides inside `config.json` for key root, known_hosts, and audit log
+4. Compiled defaults
+
+Important detail:
+
+- `config.json` itself must be found first, because the process reads it before it can use `settings` inside it.
+- `servers.json` does not have a `settings` override inside `config.json`; use CLI or env if you want to move it.
+- The gateway host key path is not separately configurable. It is always `<config directory>/host_ed25519`.
+
+## 5. CLI and environment variables
+
+Supported CLI flags:
+
+- `--listen`
+- `--config`
+- `--servers`
+- `--known-hosts`
+- `--user-key-root`
+- `--audit-log`
+- `--enforce-strict-security`
+
+Matching environment variables:
+
+- `CENTRALSSH_LISTEN`
+- `CENTRALSSH_CONFIG`
+- `CENTRALSSH_SERVERS`
+- `CENTRALSSH_KNOWN_HOSTS`
+- `CENTRALSSH_USER_KEY_ROOT`
+- `CENTRALSSH_AUDIT_LOG`
+- `CENTRALSSH_ENFORCE_STRICT_SECURITY`
+
+Default listen address:
+
+- `0.0.0.0:7788`
+
+## 6. `config.json`
+
+This file defines users and a few optional runtime path settings.
+
+Example:
+
+```json
+{
+  "users": [
+    {
+      "name": "alice",
+      "password": "TemporaryPassword123!",
+      "totp_secret": null,
+      "must_change_password": true,
+      "allowed_servers": ["git", "httpd"]
+    }
+  ],
+  "settings": {
+    "user_key_root": "/var/lib/centralssh/keys",
+    "known_hosts_path": "/etc/centralssh/known_hosts",
+    "audit_log_path": "/var/log/centralssh/audit.jsonl",
+    "enforce_password_policy": true
+  }
+}
+```
+
+### User fields
+
+- `name`: required; unique; 1 to 64 characters; only `[a-zA-Z0-9._-]`
+- `password`: required; either an Argon2id hash or a bootstrap plaintext password
+- `totp_secret`: base32 TOTP secret or `null`
+- `must_change_password`: boolean
+- `allowed_servers`: required non-empty list of keys that must exist in `servers.json`
+
+### Settings fields
+
+- `user_key_root`: optional override for outbound private key root
+- `known_hosts_path`: optional override for target host trust store
+- `audit_log_path`: optional override for audit log file
+- `enforce_password_policy`: optional boolean; defaults to `true`
+
+### Validation rules
+
+CentralSSH rejects config at load or reload time if:
+
+- there are no users
+- usernames are duplicated or invalid
+- a user has no allowed servers
+- a user references an unknown server
+- an Argon2id string is malformed
+- a bootstrap plaintext password is empty or longer than 256 chars
+- a bootstrap plaintext password is used without `must_change_password=true`
+- a TOTP secret cannot be parsed into a valid runtime TOTP config
+
+## 7. `servers.json`
+
+This file maps logical names shown to users onto target hostnames or IPs.
+
+Example:
+
+```json
+{
+  "servers": {
+    "git": "192.168.86.44",
+    "httpd": "192.168.86.41",
+    "dns": "192.168.86.53"
+  }
+}
+```
+
+Rules:
+
+- Keys are the server names users see and select.
+- Values are the outbound SSH destinations used by CentralSSH.
+- Server names must use the same safe character set as usernames.
+- Host values must be valid IPv4, IPv6, or hostname-style strings.
+
+## 8. Authentication model
+
+CentralSSH only accepts keyboard-interactive SSH auth for gateway login.
+
+- SSH public-key auth to the gateway is rejected.
+- Plain SSH password auth to the gateway is rejected.
+- The transport auth flow is implemented entirely through keyboard-interactive prompts.
+
+The user experience is:
+
+1. SSH client starts a keyboard-interactive login.
+2. CentralSSH prompts for password.
+3. If the account has a TOTP secret, CentralSSH prompts for TOTP.
+4. If `must_change_password=true`, the user must change their password before target access.
+5. If `totp_secret=null`, the user must enroll in TOTP before target access.
+6. The user selects an authorized target.
+
+The gateway does not allow target selection before the auth and first-login flow completes.
+
+## 9. Password handling
+
+CentralSSH uses Argon2id for stored passwords.
+
+Current parameters:
+
+- memory: 65536 KiB
+- iterations: 3
+- parallelism: 1
+
+Bootstrap behavior:
+
+- If `users[].password` is not an Argon2id string, CentralSSH treats it as a bootstrap plaintext password.
+- On startup, it hashes that password and atomically rewrites `config.json`.
+- It also forces `must_change_password=true`.
+
+Operational meaning:
+
+- You can provision accounts quickly with temporary plaintext passwords.
+- After the first process start, those passwords are replaced on disk by Argon2id hashes.
+- Operators should still treat any plaintext bootstrap secret as high risk until the service has started and rewritten config.
+
+Password policy when enabled:
+
+- minimum length: 12
+- maximum length: 256
+- new password must differ from current password
+
+## 10. TOTP handling
+
+CentralSSH uses RFC 6238 style TOTP:
+
+- 6 digits
+- 30 second period
+- skew tolerance of 1 step
+- secrets are base32-encoded
+
+If a user has no `totp_secret`, the gateway generates a new random secret and presents:
+
+- the raw base32 secret
+- an `otpauth://` enrollment URI
+
+The user must then enter a valid current TOTP code to finish enrollment.
+
+Important operator note:
+
+- TOTP enrollment is persisted by rewriting `config.json`.
+- TOTP secrets are not supposed to be logged.
+
+## 11. First-login behavior
+
+Two independent first-login conditions can exist:
+
+- the password must be changed
+- TOTP is not enrolled yet
+
+Current order in practice:
+
+1. Existing password and current TOTP are verified if the user already has TOTP.
+2. If `must_change_password=true`, the user is forced through password change first.
+3. If no TOTP secret exists, TOTP enrollment follows.
+4. Only after both are satisfied can the user select a target.
+
+## 12. Authorization model
+
+Authorization is simple and deny-by-default.
+
+- Each user has an explicit `allowed_servers` list.
+- The selection menu is generated from that list.
+- Server names missing from `servers.json` make config invalid.
+- If the final selection cannot be resolved, the connection is denied.
+
+There is no wildcard access model in the current config schema.
+
+## 13. Outbound target identity
+
+CentralSSH authenticates to the target SSH server using a private key stored on the gateway.
+
+Current behavior:
+
+- The outbound SSH username is always the authenticated CentralSSH username.
+- There is no separate per-target login username field in config.
+- That means user `alice` on the gateway will try to authenticate to the target as SSH user `alice`.
+
+If your target systems need different login names, the current code does not provide a mapping layer for that.
+
+## 14. Outbound private key layout
+
+The current key resolver expects one private key per user per server:
+
+- `<user_key_root>/<username>/<server_name>/id_ed25519`
+
+Example:
+
+- `/var/lib/centralssh/keys/alice/git/id_ed25519`
+
+Validation rules:
+
+- username and server name must use the safe component character set
+- no path traversal
+- no symlinks in the path
+- strict mode requires real directories and files with exact permissions
+
+Recommended production layout:
+
+```text
+/var/lib/centralssh/keys/
+  alice/
+    git/
+      id_ed25519
+    httpd/
+      id_ed25519
+  bob/
+    dns/
+      id_ed25519
+```
+
+Recommended permissions:
+
+- key root directory: `0700`
+- user directory: `0700`
+- server directory: `0700`
+- private key file: `0600`
+- owner: `root`
+
+Important discrepancy to know:
+
+- The README still says a simpler path like `/etc/centralssh/users/<username>/id_ed25519`.
+- The current resolver code expects the extra server-name directory level.
+
+Use the resolver's layout, not the stale README example.
+
+## 15. Target host key verification
+
+CentralSSH does strict outbound host-key verification against a known-hosts style file.
+
+- Trust data lives in `known_hosts`
+- The gateway checks the selected target host against that file before using the outbound key
+- If the host key is missing or mismatched, the target connection fails
+
+CentralSSH does not perform runtime blind trust.
+
+### `cssh-keyscan`
+
+Use the helper tool to populate or update the CentralSSH trust store:
+
+```bash
+sudo cssh-keyscan 192.168.122.123
+```
+
+You can also require expected key material:
+
+```bash
+sudo cssh-keyscan 192.168.122.123 'SHA256:...'
+sudo cssh-keyscan 192.168.122.123 'ssh-ed25519 AAAA...'
+```
+
+Behavior worth knowing:
+
+- For a new host without an expected key, the tool requires interactive TOFU confirmation.
+- For a new host with expected key material, the tool auto-accepts only if at least one scanned key matches.
+- If a host already exists in `known_hosts` and presents any new key, the tool refuses to update and exits with a security alert.
+
+This is intentionally conservative. Treat that refusal as either key rotation that needs verification or a possible MITM condition.
+
+## 16. Gateway host key
+
+The gateway's own server host key is:
+
+- `<config directory>/host_ed25519`
+
+Usually:
+
+- `/etc/centralssh/host_ed25519`
+
+Current behavior:
+
+- If the file does not exist, CentralSSH generates a new Ed25519 host key automatically.
+- If it exists, it must be a real regular file, not a symlink.
+- Strict mode requires mode `0600` and uid `0`.
+
+Operator implication:
+
+- The first service start can create the gateway host key for you.
+- If you replace it later, preserve strict permissions and ownership.
+- If you lose it, clients will see a host key change.
+
+## 17. Audit logging
+
+CentralSSH writes JSON Lines to the configured audit log.
+
+Default:
+
+- `/var/log/centralssh/audit.jsonl`
+
+The log file is opened in append mode and each event is flushed with `sync_data()`.
+
+Current event types include at least:
+
+- `auth_attempt`
+- `auth_password`
+- `auth_totp`
+- `server_selected`
+- `proxy_start`
+- `proxy_end`
+- `config_reload`
+- `agent_forward_request`
+
+Fields currently written:
+
+- `timestamp`
+- `event_type`
+- `session_id`
+- `source_ip`
+- `username`
+- `target_server`
+- `result`
+- `reason_code`
+
+Result values:
+
+- `success`
+- `failure`
+- `blocked`
+
+The operator should monitor:
+
+- repeated `auth_attempt` failures
+- `blocked` results from rate limiting
+- `proxy_start` failures
+- `config_reload` failures
+
+## 18. Rate limiting
+
+CentralSSH applies token-bucket limits both per IP and per IP-plus-username.
+
+Current values:
+
+- per IP capacity: 30
+- per IP refill: 1 token per second
+- per user+IP capacity: 10
+- per user+IP refill: 1 token every 30 seconds
+- max tracked entries per map: 8192
+- idle state cleanup TTL: 30 minutes
+
+Operational meaning:
+
+- bursts are allowed up to the bucket capacity
+- repeated bad attempts will eventually be blocked
+- hitting the maximum map size can also trigger rate-limit denial for new entries
+
+## 19. Security mode
+
+`--enforce-strict-security` defaults to `true`.
+
+In strict mode, CentralSSH requires:
+
+- config file: regular file, mode `0600`, root-owned
+- servers file: regular file, mode `0600`, root-owned
+- known_hosts file: regular file, mode `0600`, root-owned
+- user key root: directory, mode `0700`, root-owned
+- outbound key paths under that root to also satisfy strict checks
+- audit log: regular file, mode `0600`, root-owned
+- gateway host key: regular file, mode `0600`, root-owned
+
+Even outside strict mode:
+
+- symlinked path components are rejected
+- parent-directory traversal is rejected
+- key paths still have to be real files and directories
+
+Non-strict mode is useful for local development, not for production deployment.
+
+## 20. Safe writes and config mutation
+
+When CentralSSH rewrites `config.json`, it uses an atomic replace flow:
+
+1. create a temp file in the same directory
+2. write the full new JSON
+3. `sync_all()` the temp file
+4. preserve permissions and ownership where possible
+5. rename over the old file
+6. fsync the parent directory
+
+This rewrite path is used for:
+
+- bootstrap password migration
+- password changes
+- TOTP enrollment persistence
+
+Operational consequence:
+
+- If the service cannot preserve ownership during a rewrite, the write fails
+- Running the service as root is the expected production model
+
+## 21. Service management
+
+### FreeBSD
+
+The repo includes an rc.d script.
+
+Common commands:
+
+```bash
+sudo sysrc centralssh_enable=YES
+sudo service centralssh start
+sudo service centralssh status
+sudo service centralssh restart
+```
+
+Supported rc.conf knobs:
+
+```conf
+centralssh_enable="YES"
+centralssh_listen="0.0.0.0:7788"
+centralssh_config="/etc/centralssh/config.json"
+centralssh_servers="/etc/centralssh/servers.json"
+centralssh_known_hosts="/etc/centralssh/known_hosts"
+centralssh_user_key_root="/etc/centralssh/users"
+centralssh_audit_log="/var/log/centralssh/audit.jsonl"
+```
+
+Important note:
+
+- The rc script still defaults `centralssh_user_key_root` to `/etc/centralssh/users`.
+- If you choose `/var/lib/centralssh/keys`, override this explicitly in `rc.conf`.
+
+### Linux
+
+The repo includes a systemd unit:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now centralssh
+sudo systemctl status centralssh
+```
+
+Important note:
+
+- The shipped unit also passes `--user-key-root /etc/centralssh/users`.
+- If you want `/var/lib/centralssh/keys`, update the unit or override it.
+
+## 22. Installation behavior
+
+`make install` does the following:
+
+- installs `centralssh` to `/usr/local/sbin`
+- installs `cssh-keyscan` to `/usr/local/bin`
+- creates config layout under `/etc/centralssh`
+- creates the log directory
+- installs example `config.json` and `servers.json` only if missing
+- creates empty `known_hosts` and `audit.jsonl` only if missing
+- installs either the FreeBSD rc.d script or the systemd unit
+
+It does not fully provision per-user per-server outbound keys for you.
+
+## 23. Recommended production setup
+
+1. Build and install CentralSSH.
+2. Decide and standardize your outbound key root.
+3. Create or verify:
+   `/etc/centralssh/config.json`
+   `/etc/centralssh/servers.json`
+   `/etc/centralssh/known_hosts`
+   `/var/log/centralssh/audit.jsonl`
+4. Create outbound private key directories for each user/server pair.
+5. Install the correct target public keys on the target systems.
+6. Populate `known_hosts` with `cssh-keyscan`.
+7. Start the service.
+8. Verify a full login for one real user.
+9. Verify target access and audit log output.
+
+## 24. What to standardize before rollout
+
+Before you put this into regular service, choose and document:
+
+- the authoritative outbound key root
+- whether all target systems use matching Unix usernames
+- who is allowed to edit `config.json`
+- how target host key rotation is approved and executed
+- how per-user outbound keys are generated, distributed, and rotated
+- how audit logs are rotated and archived
+
+## 25. Operational checks
+
+Useful checks after install:
+
+```bash
+sudo ls -ld /etc/centralssh /var/log/centralssh
+sudo ls -l /etc/centralssh/config.json /etc/centralssh/servers.json /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
+sudo find /var/lib/centralssh/keys -type d -exec ls -ld {} \;
+sudo find /var/lib/centralssh/keys -type f -exec ls -l {} \;
+```
+
+If you stayed with `/etc/centralssh/users`, substitute that path consistently.
+
+## 26. Reload behavior
+
+CentralSSH listens for `SIGHUP` and attempts config reload.
+
+Current semantics:
+
+- it reloads `config.json` and `servers.json`
+- it re-validates security checks and config semantics
+- invalid new config does not replace the active in-memory config
+- it writes an audit event for reload success or failure
+
+Practical usage:
+
+```bash
+sudo kill -HUP "$(pgrep -x centralssh)"
+```
+
+## 27. Connection behavior after target selection
+
+Current code supports these behaviors through the proxy layer:
+
+- session channels
+- shell requests
+- `exec` requests
+- PTY allocation
+- PTY resize events
+- environment variable requests
+- subsystem requests, including SFTP-style subsystem forwarding
+- local forwarding via `direct-tcpip`
+- remote forwarding via `tcpip-forward`
+- X11 channel/request forwarding
+
+Current code rejects:
+
+- gateway public-key auth
+- gateway SSH password auth
+- agent forwarding
+
+Operator caution:
+
+- The code path supports much more than the stale README claims.
+- Treat feature support as code-defined until the documentation is reconciled.
+
+## 28. Troubleshooting
+
+### Service fails immediately at startup
+
+Check:
+
+- file existence
+- ownership
+- modes
+- symlink-free paths
+- JSON validity
+- server names referenced by users
+
+Common causes:
+
+- wrong mode on config or keys
+- root ownership missing in strict mode
+- `allowed_servers` references missing server names
+- malformed Argon2id hash
+- invalid TOTP secret
+
+### User can log in to the gateway prompts but cannot reach a target
+
+Check:
+
+- the selected server exists in `servers.json`
+- the user's outbound private key file exists at the expected per-user per-server path
+- the target host key is present in `known_hosts`
+- the target accepts that user's public key
+- the target account name matches the CentralSSH username
+
+### Target connection fails with host-key errors
+
+Check:
+
+- whether the target is missing from `known_hosts`
+- whether the target rotated keys
+- whether you scanned the wrong hostname/IP variant
+
+Use:
+
+```bash
+sudo cssh-keyscan <target>
+```
+
+If the host already exists and the tool reports a new key, stop and verify before modifying trust data.
+
+### Client sees odd local SSH config behavior
+
+When testing from a workstation with heavy local SSH customization, isolate the client:
+
+```bash
+ssh -F /dev/null -p 7788 <gateway-host>
+sftp -F /dev/null -P 7788 <gateway-host>
+```
+
+### Reload seems ignored
+
+Check the audit log for `config_reload` and confirm:
+
+- the signal reached the process
+- the new config passed validation
+
+## 29. Known operator-facing inconsistencies in this repo
+
+These are the main ones to be aware of:
+
+- README feature claims are behind the actual proxy implementation.
+- README and service scripts still point at `/etc/centralssh/users` in places.
+- The code default and example config use `/var/lib/centralssh/keys`.
+- The code expects keys under `<root>/<user>/<server>/id_ed25519`, which is more specific than the older README text.
+
+If you are deploying this, resolve those inconsistencies in your own local packaging and runbook first.
+
+## 30. Practical deployment recommendation
+
+For a clean operator runbook, use this layout:
+
+- `/etc/centralssh/config.json`
+- `/etc/centralssh/servers.json`
+- `/etc/centralssh/known_hosts`
+- `/etc/centralssh/host_ed25519`
+- `/var/lib/centralssh/keys/<user>/<server>/id_ed25519`
+- `/var/log/centralssh/audit.jsonl`
+
+Then update service configuration so the process is launched with:
+
+- `--config /etc/centralssh/config.json`
+- `--servers /etc/centralssh/servers.json`
+- `--known-hosts /etc/centralssh/known_hosts`
+- `--user-key-root /var/lib/centralssh/keys`
+- `--audit-log /var/log/centralssh/audit.jsonl`
+
+That matches the current code structure best and keeps config, trust data, secrets, and logs separated cleanly.
