@@ -190,6 +190,23 @@ impl AuthEngine {
         }
     }
 
+    pub fn verify_password_and_optional_totp_constant_time(
+        &self,
+        users: &[UserRecord],
+        requested_username: &str,
+        requested_password: &str,
+        requested_totp: &str,
+    ) -> Result<UserRecord> {
+        let user =
+            self.verify_password_constant_time(users, requested_username, requested_password)?;
+
+        if let Some(secret) = &user.totp_secret {
+            self.verify_totp_code(secret, requested_totp)?;
+        }
+
+        Ok(user)
+    }
+
     pub fn enforce_password_policy(&self, new_password: &str, old_hash: &str) -> Result<()> {
         if new_password.len() < 12 {
             return Err(CentralSshError::InvalidConfig(
@@ -304,6 +321,76 @@ mod tests {
     fn build_totp_from_secret_rejects_short_decodable_secret() {
         let secret = "JBSWY3DPEHPK3PXP";
         assert!(build_totp_from_secret(secret).is_err());
+    }
+
+    #[test]
+    fn verify_password_and_optional_totp_accepts_valid_combination() {
+        let auth = AuthEngine::new().expect("engine");
+        let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+        let totp = build_totp_from_secret(secret).expect("totp");
+        let user = UserRecord {
+            name: "alice".to_string(),
+            password: auth.hash_password("correct horse battery staple").expect("hash"),
+            totp_secret: Some(secret.to_string()),
+            must_change_password: false,
+            allowed_servers: vec!["git".to_string()],
+        };
+
+        let code = totp.generate_current().expect("code");
+        let verified = auth
+            .verify_password_and_optional_totp_constant_time(
+                &[user.clone()],
+                "alice",
+                "correct horse battery staple",
+                &code,
+            )
+            .expect("valid combo");
+
+        assert_eq!(verified.name, user.name);
+    }
+
+    #[test]
+    fn verify_password_and_optional_totp_rejects_invalid_totp() {
+        let auth = AuthEngine::new().expect("engine");
+        let user = UserRecord {
+            name: "alice".to_string(),
+            password: auth.hash_password("correct horse battery staple").expect("hash"),
+            totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
+            must_change_password: false,
+            allowed_servers: vec!["git".to_string()],
+        };
+
+        let result = auth.verify_password_and_optional_totp_constant_time(
+            &[user],
+            "alice",
+            "correct horse battery staple",
+            "000000",
+        );
+
+        assert!(matches!(result, Err(CentralSshError::TotpInvalid)));
+    }
+
+    #[test]
+    fn verify_password_and_optional_totp_allows_unenrolled_users() {
+        let auth = AuthEngine::new().expect("engine");
+        let user = UserRecord {
+            name: "alice".to_string(),
+            password: auth.hash_password("correct horse battery staple").expect("hash"),
+            totp_secret: None,
+            must_change_password: true,
+            allowed_servers: vec!["git".to_string()],
+        };
+
+        let verified = auth
+            .verify_password_and_optional_totp_constant_time(
+                &[user.clone()],
+                "alice",
+                "correct horse battery staple",
+                "ignored",
+            )
+            .expect("password-only user");
+
+        assert_eq!(verified.name, user.name);
     }
 
     #[tokio::test]
