@@ -16,7 +16,7 @@ jobs:
         run: |
           set -eu
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git jq sudo
+          apt-get install -y --no-install-recommends ca-certificates curl git jq sudo zstd
 
       - name: Check out repository
         shell: sh
