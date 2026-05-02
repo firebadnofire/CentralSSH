@@ -7,6 +7,8 @@ on:
 jobs:
   build-freebsd-package:
     runs-on: ubuntu-22.04
+    container:
+      image: node:20-bookworm
 
     steps:
       - name: Prepare checkout runtime
@@ -14,7 +16,7 @@ jobs:
         run: |
           set -eu
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git jq nodejs
+          apt-get install -y --no-install-recommends ca-certificates curl git jq
 
       - name: Check out repository
         shell: sh
