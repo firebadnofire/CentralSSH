@@ -42,6 +42,7 @@ struct GatewayHandler {
 struct PendingAuthContext {
     user: UserRecord,
     new_password_hash: Option<String>,
+    login_password: Option<Zeroizing<String>>,
 }
 
 enum KeyboardAuthState {
@@ -172,6 +173,21 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         Self::keyboard_prompt(instructions, "Verification code: ", false)
     }
 
+    fn should_prompt_existing_totp(user: Option<&UserRecord>) -> bool {
+        user.is_none_or(|candidate| candidate.totp_secret.is_some())
+    }
+
+    fn build_pending_context(
+        user: UserRecord,
+        login_password: Option<Zeroizing<String>>,
+    ) -> PendingAuthContext {
+        PendingAuthContext {
+            user,
+            new_password_hash: None,
+            login_password,
+        }
+    }
+
     async fn selection_prompt(&self, username: &str, error_message: Option<&str>) -> Result<Auth> {
         let entries = self.allowed_server_entries(username).await?;
         let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
@@ -249,12 +265,70 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         username: String,
         password: String,
     ) -> std::result::Result<Auth, russh::Error> {
-        self.keyboard_auth_state = Some(KeyboardAuthState::AwaitExistingTotp {
-            username: username.clone(),
-            password: Zeroizing::new(password),
-        });
+        let snapshot = self.state.config_store.snapshot().await;
+        let matched_user = snapshot
+            .config
+            .users
+            .iter()
+            .find(|candidate| candidate.name == username);
 
-        Ok(Self::totp_prompt(&username, None))
+        if Self::should_prompt_existing_totp(matched_user) {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitExistingTotp {
+                username: username.clone(),
+                password: Zeroizing::new(password),
+            });
+            return Ok(Self::totp_prompt(&username, None));
+        }
+
+        let Some(user) = matched_user.cloned() else {
+            return Ok(Self::totp_prompt(&username, None));
+        };
+
+        self.advance_after_initial_auth(
+            Self::build_pending_context(user, Some(Zeroizing::new(password))),
+            snapshot
+                .config
+                .settings
+                .enforce_password_policy
+                .unwrap_or(true),
+        )
+        .await
+    }
+
+    async fn advance_after_initial_auth(
+        &mut self,
+        context: PendingAuthContext,
+        enforce_password_policy: bool,
+    ) -> std::result::Result<Auth, russh::Error> {
+        let username = context.user.name.clone();
+
+        if context.user.must_change_password {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
+                context,
+                enforce_password_policy,
+            });
+            return Ok(Self::new_password_prompt(&username, None));
+        }
+
+        if context.user.totp_secret.is_some() {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitSelection { context });
+            return self
+                .selection_prompt(&username, None)
+                .await
+                .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())));
+        }
+
+        let secret = self.state.auth.generate_totp_secret();
+        let url = self
+            .state
+            .auth
+            .otpauth_url("CentralSSH", &username, &secret)
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+        self.keyboard_auth_state = Some(KeyboardAuthState::AwaitEnrollmentTotp {
+            context,
+            secret: secret.clone(),
+        });
+        Ok(Self::enrollment_prompt(&username, &secret, &url, None))
     }
 
     async fn handle_existing_totp_response(
@@ -300,6 +374,7 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                 let context = PendingAuthContext {
                     user,
                     new_password_hash: None,
+                    login_password: None,
                 };
 
                 if context.user.totp_secret.is_some() {
@@ -313,38 +388,15 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                     .await;
                 }
 
-                if context.user.must_change_password {
-                    self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
-                        context,
-                        enforce_password_policy: snapshot
-                            .config
-                            .settings
-                            .enforce_password_policy
-                            .unwrap_or(true),
-                    });
-                    Ok(Self::new_password_prompt(&username, None))
-                } else {
-                    if context.user.totp_secret.is_some() {
-                        self.keyboard_auth_state = Some(KeyboardAuthState::AwaitSelection { context });
-                        self.selection_prompt(&username, None)
-                            .await
-                            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))
-                    } else {
-                        let secret = self.state.auth.generate_totp_secret();
-                        let url = self
-                            .state
-                            .auth
-                            .otpauth_url("CentralSSH", &username, &secret)
-                            .map_err(|error| {
-                                russh::Error::IO(std::io::Error::other(error.to_string()))
-                            })?;
-                        self.keyboard_auth_state = Some(KeyboardAuthState::AwaitEnrollmentTotp {
-                            context,
-                            secret: secret.clone(),
-                        });
-                        Ok(Self::enrollment_prompt(&username, &secret, &url, None))
-                    }
-                }
+                self.advance_after_initial_auth(
+                    context,
+                    snapshot
+                        .config
+                        .settings
+                        .enforce_password_policy
+                        .unwrap_or(true),
+                )
+                .await
             }
             Err(error) => {
                 if matches!(error, CentralSshError::TotpInvalid) {
@@ -519,7 +571,9 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         code: String,
     ) -> std::result::Result<Auth, russh::Error> {
         let username = context.user.name.clone();
+        let staged_login_password = context.login_password.take();
         if let Err(error) = self.state.auth.verify_totp_code(&secret, code.trim()) {
+            context.login_password = staged_login_password;
             self.log_event(
                 "auth_totp",
                 Some(&username),
@@ -544,6 +598,50 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                 &url,
                 Some("Invalid TOTP code."),
             ));
+        }
+
+        if let Some(login_password) = staged_login_password {
+            if let Err(error) = self
+                .state
+                .auth
+                .consume_rate_limit_token(self.peer_ip, &username)
+                .await
+            {
+                self.log_event(
+                    "auth_attempt",
+                    Some(&username),
+                    None,
+                    AuditResult::Blocked,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Ok(Self::reject_to_keyboard_interactive());
+            }
+
+            if let Err(error) = self.state.auth.verify_password_constant_time(
+                &self.state.config_store.snapshot().await.config.users,
+                &username,
+                login_password.as_str(),
+            ) {
+                self.log_event(
+                    "auth_attempt",
+                    Some(&username),
+                    None,
+                    AuditResult::Failure,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Ok(Self::reject_to_keyboard_interactive());
+            }
+
+            self.log_event(
+                "auth_password",
+                Some(&username),
+                None,
+                AuditResult::Success,
+                None,
+            )
+            .await;
         }
 
         self.log_event(
@@ -1169,5 +1267,32 @@ mod tests {
 
         let mode = fs::metadata(&real_key).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    fn existing_totp_prompt_is_skipped_for_unenrolled_users() {
+        let user = UserRecord {
+            name: "alice".to_string(),
+            password: "ignored".to_string(),
+            totp_secret: None,
+            must_change_password: true,
+            allowed_servers: vec!["git".to_string()],
+        };
+
+        assert!(!GatewayHandler::should_prompt_existing_totp(Some(&user)));
+    }
+
+    #[test]
+    fn existing_totp_prompt_is_kept_for_enrolled_or_unknown_users() {
+        let user = UserRecord {
+            name: "alice".to_string(),
+            password: "ignored".to_string(),
+            totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
+            must_change_password: false,
+            allowed_servers: vec!["git".to_string()],
+        };
+
+        assert!(GatewayHandler::should_prompt_existing_totp(Some(&user)));
+        assert!(GatewayHandler::should_prompt_existing_totp(None));
     }
 }
