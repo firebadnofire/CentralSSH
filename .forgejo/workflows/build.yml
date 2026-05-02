@@ -9,14 +9,19 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: node:20-bookworm
+      options: --network ci-network
 
     steps:
       - name: Prepare checkout runtime
         shell: sh
         run: |
           set -eu
+          {
+            echo 'Acquire::http::Proxy "http://apt-cacher-ng:3142";'
+            echo 'Acquire::https::Proxy "http://apt-cacher-ng:3142";'
+          } > /etc/apt/apt.conf.d/01proxy
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git jq sudo zstd
+          apt-get install -y --no-install-recommends ca-certificates curl git jq sudo zstd rsync
 
       - name: Check out repository
         shell: sh
