@@ -32,8 +32,8 @@ Practical conclusion: operate this build as a transparent SSH gateway in progres
 
 CentralSSH uses a small set of files and directories:
 
-- Main config: `/etc/centralssh/config.json`
-- Server map: `/etc/centralssh/servers.json`
+- Main config: `/etc/centralssh/config.toml`
+- Server map: `/etc/centralssh/servers.toml`
 - Target host trust store: `/etc/centralssh/known_hosts`
 - Gateway host key: `/etc/centralssh/host_ed25519`
 - Audit log: `/var/log/centralssh/audit.jsonl`
@@ -54,13 +54,13 @@ CentralSSH resolves its paths in this order:
 
 1. Explicit CLI flags
 2. Environment variables used by those flags
-3. `settings` overrides inside `config.json` for key root, known_hosts, and audit log
+3. `settings` overrides inside `config.toml` for key root, known_hosts, and audit log
 4. Compiled defaults
 
 Important detail:
 
-- `config.json` itself must be found first, because the process reads it before it can use `settings` inside it.
-- `servers.json` does not have a `settings` override inside `config.json`; use CLI or env if you want to move it.
+- `config.toml` itself must be found first, because the process reads it before it can use `settings` inside it.
+- `servers.toml` does not have a `settings` override inside `config.toml`; use CLI or env if you want to move it.
 - The gateway host key path is not separately configurable. It is always `<config directory>/host_ed25519`.
 
 ## 5. CLI and environment variables
@@ -89,39 +89,33 @@ Default listen address:
 
 - `0.0.0.0:7788`
 
-## 6. `config.json`
+## 6. `config.toml`
 
 This file defines users and a few optional runtime path settings.
 
 Example:
 
-```json
-{
-  "users": [
-    {
-      "name": "alice",
-      "password": "TemporaryPassword123!",
-      "totp_secret": null,
-      "must_change_password": true,
-      "allowed_servers": ["git", "httpd"]
-    }
-  ],
-  "settings": {
-    "user_key_root": "/var/lib/centralssh/keys",
-    "known_hosts_path": "/etc/centralssh/known_hosts",
-    "audit_log_path": "/var/log/centralssh/audit.jsonl",
-    "enforce_password_policy": true
-  }
-}
+```toml
+[[users]]
+name = "alice"
+password = "TemporaryPassword123!"
+must_change_password = true
+allowed_servers = ["git", "httpd"]
+
+[settings]
+user_key_root = "/var/lib/centralssh/keys"
+known_hosts_path = "/etc/centralssh/known_hosts"
+audit_log_path = "/var/log/centralssh/audit.jsonl"
+enforce_password_policy = true
 ```
 
 ### User fields
 
 - `name`: required; unique; 1 to 64 characters; only `[a-zA-Z0-9._-]`
 - `password`: required; either an Argon2id hash or a bootstrap plaintext password
-- `totp_secret`: base32 TOTP secret or `null`
+- `totp_secret`: optional base32 TOTP secret
 - `must_change_password`: boolean
-- `allowed_servers`: required non-empty list of keys that must exist in `servers.json`
+- `allowed_servers`: required non-empty list of keys that must exist in `servers.toml`
 
 ### Settings fields
 
@@ -143,20 +137,17 @@ CentralSSH rejects config at load or reload time if:
 - a bootstrap plaintext password is used without `must_change_password=true`
 - a TOTP secret cannot be parsed into a valid runtime TOTP config
 
-## 7. `servers.json`
+## 7. `servers.toml`
 
 This file maps logical names shown to users onto target hostnames or IPs.
 
 Example:
 
-```json
-{
-  "servers": {
-    "git": "192.168.86.44",
-    "httpd": "192.168.86.41",
-    "dns": "192.168.86.53"
-  }
-}
+```toml
+[servers]
+git = "192.168.86.44"
+httpd = "192.168.86.41"
+dns = "192.168.86.53"
 ```
 
 Rules:
@@ -198,7 +189,7 @@ Current parameters:
 Bootstrap behavior:
 
 - If `users[].password` is not an Argon2id string, CentralSSH treats it as a bootstrap plaintext password.
-- On startup, it hashes that password and atomically rewrites `config.json`.
+- On startup, it hashes that password and atomically rewrites `config.toml`.
 - It also forces `must_change_password=true`.
 
 Operational meaning:
@@ -231,7 +222,7 @@ The user must then enter a valid current TOTP code to finish enrollment.
 
 Important operator note:
 
-- TOTP enrollment is persisted by rewriting `config.json`.
+- TOTP enrollment is persisted by rewriting `config.toml`.
 - TOTP secrets are not supposed to be logged.
 
 ## 11. First-login behavior
@@ -254,7 +245,7 @@ Authorization is simple and deny-by-default.
 
 - Each user has an explicit `allowed_servers` list.
 - The selection menu is generated from that list.
-- Server names missing from `servers.json` make config invalid.
+- Server names missing from `servers.toml` make config invalid.
 - If the final selection cannot be resolved, the connection is denied.
 
 There is no wildcard access model in the current config schema.
@@ -287,6 +278,8 @@ Validation rules:
 - no path traversal
 - no symlinks in the path
 - strict mode requires real directories and files with exact permissions
+- startup creates missing user directories, server directories, and `id_ed25519` files for configured user/server pairs
+- existing private keys are left untouched and are not overwritten
 
 Recommended production layout:
 
@@ -460,10 +453,10 @@ Non-strict mode is useful for local development, not for production deployment.
 
 ## 20. Safe writes and config mutation
 
-When CentralSSH rewrites `config.json`, it uses an atomic replace flow:
+When CentralSSH rewrites `config.toml`, it uses an atomic replace flow:
 
 1. create a temp file in the same directory
-2. write the full new JSON
+2. write the full new TOML
 3. `sync_all()` the temp file
 4. preserve permissions and ownership where possible
 5. rename over the old file
@@ -500,8 +493,8 @@ Supported rc.conf knobs:
 ```conf
 centralssh_enable="YES"
 centralssh_listen="0.0.0.0:7788"
-centralssh_config="/etc/centralssh/config.json"
-centralssh_servers="/etc/centralssh/servers.json"
+centralssh_config="/etc/centralssh/config.toml"
+centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/etc/centralssh/users"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
@@ -535,7 +528,7 @@ Important note:
 - installs `cssh-keyscan` to `/usr/local/bin`
 - creates config layout under `/etc/centralssh`
 - creates the log directory
-- installs example `config.json` and `servers.json` only if missing
+- installs example `config.toml` and `servers.toml` only if missing
 - creates empty `known_hosts` and `audit.jsonl` only if missing
 - installs either the FreeBSD rc.d script or the systemd unit
 
@@ -546,8 +539,8 @@ It does not fully provision per-user per-server outbound keys for you.
 1. Build and install CentralSSH.
 2. Decide and standardize your outbound key root.
 3. Create or verify:
-   `/etc/centralssh/config.json`
-   `/etc/centralssh/servers.json`
+   `/etc/centralssh/config.toml`
+   `/etc/centralssh/servers.toml`
    `/etc/centralssh/known_hosts`
    `/var/log/centralssh/audit.jsonl`
 4. Create outbound private key directories for each user/server pair.
@@ -563,7 +556,7 @@ Before you put this into regular service, choose and document:
 
 - the authoritative outbound key root
 - whether all target systems use matching Unix usernames
-- who is allowed to edit `config.json`
+- who is allowed to edit `config.toml`
 - how target host key rotation is approved and executed
 - how per-user outbound keys are generated, distributed, and rotated
 - how audit logs are rotated and archived
@@ -574,7 +567,7 @@ Useful checks after install:
 
 ```bash
 sudo ls -ld /etc/centralssh /var/log/centralssh
-sudo ls -l /etc/centralssh/config.json /etc/centralssh/servers.json /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
+sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
 sudo find /var/lib/centralssh/keys -type d -exec ls -ld {} \;
 sudo find /var/lib/centralssh/keys -type f -exec ls -l {} \;
 ```
@@ -587,7 +580,7 @@ CentralSSH listens for `SIGHUP` and attempts config reload.
 
 Current semantics:
 
-- it reloads `config.json` and `servers.json`
+- it reloads `config.toml` and `servers.toml`
 - it re-validates security checks and config semantics
 - invalid new config does not replace the active in-memory config
 - it writes an audit event for reload success or failure
@@ -634,7 +627,7 @@ Check:
 - ownership
 - modes
 - symlink-free paths
-- JSON validity
+- TOML validity
 - server names referenced by users
 
 Common causes:
@@ -649,7 +642,7 @@ Common causes:
 
 Check:
 
-- the selected server exists in `servers.json`
+- the selected server exists in `servers.toml`
 - the user's outbound private key file exists at the expected per-user per-server path
 - the target host key is present in `known_hosts`
 - the target accepts that user's public key
@@ -702,8 +695,8 @@ If you are deploying this, resolve those inconsistencies in your own local packa
 
 For a clean operator runbook, use this layout:
 
-- `/etc/centralssh/config.json`
-- `/etc/centralssh/servers.json`
+- `/etc/centralssh/config.toml`
+- `/etc/centralssh/servers.toml`
 - `/etc/centralssh/known_hosts`
 - `/etc/centralssh/host_ed25519`
 - `/var/lib/centralssh/keys/<user>/<server>/id_ed25519`
@@ -711,8 +704,8 @@ For a clean operator runbook, use this layout:
 
 Then update service configuration so the process is launched with:
 
-- `--config /etc/centralssh/config.json`
-- `--servers /etc/centralssh/servers.json`
+- `--config /etc/centralssh/config.toml`
+- `--servers /etc/centralssh/servers.toml`
 - `--known-hosts /etc/centralssh/known_hosts`
 - `--user-key-root /var/lib/centralssh/keys`
 - `--audit-log /var/log/centralssh/audit.jsonl`

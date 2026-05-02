@@ -32,8 +32,8 @@ CentralSSH is strictly an SSH server.
 
 Default runtime paths:
 
-- Config: `/etc/centralssh/config.json`
-- Servers map: `/etc/centralssh/servers.json`
+- Config: `/etc/centralssh/config.toml`
+- Servers map: `/etc/centralssh/servers.toml`
 - Known hosts: `/etc/centralssh/known_hosts`
 - User key root: `/etc/centralssh/users`
 - Audit log: `/var/log/centralssh/audit.jsonl`
@@ -86,8 +86,8 @@ Optional rc.conf keys:
 ```conf
 centralssh_enable="YES"
 centralssh_listen="0.0.0.0:7788"
-centralssh_config="/etc/centralssh/config.json"
-centralssh_servers="/etc/centralssh/servers.json"
+centralssh_config="/etc/centralssh/config.toml"
+centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/etc/centralssh/users"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
@@ -107,7 +107,7 @@ sudo make install
 
 - Installs `centralssh` and `cssh-keyscan`.
 - Creates `/etc/centralssh` layout.
-- Installs example `config.json` and `servers.json` if missing.
+- Installs example `config.toml` and `servers.toml` if missing.
 - Creates `/etc/centralssh/known_hosts` if missing.
 - Creates `/var/log/centralssh/audit.jsonl` if missing.
 - Installs FreeBSD rc script on FreeBSD.
@@ -115,37 +115,30 @@ sudo make install
 
 ## Configuration
 
-CentralSSH reads config from JSON files.
+CentralSSH reads config from TOML files.
 
-### `/etc/centralssh/config.json`
+### `/etc/centralssh/config.toml`
 
 Example with two users:
 
-```json
-{
-  "users": [
-    {
-      "name": "alice",
-      "password": "TemporaryPassword123!",
-      "totp_secret": null,
-      "must_change_password": true,
-      "allowed_servers": ["git", "httpd"]
-    },
-    {
-      "name": "bob",
-      "password": "AnotherTempPass123!",
-      "totp_secret": null,
-      "must_change_password": true,
-      "allowed_servers": ["dns"]
-    }
-  ],
-  "settings": {
-    "user_key_root": "/etc/centralssh/users",
-    "known_hosts_path": "/etc/centralssh/known_hosts",
-    "audit_log_path": "/var/log/centralssh/audit.jsonl",
-    "enforce_password_policy": true
-  }
-}
+```toml
+[[users]]
+name = "alice"
+password = "TemporaryPassword123!"
+must_change_password = true
+allowed_servers = ["git", "httpd"]
+
+[[users]]
+name = "bob"
+password = "AnotherTempPass123!"
+must_change_password = true
+allowed_servers = ["dns"]
+
+[settings]
+user_key_root = "/etc/centralssh/users"
+known_hosts_path = "/etc/centralssh/known_hosts"
+audit_log_path = "/var/log/centralssh/audit.jsonl"
+enforce_password_policy = true
 ```
 
 Fields:
@@ -153,9 +146,9 @@ Fields:
 - `users`: required non-empty array.
 - `users[].name`: required, unique, `1..64`, chars `[a-zA-Z0-9._-]`.
 - `users[].password`: Argon2id hash or bootstrap plaintext.
-- `users[].totp_secret`: base32 TOTP secret or `null`.
+- `users[].totp_secret`: optional base32 TOTP secret.
 - `users[].must_change_password`: boolean.
-- `users[].allowed_servers`: required non-empty list of server names in `servers.json`.
+- `users[].allowed_servers`: required non-empty list of server names in `servers.toml`.
 - `settings.user_key_root`: optional path override.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
@@ -166,16 +159,13 @@ Notes:
 - Outbound target SSH username is always the authenticated CentralSSH username.
 - If bootstrap plaintext passwords are present, CentralSSH hashes them with Argon2id at startup and atomically rewrites config.
 
-### `/etc/centralssh/servers.json`
+### `/etc/centralssh/servers.toml`
 
-```json
-{
-  "servers": {
-    "git": "192.168.86.44",
-    "httpd": "192.168.86.41",
-    "dns": "192.168.86.53"
-  }
-}
+```toml
+[servers]
+git = "192.168.86.44"
+httpd = "192.168.86.41"
+dns = "192.168.86.53"
 ```
 
 Rules:
@@ -208,19 +198,20 @@ Rules:
 
 Supported approaches:
 
-- Recommended bootstrap flow: set a temporary plaintext in `config.json` and `must_change_password=true`; CentralSSH migrates it to Argon2id at startup.
+- Recommended bootstrap flow: set a temporary plaintext in `config.toml` and `must_change_password=true`; CentralSSH migrates it to Argon2id at startup.
 - Pre-hash offline and place Argon2id string directly in `users[].password`.
 
 ## Per-User Outbound Keys
 
 Outbound private key path pattern:
 
-- `/etc/centralssh/users/<username>/id_ed25519`
+- `<user_key_root>/<username>/<server>/id_ed25519`
 
 Behavior:
 
-- On startup, CentralSSH reconciles configured users.
-- If user key dir/key is missing, CentralSSH creates it.
+- On startup, CentralSSH reconciles configured users and allowed servers.
+- Missing user directories, server directories, and `id_ed25519` files are created automatically.
+- Existing keys are not overwritten.
 - Keys are for outbound proxy auth only, not gateway login.
 
 ## Host Key Management (`cssh-keyscan`)
@@ -258,8 +249,8 @@ Security behavior:
 
 Required for strict mode (`--enforce-strict-security true`, default):
 
-- `/etc/centralssh/config.json`: owner `root`, mode `0600`
-- `/etc/centralssh/servers.json`: owner `root`, mode `0600`
+- `/etc/centralssh/config.toml`: owner `root`, mode `0600`
+- `/etc/centralssh/servers.toml`: owner `root`, mode `0600`
 - `/etc/centralssh/known_hosts`: owner `root`, mode `0600`
 - `/etc/centralssh/users`: owner `root`, mode `0700`
 - `/var/log/centralssh/audit.jsonl`: owner `root`, mode `0600`
@@ -270,7 +261,7 @@ Run these checks after installation:
 
 ```bash
 sudo ls -ld /etc/centralssh /etc/centralssh/users /var/log/centralssh
-sudo ls -l /etc/centralssh/config.json /etc/centralssh/servers.json /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
+sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
 sudo service centralssh status || sudo systemctl status centralssh
 ```
 
@@ -293,8 +284,8 @@ Run manually:
 ```bash
 /usr/local/sbin/centralssh \
   --listen 0.0.0.0:7788 \
-  --config /etc/centralssh/config.json \
-  --servers /etc/centralssh/servers.json \
+  --config /etc/centralssh/config.toml \
+  --servers /etc/centralssh/servers.toml \
   --known-hosts /etc/centralssh/known_hosts \
   --user-key-root /etc/centralssh/users \
   --audit-log /var/log/centralssh/audit.jsonl
@@ -378,8 +369,8 @@ Missing one or more required paths.
 
 Check:
 
-- `/etc/centralssh/config.json`
-- `/etc/centralssh/servers.json`
+- `/etc/centralssh/config.toml`
+- `/etc/centralssh/servers.toml`
 - `/etc/centralssh/known_hosts`
 - `/var/log/centralssh/audit.jsonl`
 
@@ -418,12 +409,12 @@ sudo service centralssh status
 
 ### `invalid configuration: user '<name>' references unknown server '<server>'`
 
-Cause: `allowed_servers` entry does not exactly match any key in `servers.json`.
+Cause: `allowed_servers` entry does not exactly match any key in `servers.toml`.
 
 Fix:
 
 - Correct spelling/case in `allowed_servers`.
-- Ensure matching server key exists in `/etc/centralssh/servers.json`.
+- Ensure matching server key exists in `/etc/centralssh/servers.toml`.
 
 ### Host key verification failures when selecting a server
 
@@ -450,13 +441,13 @@ For local/dev-only runs where production file ownership/modes are not available:
 
 ```bash
 mkdir -p ./tmp/users
-cp examples/config.json ./tmp/config.json
-cp examples/servers.json ./tmp/servers.json
+cp examples/config.toml ./tmp/config.toml
+cp examples/servers.toml ./tmp/servers.toml
 touch ./tmp/known_hosts ./tmp/audit.jsonl
 
 cargo run -- \
-  --config ./tmp/config.json \
-  --servers ./tmp/servers.json \
+  --config ./tmp/config.toml \
+  --servers ./tmp/servers.toml \
   --known-hosts ./tmp/known_hosts \
   --user-key-root ./tmp/users \
   --audit-log ./tmp/audit.jsonl
@@ -466,8 +457,8 @@ Disable strict-security checks for that run with:
 
 ```bash
 CENTRALSSH_ENFORCE_STRICT_SECURITY=false cargo run -- \
-  --config ./tmp/config.json \
-  --servers ./tmp/servers.json \
+  --config ./tmp/config.toml \
+  --servers ./tmp/servers.toml \
   --known-hosts ./tmp/known_hosts \
   --user-key-root ./tmp/users \
   --audit-log ./tmp/audit.jsonl

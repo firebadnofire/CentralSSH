@@ -58,11 +58,11 @@ install-layout:
 
 install-config:
 	$(INSTALL) -d -m 0700 $(DESTDIR)$(SYSCONFDIR)
-	@if [ ! -f $(DESTDIR)$(SYSCONFDIR)/config.json ]; then \
-		$(INSTALL) -m 0600 examples/config.json $(DESTDIR)$(SYSCONFDIR)/config.json; \
+	@if [ ! -f $(DESTDIR)$(SYSCONFDIR)/config.toml ]; then \
+		$(INSTALL) -m 0600 examples/config.toml $(DESTDIR)$(SYSCONFDIR)/config.toml; \
 	fi
-	@if [ ! -f $(DESTDIR)$(SYSCONFDIR)/servers.json ]; then \
-		$(INSTALL) -m 0600 examples/servers.json $(DESTDIR)$(SYSCONFDIR)/servers.json; \
+	@if [ ! -f $(DESTDIR)$(SYSCONFDIR)/servers.toml ]; then \
+		$(INSTALL) -m 0600 examples/servers.toml $(DESTDIR)$(SYSCONFDIR)/servers.toml; \
 	fi
 
 install-service:

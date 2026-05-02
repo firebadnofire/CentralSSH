@@ -10,6 +10,12 @@ pub enum CentralSshError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    #[error("TOML decode error: {0}")]
+    TomlDe(#[from] toml::de::Error),
+
+    #[error("TOML encode error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
+
     #[error("password hash error: {0}")]
     PasswordHash(#[from] argon2::password_hash::Error),
 

@@ -13,8 +13,8 @@ load_rc_config "$name"
 : ${centralssh_enable:="NO"}
 : ${centralssh_user:="root"}
 : ${centralssh_group:="wheel"}
-: ${centralssh_config:="/etc/centralssh/config.json"}
-: ${centralssh_servers:="/etc/centralssh/servers.json"}
+: ${centralssh_config:="/etc/centralssh/config.toml"}
+: ${centralssh_servers:="/etc/centralssh/servers.toml"}
 : ${centralssh_known_hosts:="/etc/centralssh/known_hosts"}
 : ${centralssh_user_key_root:="/etc/centralssh/users"}
 : ${centralssh_audit_log:="/var/log/centralssh/audit.jsonl"}

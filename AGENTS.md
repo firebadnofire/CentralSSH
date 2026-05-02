@@ -692,15 +692,44 @@ That means:
 
 ## Key generation policy
 
-Auto-generation of target keys should not be implicit unless explicitly intended by administrators and clearly documented.
+Auto-generation of target keys must be deterministic and occur at startup.
 
-Preferred behavior:
+The system must not rely on manual key provisioning for normal operation.
 
-* admin provisions keys intentionally
-* gateway validates their presence and permissions
-* missing keys produce clear operational errors
+### Required startup key provisioning behavior
 
-If automatic key generation is supported, it must be deliberate, explicit, and not surprise the operator.
+On server startup, CentralSSH must:
+
+1. Enumerate all users defined in `/etc/centralssh/config.json`
+2. Resolve each user’s key directory under `centralssh_user_key_root`
+3. For every user and every allowed server:
+
+   * If the key **does not exist**:
+
+     * Create the user key directory if it does not exist
+     * Ensure directory permissions are set to 0700 and owned by root
+     * Generate a new private key for that user/server pair
+     * Persist the key with permissions set to 0600
+
+   * If the key **already exists**:
+
+     * Do nothing
+     * Do not modify, regenerate, rotate, or overwrite the key under any circumstance
+
+### Non-negotiable constraints
+
+* Existing keys must be treated as authoritative and immutable
+* The system must never overwrite or replace an existing private key automatically
+* Key generation must be idempotent across restarts
+* Startup must not fail solely due to missing keys if they can be generated
+
+### Failure conditions
+
+Startup must fail with a clear error if:
+
+* The key directory cannot be created securely
+* Permissions or ownership are unsafe
+* Key generation fails
 
 ---
 
@@ -847,4 +876,3 @@ CentralSSH v2 should feel boring in the best possible way:
 * the gateway host stays hidden and locked down
 
 Build the real thing, not a demo that merely resembles SSH.
-

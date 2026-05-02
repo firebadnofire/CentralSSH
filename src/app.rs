@@ -10,6 +10,7 @@ use crate::audit::{AuditEvent, AuditLogger, AuditResult};
 use crate::auth::AuthEngine;
 use crate::config::ConfigStore;
 use crate::error::Result;
+use crate::keys::ensure_private_keys_for_config_users;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +24,9 @@ pub struct AppState {
 #[derive(Debug, Clone, Serialize)]
 pub struct BootstrapReport {
     pub migrated_passwords: usize,
+    pub created_user_dirs: usize,
+    pub created_server_dirs: usize,
+    pub created_private_keys: usize,
 }
 
 impl AppState {
@@ -31,8 +35,16 @@ impl AppState {
             .config_store
             .migrate_bootstrap_passwords(&self.auth)
             .await?;
+        let snapshot = self.config_store.snapshot().await;
+        let key_report =
+            ensure_private_keys_for_config_users(&self.config_store.paths.user_key_root, &snapshot.config)?;
 
-        Ok(BootstrapReport { migrated_passwords })
+        Ok(BootstrapReport {
+            migrated_passwords,
+            created_user_dirs: key_report.created_user_dirs,
+            created_server_dirs: key_report.created_server_dirs,
+            created_private_keys: key_report.created_private_keys,
+        })
     }
 
     pub async fn reload_on_signal_loop(&self) {

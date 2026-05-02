@@ -15,8 +15,8 @@ use crate::auth::{AuthEngine, build_totp_from_secret};
 use crate::error::{CentralSshError, Result};
 
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:7788";
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/centralssh/config.json";
-pub const DEFAULT_SERVERS_PATH: &str = "/etc/centralssh/servers.json";
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/centralssh/config.toml";
+pub const DEFAULT_SERVERS_PATH: &str = "/etc/centralssh/servers.toml";
 pub const DEFAULT_KNOWN_HOSTS_PATH: &str = "/etc/centralssh/known_hosts";
 pub const DEFAULT_USER_KEY_ROOT: &str = "/var/lib/centralssh/keys";
 pub const DEFAULT_AUDIT_LOG_PATH: &str = "/var/log/centralssh/audit.jsonl";
@@ -145,7 +145,7 @@ impl ConfigStore {
         }
 
         if changed > 0 {
-            atomic_write_json(&self.paths.config_path, &guard.config)?;
+            atomic_write_toml(&self.paths.config_path, &guard.config)?;
         }
 
         Ok(changed)
@@ -176,7 +176,7 @@ impl ConfigStore {
             user.must_change_password = flag;
         }
 
-        atomic_write_json(&self.paths.config_path, &guard.config)?;
+        atomic_write_toml(&self.paths.config_path, &guard.config)?;
         Ok(())
     }
 }
@@ -206,26 +206,26 @@ pub fn resolve_paths(
 
 pub fn load_config_file(path: &Path) -> Result<ConfigFile> {
     let bytes = fs::read(path)?;
-    let config = serde_json::from_slice(&bytes)?;
+    let config = toml::from_slice(&bytes)?;
     Ok(config)
 }
 
 pub fn load_servers_file(path: &Path) -> Result<ServersFile> {
     let bytes = fs::read(path)?;
-    let servers = serde_json::from_slice(&bytes)?;
+    let servers = toml::from_slice(&bytes)?;
     Ok(servers)
 }
 
 pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<()> {
     if config.users.is_empty() {
         return Err(CentralSshError::InvalidConfig(
-            "config.json must contain at least one user".to_string(),
+            "config.toml must contain at least one user".to_string(),
         ));
     }
 
     if servers.servers.is_empty() {
         return Err(CentralSshError::InvalidConfig(
-            "servers.json must contain at least one server".to_string(),
+            "servers.toml must contain at least one server".to_string(),
         ));
     }
 
@@ -469,7 +469,7 @@ pub fn validate_path_has_no_symlinks(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub fn atomic_write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         CentralSshError::InvalidConfig(format!("path has no parent: {}", path.display()))
     })?;
@@ -496,7 +496,10 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     ));
 
     let metadata = fs::metadata(path).ok();
-    let encoded = serde_json::to_vec_pretty(value)?;
+    let mut encoded = toml::to_string_pretty(value)?.into_bytes();
+    if !encoded.ends_with(b"\n") {
+        encoded.push(b'\n');
+    }
 
     let mut options = OpenOptions::new();
     options.write(true).create_new(true).mode(0o600);
@@ -510,7 +513,6 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     }
 
     temp_file.write_all(&encoded)?;
-    temp_file.write_all(b"\n")?;
     temp_file.sync_all()?;
     drop(temp_file);
 
@@ -579,6 +581,12 @@ mod tests {
         ServersFile { servers }
     }
 
+    fn write_temp_file(tempdir: &TempDir, name: &str, contents: &str) -> PathBuf {
+        let path = tempdir.path().join(name);
+        fs::write(&path, contents).expect("write temp file");
+        path
+    }
+
     #[test]
     fn validate_semantics_rejects_unknown_server() {
         let config = valid_config();
@@ -644,24 +652,195 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_json_roundtrip() {
+    fn atomic_write_toml_roundtrip() {
         let tempdir = TempDir::new().expect("tempdir");
         let base = fs::canonicalize(tempdir.path()).expect("canonicalize");
-        let path = base.join("config.json");
+        let path = base.join("config.toml");
         let payload = valid_config();
 
-        atomic_write_json(&path, &payload).expect("write");
+        atomic_write_toml(&path, &payload).expect("write");
         let loaded = load_config_file(&path).expect("read");
         assert_eq!(loaded.users.len(), 1);
         assert_eq!(loaded.users[0].name, "alice");
     }
 
     #[test]
+    fn load_config_file_accepts_minimal_toml_without_optional_fields() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "config.toml",
+            r#"
+[[users]]
+name = "alice"
+password = "BootstrapPass123!"
+must_change_password = true
+allowed_servers = ["git"]
+"#,
+        );
+
+        let loaded = load_config_file(&path).expect("load config");
+
+        assert_eq!(loaded.users.len(), 1);
+        assert_eq!(loaded.users[0].name, "alice");
+        assert_eq!(loaded.users[0].totp_secret, None);
+        assert!(loaded.settings.user_key_root.is_none());
+        assert!(loaded.settings.known_hosts_path.is_none());
+        assert!(loaded.settings.audit_log_path.is_none());
+        assert_eq!(loaded.settings.enforce_password_policy, None);
+    }
+
+    #[test]
+    fn load_config_file_accepts_multiple_users_and_settings_paths() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "config.toml",
+            r#"
+[[users]]
+name = "alice"
+password = "$argon2id$v=19$m=65536,t=3,p=1$YWFhYWFhYWFhYWFhYWFhYQ$5SJ0fY5fKQh0nqS5BTPw8P7GIw6Y73Q2xU1j5V6k8To"
+allowed_servers = ["git", "httpd"]
+
+[[users]]
+name = "bob"
+password = "AnotherTempPass123!"
+must_change_password = true
+allowed_servers = ["git"]
+
+[settings]
+user_key_root = "/var/lib/centralssh/keys"
+known_hosts_path = "/etc/centralssh/known_hosts"
+audit_log_path = "/var/log/centralssh/audit.jsonl"
+enforce_password_policy = false
+"#,
+        );
+
+        let loaded = load_config_file(&path).expect("load config");
+
+        assert_eq!(loaded.users.len(), 2);
+        assert_eq!(loaded.users[0].allowed_servers, vec!["git", "httpd"]);
+        assert_eq!(loaded.users[1].name, "bob");
+        assert_eq!(
+            loaded.settings.user_key_root,
+            Some(PathBuf::from("/var/lib/centralssh/keys"))
+        );
+        assert_eq!(
+            loaded.settings.known_hosts_path,
+            Some(PathBuf::from("/etc/centralssh/known_hosts"))
+        );
+        assert_eq!(
+            loaded.settings.audit_log_path,
+            Some(PathBuf::from("/var/log/centralssh/audit.jsonl"))
+        );
+        assert_eq!(loaded.settings.enforce_password_policy, Some(false));
+    }
+
+    #[test]
+    fn load_config_file_rejects_wrong_allowed_servers_type() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "config.toml",
+            r#"
+[[users]]
+name = "alice"
+password = "BootstrapPass123!"
+must_change_password = true
+allowed_servers = "git"
+"#,
+        );
+
+        let result = load_config_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_config_file_accepts_array_of_inline_tables() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "config.toml",
+            r#"
+users = [
+  { name = "alice", password = "BootstrapPass123!", must_change_password = true, allowed_servers = ["git"] }
+]
+"#,
+        );
+
+        let loaded = load_config_file(&path).expect("load config");
+        assert_eq!(loaded.users.len(), 1);
+        assert_eq!(loaded.users[0].name, "alice");
+        assert_eq!(loaded.users[0].allowed_servers, vec!["git"]);
+    }
+
+    #[test]
+    fn load_servers_file_accepts_comments_hostname_and_ipv6() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "servers.toml",
+            r#"
+# comment
+[servers]
+git = "git.internal.example"
+dns = "2001:db8::53"
+"#,
+        );
+
+        let loaded = load_servers_file(&path).expect("load servers");
+
+        assert_eq!(
+            loaded.servers.get("git"),
+            Some(&"git.internal.example".to_string())
+        );
+        assert_eq!(loaded.servers.get("dns"), Some(&"2001:db8::53".to_string()));
+    }
+
+    #[test]
+    fn load_servers_file_rejects_wrong_table_type() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "servers.toml",
+            r#"
+servers = ["git"]
+"#,
+        );
+
+        let result = load_servers_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn atomic_write_toml_omits_none_optional_fields() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let base = fs::canonicalize(tempdir.path()).expect("canonicalize");
+        let path = base.join("config.toml");
+        let payload = ConfigFile {
+            users: vec![UserRecord {
+                name: "alice".to_string(),
+                password: "BootstrapPass123!".to_string(),
+                totp_secret: None,
+                must_change_password: true,
+                allowed_servers: vec!["git".to_string()],
+            }],
+            settings: SettingsConfig::default(),
+        };
+
+        atomic_write_toml(&path, &payload).expect("write");
+        let encoded = fs::read_to_string(&path).expect("read string");
+
+        assert!(!encoded.contains("totp_secret"));
+        assert!(!encoded.contains("user_key_root"));
+    }
+
+    #[test]
     fn validate_file_security_rejects_symlink() {
         let tempdir = TempDir::new().expect("tempdir");
-        let target = tempdir.path().join("config.json");
+        let target = tempdir.path().join("config.toml");
         fs::write(&target, b"{}").expect("write");
-        let link = tempdir.path().join("config-link.json");
+        let link = tempdir.path().join("config-link.toml");
         symlink(&target, &link).expect("symlink");
 
         let result = validate_file_security(&link, 0o600, false);

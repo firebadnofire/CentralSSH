@@ -16,6 +16,7 @@ use auth::AuthEngine;
 use clap::Parser;
 use config::{ConfigStore, DEFAULT_LISTEN, load_config_file, resolve_paths};
 use error::Result;
+use keys::ensure_user_key_root_directory;
 use reload::install_sighup_reload_notifier;
 use tracing::info;
 
@@ -29,8 +30,8 @@ use tracing::info;
   Startup error: \"I/O error: No such file or directory (os error 2)\"
     Cause: default config paths do not exist.
     Defaults:
-      --config      /etc/centralssh/config.json
-      --servers     /etc/centralssh/servers.json
+      --config      /etc/centralssh/config.toml
+      --servers     /etc/centralssh/servers.toml
       --known-hosts /etc/centralssh/known_hosts
       --user-key-root /var/lib/centralssh/keys
       --audit-log   /var/log/centralssh/audit.jsonl
@@ -38,7 +39,7 @@ use tracing::info;
   Dev quick-start (non-strict mode):
     mkdir -p ./tmp/keys ./examples
     touch ./examples/known_hosts
-    CENTRALSSH_ENFORCE_STRICT_SECURITY=false centralssh --config ./examples/config.json --servers ./examples/servers.json --known-hosts ./examples/known_hosts --user-key-root ./tmp/keys --audit-log ./tmp/audit.jsonl
+    CENTRALSSH_ENFORCE_STRICT_SECURITY=false centralssh --config ./examples/config.toml --servers ./examples/servers.toml --known-hosts ./examples/known_hosts --user-key-root ./tmp/keys --audit-log ./tmp/audit.jsonl
 
   Production mode requirements:
     - root-owned config, known_hosts, host key, and audit files
@@ -108,6 +109,7 @@ async fn run() -> Result<()> {
         cli.audit_log.clone(),
         Some(&seed_config.settings),
     );
+    ensure_user_key_root_directory(&paths.user_key_root)?;
 
     let config_store = ConfigStore::load(paths.clone(), cli.enforce_strict_security).await?;
     let auth = AuthEngine::new()?;
@@ -133,6 +135,9 @@ async fn run() -> Result<()> {
     let report = app.bootstrap().await?;
     info!(
         migrated_passwords = report.migrated_passwords,
+        created_user_dirs = report.created_user_dirs,
+        created_server_dirs = report.created_server_dirs,
+        created_private_keys = report.created_private_keys,
         "startup bootstrap completed"
     );
 
