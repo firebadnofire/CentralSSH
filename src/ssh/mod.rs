@@ -8,15 +8,17 @@ use std::time::Duration;
 
 use chrono::Utc;
 use russh::server::{self, Auth, Msg, Server as _, Session};
-use russh::{client, Channel, ChannelId, MethodKind, MethodSet, Sig};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig, client};
 use ssh_key::{LineEnding, PrivateKey};
+use tokio::time::sleep;
 use tracing::{error, warn};
 use zeroize::Zeroizing;
 
+use crate::abuse::{BanEvent, BanEventKind, FailureOutcome, PreAuthCheck};
 use crate::app::AppState;
 use crate::audit::{AuditEvent, AuditResult};
-use crate::config::validate_path_has_no_symlinks;
 use crate::config::UserRecord;
+use crate::config::validate_path_has_no_symlinks;
 use crate::error::{CentralSshError, Result};
 
 pub mod proxy;
@@ -32,11 +34,13 @@ struct GatewayServer {
 struct GatewayHandler {
     state: Arc<AppState>,
     peer_ip: IpAddr,
+    peer_port: Option<u16>,
     session_id: String,
     keyboard_auth_state: Option<KeyboardAuthState>,
     authenticated_username: Option<String>,
     pending_target: Option<proxy::SelectedTarget>,
     proxy_session: Option<proxy::ProxySession>,
+    connection_logged: bool,
 }
 
 struct PendingAuthContext {
@@ -86,11 +90,13 @@ impl server::Server for GatewayServer {
             peer_ip: peer_addr
                 .map(|address| address.ip())
                 .unwrap_or(IpAddr::from([0, 0, 0, 0])),
+            peer_port: peer_addr.map(|address| address.port()),
             session_id: uuid::Uuid::new_v4().to_string(),
             keyboard_auth_state: None,
             authenticated_username: None,
             pending_target: None,
             proxy_session: None,
+            connection_logged: false,
         }
     }
 }
@@ -189,7 +195,23 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
     }
 
     async fn selection_prompt(&self, username: &str, error_message: Option<&str>) -> Result<Auth> {
-        let entries = self.allowed_server_entries(username).await?;
+        let entries = match self.allowed_server_entries(username).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.log_event(
+                    "authorization_denied",
+                    Some(username),
+                    None,
+                    None,
+                    AuditResult::Denied,
+                    Some(error.to_string()),
+                    None,
+                    None,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
         if let Some(message) = error_message {
             instructions.push('\n');
@@ -241,8 +263,11 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         event_type: &str,
         username: Option<&str>,
         target_server: Option<&str>,
+        auth_method: Option<&str>,
         result: AuditResult,
-        reason_code: Option<String>,
+        reason: Option<String>,
+        ban_duration: Option<Duration>,
+        ban_until: Option<chrono::DateTime<Utc>>,
     ) {
         let _ = self
             .state
@@ -250,14 +275,155 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
             .log(AuditEvent {
                 timestamp: Utc::now(),
                 event_type: event_type.to_string(),
-                session_id: self.session_id.clone(),
-                source_ip: Some(self.peer_ip.to_string()),
+                request_id: self.session_id.clone(),
+                remote_ip: Some(self.peer_ip.to_string()),
+                remote_port: self.peer_port,
                 username: username.map(ToOwned::to_owned),
                 target_server: target_server.map(ToOwned::to_owned),
+                auth_method: auth_method.map(ToOwned::to_owned),
                 result,
-                reason_code,
+                reason,
+                ban_duration_seconds: ban_duration.map(|duration| duration.as_secs()),
+                ban_until,
             })
             .await;
+    }
+
+    async fn log_connection_opened_once(&mut self) {
+        if self.connection_logged {
+            return;
+        }
+        self.connection_logged = true;
+        self.log_event(
+            "connection_opened",
+            None,
+            None,
+            None,
+            AuditResult::Success,
+            None,
+            None,
+            None,
+        )
+        .await;
+    }
+
+    async fn log_ban_event(&self, ban_event: &BanEvent) {
+        self.log_event(
+            match ban_event.kind {
+                BanEventKind::Created => "ban_created",
+                BanEventKind::Extended => "ban_extended",
+            },
+            None,
+            None,
+            None,
+            AuditResult::Banned,
+            Some("fail2ban threshold reached".to_string()),
+            Some(ban_event.ban_duration),
+            Some(ban_event.ban_until),
+        )
+        .await;
+    }
+
+    async fn apply_failure_outcome(
+        &self,
+        outcome: &FailureOutcome,
+        username: Option<&str>,
+        target_server: Option<&str>,
+        auth_method: Option<&str>,
+    ) {
+        if outcome.whitelisted {
+            self.log_event(
+                "whitelist_bypass",
+                username,
+                target_server,
+                auth_method,
+                AuditResult::Success,
+                Some("fail2ban bypassed for whitelisted IP".to_string()),
+                None,
+                None,
+            )
+            .await;
+            return;
+        }
+
+        if let Some(delay) = outcome.delay {
+            self.log_event(
+                "rate_limit_delay_applied",
+                username,
+                target_server,
+                auth_method,
+                AuditResult::Delayed,
+                Some("pre-ban tarpit delay applied".to_string()),
+                Some(delay),
+                None,
+            )
+            .await;
+            sleep(delay).await;
+        }
+
+        if let Some(ban_event) = &outcome.ban_event {
+            self.log_ban_event(ban_event).await;
+        }
+    }
+
+    async fn enforce_pre_auth_policy(
+        &mut self,
+        auth_method: &str,
+    ) -> std::result::Result<Option<Auth>, russh::Error> {
+        self.log_connection_opened_once().await;
+        let check = self.state.abuse.check_ip(self.peer_ip).await;
+        self.handle_pre_auth_check(auth_method, check).await
+    }
+
+    async fn handle_pre_auth_check(
+        &self,
+        auth_method: &str,
+        check: PreAuthCheck,
+    ) -> std::result::Result<Option<Auth>, russh::Error> {
+        if check.expired_ban {
+            self.log_event(
+                "ban_expired",
+                None,
+                None,
+                Some(auth_method),
+                AuditResult::Success,
+                Some("active ban expired".to_string()),
+                check.ban_duration,
+                check.ban_until,
+            )
+            .await;
+        }
+
+        if check.whitelisted && check.had_state {
+            self.log_event(
+                "whitelist_bypass",
+                None,
+                None,
+                Some(auth_method),
+                AuditResult::Success,
+                Some("fail2ban bypassed for whitelisted IP".to_string()),
+                None,
+                None,
+            )
+            .await;
+        }
+
+        if check.banned {
+            self.log_event(
+                "connection_rejected_banned",
+                None,
+                None,
+                Some(auth_method),
+                AuditResult::Banned,
+                Some("active fail2ban ban".to_string()),
+                check.ban_duration,
+                check.ban_until,
+            )
+            .await;
+            return Ok(Some(Self::reject_to_keyboard_interactive()));
+        }
+
+        Ok(None)
     }
 
     async fn handle_password_response(
@@ -337,6 +503,17 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         password: Zeroizing<String>,
         code: String,
     ) -> std::result::Result<Auth, russh::Error> {
+        self.log_event(
+            "auth_attempt",
+            Some(&username),
+            None,
+            Some("keyboard_interactive"),
+            AuditResult::Success,
+            Some("received password and totp response".to_string()),
+            None,
+            None,
+        )
+        .await;
         if let Err(error) = self
             .state
             .auth
@@ -344,32 +521,59 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
             .await
         {
             self.log_event(
-                "auth_attempt",
+                "auth_failure",
                 Some(&username),
                 None,
-                AuditResult::Blocked,
+                Some("keyboard_interactive"),
+                AuditResult::Denied,
                 Some(error.to_string()),
+                None,
+                None,
+            )
+            .await;
+            let outcome = self
+                .state
+                .abuse
+                .record_failure(self.peer_ip, Some(&username), None)
+                .await;
+            self.apply_failure_outcome(
+                &outcome,
+                Some(&username),
+                None,
+                Some("keyboard_interactive"),
             )
             .await;
             return Ok(Self::reject_to_keyboard_interactive());
         }
 
         let snapshot = self.state.config_store.snapshot().await;
-        match self.state.auth.verify_password_and_optional_totp_constant_time(
-            &snapshot.config.users,
-            &username,
-            password.as_str(),
-            code.trim(),
-        ) {
+        let user_exists = snapshot
+            .config
+            .users
+            .iter()
+            .any(|candidate| candidate.name == username);
+        match self
+            .state
+            .auth
+            .verify_password_and_optional_totp_constant_time(
+                &snapshot.config.users,
+                &username,
+                password.as_str(),
+                code.trim(),
+            ) {
             Ok(user) => {
                 self.log_event(
-                    "auth_password",
+                    "auth_success",
                     Some(&username),
                     None,
+                    Some("keyboard_interactive"),
                     AuditResult::Success,
+                    None,
+                    None,
                     None,
                 )
                 .await;
+                let _ = self.state.abuse.record_success(self.peer_ip).await;
 
                 let context = PendingAuthContext {
                     user,
@@ -382,7 +586,10 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                         "auth_totp",
                         Some(&username),
                         None,
+                        Some("keyboard_interactive"),
                         AuditResult::Success,
+                        None,
+                        None,
                         None,
                     )
                     .await;
@@ -401,36 +608,59 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
             Err(error) => {
                 if matches!(error, CentralSshError::TotpInvalid) {
                     self.log_event(
-                        "auth_totp",
+                        "auth_failure",
                         Some(&username),
                         None,
+                        Some("keyboard_interactive"),
                         AuditResult::Failure,
                         Some(error.to_string()),
+                        None,
+                        None,
                     )
                     .await;
                 } else {
                     self.log_event(
-                        "auth_attempt",
+                        "auth_failure",
                         Some(&username),
                         None,
+                        Some("keyboard_interactive"),
                         AuditResult::Failure,
                         Some(error.to_string()),
+                        None,
+                        None,
                     )
                     .await;
+                    if !user_exists {
+                        self.log_event(
+                            "unknown_username_attempt",
+                            Some(&username),
+                            None,
+                            Some("keyboard_interactive"),
+                            AuditResult::Failure,
+                            Some("unknown username".to_string()),
+                            None,
+                            None,
+                        )
+                        .await;
+                    }
                 }
+
+                let outcome = self
+                    .state
+                    .abuse
+                    .record_failure(self.peer_ip, Some(&username), None)
+                    .await;
+                self.apply_failure_outcome(
+                    &outcome,
+                    Some(&username),
+                    None,
+                    Some("keyboard_interactive"),
+                )
+                .await;
 
                 if !matches!(error, CentralSshError::TotpInvalid) {
                     return Ok(Self::reject_to_keyboard_interactive());
                 }
-
-                self.log_event(
-                    "auth_attempt",
-                    Some(&username),
-                    None,
-                    AuditResult::Failure,
-                    Some(error.to_string()),
-                )
-                .await;
                 Ok(Self::reject_to_keyboard_interactive())
             }
         }
@@ -543,7 +773,10 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                 "password_change",
                 Some(&context.user.name),
                 None,
+                Some("keyboard_interactive"),
                 AuditResult::Success,
+                None,
+                None,
                 None,
             )
             .await;
@@ -555,7 +788,10 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                 "totp_enrollment",
                 Some(&context.user.name),
                 None,
+                Some("keyboard_interactive"),
                 AuditResult::Success,
+                None,
+                None,
                 None,
             )
             .await;
@@ -575,11 +811,26 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         if let Err(error) = self.state.auth.verify_totp_code(&secret, code.trim()) {
             context.login_password = staged_login_password;
             self.log_event(
-                "auth_totp",
+                "auth_failure",
                 Some(&username),
                 None,
+                Some("keyboard_interactive"),
                 AuditResult::Failure,
                 Some(error.to_string()),
+                None,
+                None,
+            )
+            .await;
+            let outcome = self
+                .state
+                .abuse
+                .record_failure(self.peer_ip, Some(&username), None)
+                .await;
+            self.apply_failure_outcome(
+                &outcome,
+                Some(&username),
+                None,
+                Some("keyboard_interactive"),
             )
             .await;
 
@@ -608,11 +859,26 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                 .await
             {
                 self.log_event(
-                    "auth_attempt",
+                    "auth_failure",
                     Some(&username),
                     None,
-                    AuditResult::Blocked,
+                    Some("keyboard_interactive"),
+                    AuditResult::Denied,
                     Some(error.to_string()),
+                    None,
+                    None,
+                )
+                .await;
+                let outcome = self
+                    .state
+                    .abuse
+                    .record_failure(self.peer_ip, Some(&username), None)
+                    .await;
+                self.apply_failure_outcome(
+                    &outcome,
+                    Some(&username),
+                    None,
+                    Some("keyboard_interactive"),
                 )
                 .await;
                 return Ok(Self::reject_to_keyboard_interactive());
@@ -624,21 +890,39 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                 login_password.as_str(),
             ) {
                 self.log_event(
-                    "auth_attempt",
+                    "auth_failure",
                     Some(&username),
                     None,
+                    Some("keyboard_interactive"),
                     AuditResult::Failure,
                     Some(error.to_string()),
+                    None,
+                    None,
+                )
+                .await;
+                let outcome = self
+                    .state
+                    .abuse
+                    .record_failure(self.peer_ip, Some(&username), None)
+                    .await;
+                self.apply_failure_outcome(
+                    &outcome,
+                    Some(&username),
+                    None,
+                    Some("keyboard_interactive"),
                 )
                 .await;
                 return Ok(Self::reject_to_keyboard_interactive());
             }
 
             self.log_event(
-                "auth_password",
+                "auth_success",
                 Some(&username),
                 None,
+                Some("keyboard_interactive"),
                 AuditResult::Success,
+                None,
+                None,
                 None,
             )
             .await;
@@ -648,10 +932,14 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
             "auth_totp",
             Some(&username),
             None,
+            Some("keyboard_interactive"),
             AuditResult::Success,
+            None,
+            None,
             None,
         )
         .await;
+        let _ = self.state.abuse.record_success(self.peer_ip).await;
         self.commit_pending_updates(&mut context, Some(secret))
             .await?;
 
@@ -713,6 +1001,27 @@ impl server::Handler for GatewayHandler {
     type Error = russh::Error;
 
     async fn auth_none(&mut self, _user: &str) -> std::result::Result<Auth, Self::Error> {
+        if let Some(decision) = self.enforce_pre_auth_policy("none").await? {
+            return Ok(decision);
+        }
+        self.log_event(
+            "protocol_error",
+            None,
+            None,
+            Some("none"),
+            AuditResult::Denied,
+            Some("unsupported auth method".to_string()),
+            None,
+            None,
+        )
+        .await;
+        let outcome = self
+            .state
+            .abuse
+            .record_failure(self.peer_ip, None, None)
+            .await;
+        self.apply_failure_outcome(&outcome, None, None, Some("none"))
+            .await;
         Ok(Self::reject_to_keyboard_interactive())
     }
 
@@ -721,6 +1030,27 @@ impl server::Handler for GatewayHandler {
         _user: &str,
         _public_key: &russh::keys::ssh_key::PublicKey,
     ) -> std::result::Result<Auth, Self::Error> {
+        if let Some(decision) = self.enforce_pre_auth_policy("publickey").await? {
+            return Ok(decision);
+        }
+        self.log_event(
+            "protocol_error",
+            None,
+            None,
+            Some("publickey"),
+            AuditResult::Denied,
+            Some("unsupported auth method".to_string()),
+            None,
+            None,
+        )
+        .await;
+        let outcome = self
+            .state
+            .abuse
+            .record_failure(self.peer_ip, None, None)
+            .await;
+        self.apply_failure_outcome(&outcome, None, None, Some("publickey"))
+            .await;
         Ok(Self::reject_to_keyboard_interactive())
     }
 
@@ -729,6 +1059,27 @@ impl server::Handler for GatewayHandler {
         _user: &str,
         _password: &str,
     ) -> std::result::Result<Auth, Self::Error> {
+        if let Some(decision) = self.enforce_pre_auth_policy("password").await? {
+            return Ok(decision);
+        }
+        self.log_event(
+            "protocol_error",
+            None,
+            None,
+            Some("password"),
+            AuditResult::Denied,
+            Some("unsupported auth method".to_string()),
+            None,
+            None,
+        )
+        .await;
+        let outcome = self
+            .state
+            .abuse
+            .record_failure(self.peer_ip, None, None)
+            .await;
+        self.apply_failure_outcome(&outcome, None, None, Some("password"))
+            .await;
         Ok(Self::reject_to_keyboard_interactive())
     }
 
@@ -738,12 +1089,33 @@ impl server::Handler for GatewayHandler {
         _submethods: &str,
         response: Option<server::Response<'a>>,
     ) -> std::result::Result<Auth, Self::Error> {
+        if let Some(decision) = self.enforce_pre_auth_policy("keyboard_interactive").await? {
+            return Ok(decision);
+        }
         if self.authenticated_username.is_some() && self.proxy_session.is_some() {
             return Ok(Auth::Accept);
         }
 
         let username = user.trim().to_string();
         if username.is_empty() {
+            self.log_event(
+                "protocol_error",
+                None,
+                None,
+                Some("keyboard_interactive"),
+                AuditResult::Denied,
+                Some("empty username".to_string()),
+                None,
+                None,
+            )
+            .await;
+            let outcome = self
+                .state
+                .abuse
+                .record_failure(self.peer_ip, None, None)
+                .await;
+            self.apply_failure_outcome(&outcome, None, None, Some("keyboard_interactive"))
+                .await;
             return Ok(Self::reject_to_keyboard_interactive());
         }
 
@@ -827,7 +1199,10 @@ impl server::Handler for GatewayHandler {
             "server_selected",
             Some(&username),
             Some(&target.name),
+            None,
             AuditResult::Success,
+            None,
+            None,
             None,
         )
         .await;
@@ -847,7 +1222,10 @@ impl server::Handler for GatewayHandler {
                     "proxy_start",
                     Some(&username),
                     Some(&target.name),
+                    None,
                     AuditResult::Success,
+                    None,
+                    None,
                     None,
                 )
                 .await;
@@ -859,8 +1237,11 @@ impl server::Handler for GatewayHandler {
                     "proxy_start",
                     Some(&username),
                     Some(&target.name),
+                    None,
                     AuditResult::Failure,
                     Some(error.to_string()),
+                    None,
+                    None,
                 )
                 .await;
 
@@ -1265,7 +1646,11 @@ mod tests {
         let error = ensure_server_host_key(&symlink_path).expect_err("symlink must fail");
         assert!(matches!(error, CentralSshError::SecurityPolicy { .. }));
 
-        let mode = fs::metadata(&real_key).expect("metadata").permissions().mode() & 0o777;
+        let mode = fs::metadata(&real_key)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o644);
     }
 

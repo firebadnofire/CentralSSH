@@ -330,7 +330,9 @@ mod tests {
         let totp = build_totp_from_secret(secret).expect("totp");
         let user = UserRecord {
             name: "alice".to_string(),
-            password: auth.hash_password("correct horse battery staple").expect("hash"),
+            password: auth
+                .hash_password("correct horse battery staple")
+                .expect("hash"),
             totp_secret: Some(secret.to_string()),
             must_change_password: false,
             allowed_servers: vec!["git".to_string()],
@@ -354,7 +356,9 @@ mod tests {
         let auth = AuthEngine::new().expect("engine");
         let user = UserRecord {
             name: "alice".to_string(),
-            password: auth.hash_password("correct horse battery staple").expect("hash"),
+            password: auth
+                .hash_password("correct horse battery staple")
+                .expect("hash"),
             totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
             must_change_password: false,
             allowed_servers: vec!["git".to_string()],
@@ -375,7 +379,9 @@ mod tests {
         let auth = AuthEngine::new().expect("engine");
         let user = UserRecord {
             name: "alice".to_string(),
-            password: auth.hash_password("correct horse battery staple").expect("hash"),
+            password: auth
+                .hash_password("correct horse battery staple")
+                .expect("hash"),
             totp_secret: None,
             must_change_password: true,
             allowed_servers: vec!["git".to_string()],

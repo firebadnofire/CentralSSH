@@ -1,3 +1,4 @@
+mod abuse;
 mod app;
 mod audit;
 mod auth;
@@ -10,6 +11,7 @@ mod ssh;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use abuse::AbuseTracker;
 use app::{AppState, host_key_path_from_config_dir};
 use audit::AuditLogger;
 use auth::AuthEngine;
@@ -114,6 +116,8 @@ async fn run() -> Result<()> {
     let config_store = ConfigStore::load(paths.clone(), cli.enforce_strict_security).await?;
     let auth = AuthEngine::new()?;
     let audit = AuditLogger::new(paths.audit_log_path.clone(), cli.enforce_strict_security)?;
+    let abuse =
+        AbuseTracker::from_config(&config_store.snapshot().await.config, audit.clone()).await?;
     info!(audit_log = %audit.path().display(), "audit logger initialized");
     let reload_notify = Arc::new(tokio::sync::Notify::new());
 
@@ -121,6 +125,7 @@ async fn run() -> Result<()> {
         config_store,
         auth,
         audit,
+        abuse,
         strict_security: cli.enforce_strict_security,
         reload_notify: reload_notify.clone(),
     });

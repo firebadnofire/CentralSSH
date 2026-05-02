@@ -139,6 +139,21 @@ user_key_root = "/etc/centralssh/users"
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
+
+[fail2ban]
+enabled = true
+max_failures = 5
+find_time = "60s"
+ban_time = "10m"
+max_ban_time = "24h"
+backoff_multiplier = 2.0
+delay_before_ban = true
+delay_time = "2s"
+persist_state = true
+state_path = "/var/lib/centralssh/fail2ban_state.json"
+
+[fail2ban.whitelist]
+ips = ["127.0.0.1/32", "::1/128", "192.168.0.0/16"]
 ```
 
 Fields:
@@ -153,11 +168,41 @@ Fields:
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
 - `settings.enforce_password_policy`: optional bool, default `true`.
+- `fail2ban.enabled`: optional bool, default `true`.
+- `fail2ban.max_failures`: optional integer threshold inside the sliding window, default `5`.
+- `fail2ban.find_time`: optional duration string, default `60s`.
+- `fail2ban.ban_time`: optional duration string for the first ban, default `10m`.
+- `fail2ban.max_ban_time`: optional duration string cap for repeated bans, default `24h`.
+- `fail2ban.backoff_multiplier`: optional float, default `2.0`.
+- `fail2ban.delay_before_ban`: optional bool, default `true`.
+- `fail2ban.delay_time`: optional duration string, default `2s`.
+- `fail2ban.persist_state`: optional bool, default `true`.
+- `fail2ban.state_path`: optional path for persisted abuse state, default `/var/lib/centralssh/fail2ban_state.json`.
+- `fail2ban.whitelist.ips`: optional IPv4/IPv6 CIDR list. Defaults include `127.0.0.1/32` and `::1/128`.
 
 Notes:
 
 - Outbound target SSH username is always the authenticated CentralSSH username.
 - If bootstrap plaintext passwords are present, CentralSSH hashes them with Argon2id at startup and atomically rewrites config.
+
+## Built-In Abuse Protection
+
+CentralSSH includes an internal fail2ban-style tracker keyed primarily by remote IP.
+
+Behavior:
+
+- Failures are tracked in a sliding window, not a fixed reset bucket.
+- `max_failures` inside `find_time` creates a ban for `ban_time`.
+- Repeated bans for the same IP use exponential backoff and stop growing at `max_ban_time`.
+- Optional tarpitting applies `delay_time` just before the ban threshold when `delay_before_ban=true`.
+- CIDR whitelist entries bypass bans and failure tracking.
+- If persistence is enabled, ban state is atomically saved and reloaded from `fail2ban.state_path`.
+
+Operational notes:
+
+- Whitelist trusted admin networks deliberately to avoid locking out operators during maintenance.
+- Keep the whitelist as narrow as practical; prefer a management subnet over broad RFC1918 ranges.
+- The persisted state file contains timestamps, IPs, usernames, target names, and ban metadata only. It does not contain passwords or TOTP material.
 
 ### `/etc/centralssh/servers.toml`
 
@@ -352,12 +397,38 @@ Event schema fields:
 
 - `timestamp`
 - `event_type`
-- `session_id`
-- `source_ip`
+- `request_id`
+- `remote_ip`
+- `remote_port`
 - `username`
 - `target_server`
+- `auth_method`
 - `result`
-- `reason_code`
+- `reason`
+- `ban_duration_seconds`
+- `ban_until`
+
+Representative events:
+
+- `connection_opened`
+- `connection_rejected_banned`
+- `auth_attempt`
+- `auth_success`
+- `auth_failure`
+- `unknown_username_attempt`
+- `authorization_denied`
+- `protocol_error`
+- `ban_created`
+- `ban_extended`
+- `ban_expired`
+- `whitelist_bypass`
+- `rate_limit_delay_applied`
+
+Example JSONL record:
+
+```json
+{"timestamp":"2026-05-02T20:00:00Z","event_type":"ban_created","request_id":"c7b2d8d7-66bc-4b68-a4d1-d7c0a0f4a7d9","remote_ip":"203.0.113.44","remote_port":51422,"username":"alice","target_server":null,"auth_method":"keyboard_interactive","result":"banned","reason":"fail2ban threshold reached","ban_duration_seconds":600,"ban_until":"2026-05-02T20:10:00Z"}
+```
 
 Secrets are not logged.
 

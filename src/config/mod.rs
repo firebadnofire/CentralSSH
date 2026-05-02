@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::abuse::Fail2banConfig;
 use crate::auth::{AuthEngine, build_totp_from_secret};
 use crate::error::{CentralSshError, Result};
 
@@ -45,6 +46,8 @@ pub struct ConfigFile {
     pub users: Vec<UserRecord>,
     #[serde(default)]
     pub settings: SettingsConfig,
+    #[serde(default)]
+    pub fail2ban: Option<Fail2banConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -217,6 +220,10 @@ pub fn load_servers_file(path: &Path) -> Result<ServersFile> {
 }
 
 pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<()> {
+    if let Some(fail2ban) = &config.fail2ban {
+        fail2ban.effective()?;
+    }
+
     if config.users.is_empty() {
         return Err(CentralSshError::InvalidConfig(
             "config.toml must contain at least one user".to_string(),
@@ -572,6 +579,7 @@ mod tests {
                 allowed_servers: vec!["git".to_string()],
             }],
             settings: SettingsConfig::default(),
+            fail2ban: None,
         }
     }
 
@@ -826,6 +834,7 @@ servers = ["git"]
                 allowed_servers: vec!["git".to_string()],
             }],
             settings: SettingsConfig::default(),
+            fail2ban: None,
         };
 
         atomic_write_toml(&path, &payload).expect("write");

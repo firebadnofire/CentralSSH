@@ -140,10 +140,13 @@ fn ensure_private_key_file(path: &Path) -> Result<bool> {
         return Ok(false);
     }
 
-    let private_key = PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
-        .map_err(|error| {
-            CentralSshError::InvalidConfig(format!("failed to create user private key: {error}"))
-        })?;
+    let private_key = PrivateKey::random(
+        &mut ssh_key::rand_core::OsRng,
+        ssh_key::Algorithm::Ed25519,
+    )
+    .map_err(|error| {
+        CentralSshError::InvalidConfig(format!("failed to create user private key: {error}"))
+    })?;
     let encoded = private_key.to_openssh(LineEnding::LF).map_err(|error| {
         CentralSshError::InvalidConfig(format!("failed to encode user private key: {error}"))
     })?;
@@ -201,6 +204,7 @@ mod tests {
                 allowed_servers: vec!["git".to_string(), "httpd".to_string()],
             }],
             settings: SettingsConfig::default(),
+            fail2ban: None,
         }
     }
 

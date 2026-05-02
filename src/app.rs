@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
 use serde::Serialize;
 use tokio::sync::Notify;
 use tracing::error;
 
+use crate::abuse::AbuseTracker;
 use crate::audit::{AuditEvent, AuditLogger, AuditResult};
 use crate::auth::AuthEngine;
 use crate::config::ConfigStore;
@@ -17,6 +17,7 @@ pub struct AppState {
     pub config_store: ConfigStore,
     pub auth: AuthEngine,
     pub audit: AuditLogger,
+    pub abuse: AbuseTracker,
     pub strict_security: bool,
     pub reload_notify: Arc<Notify>,
 }
@@ -36,8 +37,10 @@ impl AppState {
             .migrate_bootstrap_passwords(&self.auth)
             .await?;
         let snapshot = self.config_store.snapshot().await;
-        let key_report =
-            ensure_private_keys_for_config_users(&self.config_store.paths.user_key_root, &snapshot.config)?;
+        let key_report = ensure_private_keys_for_config_users(
+            &self.config_store.paths.user_key_root,
+            &snapshot.config,
+        )?;
 
         Ok(BootstrapReport {
             migrated_passwords,
@@ -51,26 +54,27 @@ impl AppState {
         loop {
             self.reload_notify.notified().await;
             let result = self.config_store.reload(self.strict_security).await;
+            if result.is_ok() {
+                let snapshot = self.config_store.snapshot().await;
+                if let Err(error) = self.abuse.reload_from_config(&snapshot.config).await {
+                    error!(error = %error, "fail2ban reload failed");
+                }
+            }
             if let Err(error) = &result {
                 error!(error = %error, "config reload failed");
             }
 
             let _ = self
                 .audit
-                .log(AuditEvent {
-                    timestamp: Utc::now(),
-                    event_type: "config_reload".to_string(),
-                    session_id: "system".to_string(),
-                    source_ip: None,
-                    username: None,
-                    target_server: None,
-                    result: if result.is_ok() {
+                .log(AuditEvent::system(
+                    "config_reload",
+                    if result.is_ok() {
                         AuditResult::Success
                     } else {
                         AuditResult::Failure
                     },
-                    reason_code: result.err().map(|error| error.to_string()),
-                })
+                    result.err().map(|error| error.to_string()),
+                ))
                 .await;
         }
     }

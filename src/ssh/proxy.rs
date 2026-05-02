@@ -46,12 +46,16 @@ impl ProxyAuditContext {
             .log(AuditEvent {
                 timestamp: Utc::now(),
                 event_type: event_type.to_string(),
-                session_id: self.session_id.clone(),
-                source_ip: Some(self.source_ip.clone()),
+                request_id: self.session_id.clone(),
+                remote_ip: Some(self.source_ip.clone()),
+                remote_port: None,
                 username: Some(self.username.clone()),
                 target_server: Some(self.target_server.clone()),
+                auth_method: None,
                 result,
-                reason_code,
+                reason: reason_code,
+                ban_duration_seconds: None,
+                ban_until: None,
             })
             .await;
     }

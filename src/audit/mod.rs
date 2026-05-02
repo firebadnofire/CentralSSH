@@ -16,19 +16,45 @@ use crate::error::{CentralSshError, Result};
 pub enum AuditResult {
     Success,
     Failure,
-    Blocked,
+    Denied,
+    Banned,
+    Delayed,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
     pub timestamp: DateTime<Utc>,
     pub event_type: String,
-    pub session_id: String,
-    pub source_ip: Option<String>,
+    pub request_id: String,
+    pub remote_ip: Option<String>,
+    pub remote_port: Option<u16>,
     pub username: Option<String>,
     pub target_server: Option<String>,
+    pub auth_method: Option<String>,
     pub result: AuditResult,
-    pub reason_code: Option<String>,
+    pub reason: Option<String>,
+    pub ban_duration_seconds: Option<u64>,
+    pub ban_until: Option<DateTime<Utc>>,
+}
+
+impl AuditEvent {
+    pub fn system(event_type: &str, result: AuditResult, reason: Option<String>) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            event_type: event_type.to_string(),
+            request_id: "system".to_string(),
+            remote_ip: None,
+            remote_port: None,
+            username: None,
+            target_server: None,
+            auth_method: None,
+            result,
+            reason,
+            ban_duration_seconds: None,
+            ban_until: None,
+        }
+    }
 }
 
 #[derive(Clone)]

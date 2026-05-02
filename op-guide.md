@@ -107,6 +107,21 @@ user_key_root = "/var/lib/centralssh/keys"
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
+
+[fail2ban]
+enabled = true
+max_failures = 5
+find_time = "60s"
+ban_time = "10m"
+max_ban_time = "24h"
+backoff_multiplier = 2.0
+delay_before_ban = true
+delay_time = "2s"
+persist_state = true
+state_path = "/var/lib/centralssh/fail2ban_state.json"
+
+[fail2ban.whitelist]
+ips = ["127.0.0.1/32", "::1/128", "192.168.0.0/16"]
 ```
 
 ### User fields
@@ -123,6 +138,20 @@ enforce_password_policy = true
 - `known_hosts_path`: optional override for target host trust store
 - `audit_log_path`: optional override for audit log file
 - `enforce_password_policy`: optional boolean; defaults to `true`
+
+### Fail2ban fields
+
+- `enabled`: master switch for internal abuse tracking
+- `max_failures`: threshold inside the sliding window before a ban is created
+- `find_time`: sliding window duration
+- `ban_time`: first-ban duration
+- `max_ban_time`: cap for exponential backoff bans
+- `backoff_multiplier`: repeated-ban growth factor
+- `delay_before_ban`: enable short tarpitting before the threshold is crossed
+- `delay_time`: tarpit delay duration
+- `persist_state`: save and reload abuse state on restart
+- `state_path`: JSON state file for persisted ban metadata
+- `whitelist.ips`: CIDR ranges that bypass bans and failure tracking
 
 ### Validation rules
 
@@ -377,7 +406,19 @@ The log file is opened in append mode and each event is flushed with `sync_data(
 
 Current event types include at least:
 
+- `connection_opened`
+- `connection_rejected_banned`
 - `auth_attempt`
+- `auth_success`
+- `auth_failure`
+- `unknown_username_attempt`
+- `authorization_denied`
+- `protocol_error`
+- `ban_created`
+- `ban_extended`
+- `ban_expired`
+- `whitelist_bypass`
+- `rate_limit_delay_applied`
 - `auth_password`
 - `auth_totp`
 - `server_selected`
@@ -390,25 +431,39 @@ Fields currently written:
 
 - `timestamp`
 - `event_type`
-- `session_id`
-- `source_ip`
+- `request_id`
+- `remote_ip`
+- `remote_port`
 - `username`
 - `target_server`
+- `auth_method`
 - `result`
-- `reason_code`
+- `reason`
+- `ban_duration_seconds`
+- `ban_until`
 
 Result values:
 
 - `success`
 - `failure`
-- `blocked`
+- `denied`
+- `banned`
+- `delayed`
+- `error`
 
 The operator should monitor:
 
 - repeated `auth_attempt` failures
-- `blocked` results from rate limiting
+- `banned` results from fail2ban
+- `delayed` results from tarpitting
 - `proxy_start` failures
 - `config_reload` failures
+
+Example:
+
+```json
+{"timestamp":"2026-05-02T20:00:00Z","event_type":"auth_failure","request_id":"8d46f413-e5d0-4c79-b0f1-23213efaf67b","remote_ip":"203.0.113.44","remote_port":51422,"username":"alice","target_server":null,"auth_method":"keyboard_interactive","result":"failure","reason":"authentication failed","ban_duration_seconds":null,"ban_until":null}
+```
 
 ## 18. Rate limiting
 
