@@ -29,6 +29,8 @@ pub mod proxy;
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
 const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
+const ENROLLMENT_QR_DARK_MODULE: &str = "##";
+const ENROLLMENT_QR_LIGHT_MODULE: &str = "  ";
 
 #[derive(Clone)]
 struct GatewayServer {
@@ -170,6 +172,12 @@ impl GatewayHandler {
             "\nTOTP enrollment is required before target access.\n\
 Add this account to your authenticator app and enter the resulting code.\n\n",
         );
+        instructions.push_str("Secret: ");
+        instructions.push_str(secret);
+        instructions.push('\n');
+        instructions.push_str("URI: ");
+        instructions.push_str(url);
+        instructions.push_str("\n\n");
         match render_enrollment_qr_if_terminal_fits(url) {
             Ok(Some(qr)) => {
                 instructions.push_str("Scan this QR code with your authenticator app.\n\n");
@@ -179,22 +187,16 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
             Ok(None) => {
                 instructions.push_str(
                     "Terminal is too small for the inline QR code.\n\
-Use the plaintext secret or URI below.\n\n",
+Use the plaintext secret or URI above.\n\n",
                 );
             }
             Err(error) => {
                 instructions.push_str(&format!(
                     "Unable to render the inline QR code: {error}\n\
-Use the plaintext secret or URI below.\n\n"
+Use the plaintext secret or URI above.\n\n"
                 ));
             }
         }
-        instructions.push_str("Secret: ");
-        instructions.push_str(secret);
-        instructions.push('\n');
-        instructions.push_str("URI: ");
-        instructions.push_str(url);
-        instructions.push('\n');
         Self::keyboard_prompt(instructions, "Verification code: ", false)
     }
 
@@ -208,7 +210,7 @@ Use the plaintext secret or URI below.\n\n"
         let qr = QrCode::new(url.as_bytes())
             .map_err(|e| CentralSshError::InvalidConfig(format!("failed to generate QR: {e}")))?;
         let side_modules = qr.width() + (ENROLLMENT_QR_QUIET_ZONE * 2);
-        Ok((side_modules, side_modules.div_ceil(2)))
+        Ok((side_modules * ENROLLMENT_QR_DARK_MODULE.len(), side_modules))
     }
 
     fn build_pending_context(
@@ -1135,16 +1137,14 @@ fn render_enrollment_qr(url: &str) -> Result<String> {
     let total = width + (ENROLLMENT_QR_QUIET_ZONE * 2);
     let mut out = String::new();
 
-    for y in (0..total).step_by(2) {
+    for y in 0..total {
         for x in 0..total {
-            let top = qr_module_is_dark(&colors, width, x, y);
-            let bottom = qr_module_is_dark(&colors, width, x, y + 1);
-            out.push(match (top, bottom) {
-                (false, false) => ' ',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (true, true) => '█',
-            });
+            let module = if qr_module_is_dark(&colors, width, x, y) {
+                ENROLLMENT_QR_DARK_MODULE
+            } else {
+                ENROLLMENT_QR_LIGHT_MODULE
+            };
+            out.push_str(module);
         }
         out.push('\n');
     }
@@ -1894,14 +1894,45 @@ mod tests {
     }
 
     #[test]
-    fn render_enrollment_qr_emits_block_rows() {
+    fn render_enrollment_qr_emits_ascii_rows() {
         let rendered = render_enrollment_qr(
             "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CentralSSH",
         )
         .expect("rendered qr");
 
-        assert!(rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'));
+        assert!(rendered.contains(ENROLLMENT_QR_DARK_MODULE));
         assert!(rendered.contains("\r\n"));
+        assert!(!rendered.contains('█'));
+    }
+
+    #[test]
+    fn enrollment_prompt_shows_secret_and_uri_before_qr() {
+        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        unsafe {
+            env::remove_var("COLUMNS");
+            env::remove_var("LINES");
+        }
+
+        let auth = GatewayHandler::enrollment_prompt(
+            "alice",
+            "JBSWY3DPEHPK3PXP",
+            "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXP&issuer=CentralSSH",
+            None,
+        );
+
+        let Auth::Partial { instructions, .. } = auth else {
+            panic!("expected partial auth prompt");
+        };
+        let instructions = instructions.as_ref();
+
+        let secret_index = instructions.find("Secret:").expect("secret");
+        let uri_index = instructions.find("URI:").expect("uri");
+        let qr_index = instructions
+            .find("Scan this QR code with your authenticator app.")
+            .expect("qr notice");
+
+        assert!(secret_index < qr_index);
+        assert!(uri_index < qr_index);
     }
 
     #[test]
