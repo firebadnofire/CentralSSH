@@ -141,6 +141,7 @@ known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = true
+min_password_policy = 12
 
 [fail2ban]
 enabled = true
@@ -171,6 +172,7 @@ Fields:
 - `settings.audit_log_path`: optional path override.
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.
 - `settings.enforce_password_policy`: optional bool, default `true`.
+- `settings.min_password_policy`: optional integer minimum password length, default `12`.
 - `fail2ban.enabled`: optional bool, default `true`.
 - `fail2ban.max_failures`: optional integer threshold inside the sliding window, default `5`.
 - `fail2ban.find_time`: optional duration string, default `60s`.

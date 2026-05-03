@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 use crate::abuse::{BanEvent, BanEventKind, FailureOutcome, PreAuthCheck};
 use crate::app::AppState;
 use crate::audit::{AuditEvent, AuditResult};
-use crate::config::UserRecord;
+use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
 use crate::config::validate_path_has_no_symlinks;
 use crate::error::{CentralSshError, Result};
 
@@ -57,6 +57,12 @@ struct PendingAuthContext {
     login_password: Option<Zeroizing<String>>,
 }
 
+#[derive(Clone, Copy)]
+struct PasswordPolicyConfig {
+    enforce: bool,
+    min_length: usize,
+}
+
 enum KeyboardAuthState {
     AwaitPassword {
         username: String,
@@ -67,11 +73,11 @@ enum KeyboardAuthState {
     },
     AwaitNewPassword {
         context: PendingAuthContext,
-        enforce_password_policy: bool,
+        password_policy: PasswordPolicyConfig,
     },
     AwaitConfirmPassword {
         context: PendingAuthContext,
-        enforce_password_policy: bool,
+        password_policy: PasswordPolicyConfig,
         candidate_password: Zeroizing<String>,
     },
     AwaitEnrollmentTotp {
@@ -574,11 +580,18 @@ Use the plaintext secret or URI above.\n\n"
 
         self.advance_after_initial_auth(
             Self::build_pending_context(user, None),
-            snapshot
-                .config
-                .settings
-                .enforce_password_policy
-                .unwrap_or(true),
+            PasswordPolicyConfig {
+                enforce: snapshot
+                    .config
+                    .settings
+                    .enforce_password_policy
+                    .unwrap_or(true),
+                min_length: snapshot
+                    .config
+                    .settings
+                    .min_password_policy
+                    .unwrap_or(DEFAULT_MIN_PASSWORD_POLICY),
+            },
         )
         .await
     }
@@ -586,14 +599,14 @@ Use the plaintext secret or URI above.\n\n"
     async fn advance_after_initial_auth(
         &mut self,
         context: PendingAuthContext,
-        enforce_password_policy: bool,
+        password_policy: PasswordPolicyConfig,
     ) -> std::result::Result<Auth, russh::Error> {
         let username = context.user.name.clone();
 
         if context.user.must_change_password {
             self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
                 context,
-                enforce_password_policy,
+                password_policy,
             });
             return Ok(Self::new_password_prompt(&username, None));
         }
@@ -719,11 +732,18 @@ Use the plaintext secret or URI above.\n\n"
 
                 self.advance_after_initial_auth(
                     context,
-                    snapshot
-                        .config
-                        .settings
-                        .enforce_password_policy
-                        .unwrap_or(true),
+                    PasswordPolicyConfig {
+                        enforce: snapshot
+                            .config
+                            .settings
+                            .enforce_password_policy
+                            .unwrap_or(true),
+                        min_length: snapshot
+                            .config
+                            .settings
+                            .min_password_policy
+                            .unwrap_or(DEFAULT_MIN_PASSWORD_POLICY),
+                    },
                 )
                 .await
             }
@@ -791,14 +811,14 @@ Use the plaintext secret or URI above.\n\n"
     async fn handle_new_password_response(
         &mut self,
         context: PendingAuthContext,
-        enforce_password_policy: bool,
+        password_policy: PasswordPolicyConfig,
         new_password: String,
     ) -> std::result::Result<Auth, russh::Error> {
         let username = context.user.name.clone();
         self.keyboard_auth_state = Some(KeyboardAuthState::AwaitConfirmPassword {
             candidate_password: Zeroizing::new(new_password),
             context,
-            enforce_password_policy,
+            password_policy,
         });
         Ok(Self::confirm_password_prompt(&username))
     }
@@ -806,7 +826,7 @@ Use the plaintext secret or URI above.\n\n"
     async fn handle_confirm_password_response(
         &mut self,
         mut context: PendingAuthContext,
-        enforce_password_policy: bool,
+        password_policy: PasswordPolicyConfig,
         candidate_password: Zeroizing<String>,
         confirmation: String,
     ) -> std::result::Result<Auth, russh::Error> {
@@ -815,7 +835,7 @@ Use the plaintext secret or URI above.\n\n"
         if candidate_password.as_str() != confirmation {
             self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
                 context,
-                enforce_password_policy,
+                password_policy,
             });
             return Ok(Self::new_password_prompt(
                 &username,
@@ -824,11 +844,15 @@ Use the plaintext secret or URI above.\n\n"
         }
 
         let new_password = candidate_password.as_str();
-        if enforce_password_policy {
+        if password_policy.enforce {
             if let Err(error) = self
                 .state
                 .auth
-                .enforce_password_policy(new_password, &context.user.password)
+                .enforce_password_policy(
+                    new_password,
+                    &context.user.password,
+                    password_policy.min_length,
+                )
             {
                 let message = match error {
                     CentralSshError::InvalidConfig(message) => message,
@@ -836,14 +860,14 @@ Use the plaintext secret or URI above.\n\n"
                 };
                 self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
                     context,
-                    enforce_password_policy,
+                    password_policy,
                 });
                 return Ok(Self::new_password_prompt(&username, Some(&message)));
             }
         } else if new_password.is_empty() {
             self.keyboard_auth_state = Some(KeyboardAuthState::AwaitNewPassword {
                 context,
-                enforce_password_policy,
+                password_policy,
             });
             return Ok(Self::new_password_prompt(
                 &username,
@@ -1350,19 +1374,18 @@ impl server::Handler for GatewayHandler {
             }
             KeyboardAuthState::AwaitNewPassword {
                 context,
-                enforce_password_policy,
-            } => {
-                self.handle_new_password_response(context, enforce_password_policy, response_text)
-                    .await
-            }
+                password_policy,
+            } => self
+                .handle_new_password_response(context, password_policy, response_text)
+                .await,
             KeyboardAuthState::AwaitConfirmPassword {
                 context,
-                enforce_password_policy,
+                password_policy,
                 candidate_password,
             } => {
                 self.handle_confirm_password_response(
                     context,
-                    enforce_password_policy,
+                    password_policy,
                     candidate_password,
                     response_text,
                 )

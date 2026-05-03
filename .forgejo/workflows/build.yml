@@ -252,10 +252,6 @@ jobs:
         shell: sh
         run: |
           set -eu
-          if command -v node >/dev/null 2>&1; then
-            exit 0
-          fi
-
           if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
             SUDO="sudo"
           else
@@ -263,7 +259,19 @@ jobs:
           fi
 
           ${SUDO} apt-get update
-          ${SUDO} apt-get install -y --no-install-recommends ca-certificates curl nodejs npm
+          ${SUDO} apt-get install -y --no-install-recommends ca-certificates curl gnupg
+
+          node_major=0
+          if command -v node >/dev/null 2>&1; then
+            node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+          fi
+
+          if [ "${node_major}" -lt 20 ]; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | ${SUDO} bash -
+            ${SUDO} apt-get install -y --no-install-recommends nodejs
+          fi
+
+          node --version
 
       - name: Check out repository
         uses: actions/checkout@v4

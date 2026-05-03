@@ -107,6 +107,7 @@ user_key_root = "/var/lib/centralssh/keys"
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
+min_password_policy = 12
 
 [fail2ban]
 enabled = true
@@ -138,6 +139,7 @@ ips = ["127.0.0.1/32", "::1/128", "192.168.0.0/16"]
 - `known_hosts_path`: optional override for target host trust store
 - `audit_log_path`: optional override for audit log file
 - `enforce_password_policy`: optional boolean; defaults to `true`
+- `min_password_policy`: optional integer minimum password length; defaults to `12`
 
 ### Fail2ban fields
 
@@ -229,7 +231,7 @@ Operational meaning:
 
 Password policy when enabled:
 
-- minimum length: 12
+- minimum length: `settings.min_password_policy` or 12 by default
 - maximum length: 256
 - new password must differ from current password
 

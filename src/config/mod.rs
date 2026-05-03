@@ -22,6 +22,7 @@ pub const DEFAULT_SERVERS_PATH: &str = "/etc/centralssh/servers.toml";
 pub const DEFAULT_KNOWN_HOSTS_PATH: &str = "/etc/centralssh/known_hosts";
 pub const DEFAULT_USER_KEY_ROOT: &str = "/var/lib/centralssh/keys";
 pub const DEFAULT_AUDIT_LOG_PATH: &str = "/var/log/centralssh/audit.jsonl";
+pub const DEFAULT_MIN_PASSWORD_POLICY: usize = 12;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SettingsConfig {
@@ -30,6 +31,7 @@ pub struct SettingsConfig {
     pub audit_log_path: Option<PathBuf>,
     pub whitelist_path: Option<PathBuf>,
     pub enforce_password_policy: Option<bool>,
+    pub min_password_policy: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -319,6 +321,14 @@ fn update_user_record_in_document(
 pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<()> {
     if let Some(fail2ban) = &config.fail2ban {
         fail2ban.effective(config.settings.whitelist_path.as_deref())?;
+    }
+
+    if let Some(min_password_policy) = config.settings.min_password_policy {
+        if min_password_policy > 256 {
+            return Err(CentralSshError::InvalidConfig(format!(
+                "settings.min_password_policy must be <= 256, found {min_password_policy}"
+            )));
+        }
     }
 
     if config.users.is_empty() {
@@ -807,6 +817,7 @@ allowed_servers = ["git"]
         assert!(loaded.settings.audit_log_path.is_none());
         assert!(loaded.settings.whitelist_path.is_none());
         assert_eq!(loaded.settings.enforce_password_policy, None);
+        assert_eq!(loaded.settings.min_password_policy, None);
     }
 
     #[test]
@@ -833,6 +844,7 @@ known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = false
+min_password_policy = 20
 "#,
         );
 
@@ -858,6 +870,16 @@ enforce_password_policy = false
             Some(PathBuf::from("/etc/centralssh/whitelist.txt"))
         );
         assert_eq!(loaded.settings.enforce_password_policy, Some(false));
+        assert_eq!(loaded.settings.min_password_policy, Some(20));
+    }
+
+    #[test]
+    fn validate_semantics_rejects_min_password_policy_above_maximum() {
+        let mut config = valid_config();
+        config.settings.min_password_policy = Some(257);
+
+        let result = validate_semantics(&config, &valid_servers());
+        assert!(result.is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use crate::config::UserRecord;
+use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
 use crate::error::{CentralSshError, Result};
 use argon2::password_hash::rand_core::RngCore;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -207,10 +207,17 @@ impl AuthEngine {
         Ok(user)
     }
 
-    pub fn enforce_password_policy(&self, new_password: &str, old_hash: &str) -> Result<()> {
-        if new_password.len() < 12 {
+    pub fn enforce_password_policy(
+        &self,
+        new_password: &str,
+        old_hash: &str,
+        min_length: usize,
+    ) -> Result<()> {
+        let min_length = min_length.min(256);
+
+        if new_password.len() < min_length {
             return Err(CentralSshError::InvalidConfig(
-                "password must be at least 12 characters".to_string(),
+                format!("password must be at least {min_length} characters"),
             ));
         }
 
@@ -431,5 +438,17 @@ mod tests {
             auth.consume_rate_limit_token(ip, "alice").await,
             Err(CentralSshError::RateLimitExceeded)
         ));
+    }
+
+    #[test]
+    fn enforce_password_policy_uses_configured_minimum_length() {
+        let auth = AuthEngine::new().expect("engine");
+        let old_hash = auth.hash_password("current-password").expect("hash");
+
+        let result = auth.enforce_password_policy("short", &old_hash, DEFAULT_MIN_PASSWORD_POLICY);
+        assert!(matches!(result, Err(CentralSshError::InvalidConfig(message)) if message == "password must be at least 12 characters"));
+
+        auth.enforce_password_policy("long enough for policy", &old_hash, 20)
+            .expect("policy should pass");
     }
 }

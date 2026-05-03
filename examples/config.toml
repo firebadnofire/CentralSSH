@@ -16,3 +16,4 @@ known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 # whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = true
+min_password_policy = 12

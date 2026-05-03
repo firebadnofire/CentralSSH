@@ -51,6 +51,7 @@ use tracing::info;
 
   Password policy:
     - settings.enforce_password_policy defaults to true
+    - settings.min_password_policy defaults to 12
     - set false only for controlled/testing environments"
 )]
 struct Cli {
