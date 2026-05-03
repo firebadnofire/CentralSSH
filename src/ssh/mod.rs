@@ -29,8 +29,6 @@ pub mod proxy;
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
 const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
-const DEFAULT_ENROLLMENT_QR_COLUMNS: usize = 80;
-const DEFAULT_ENROLLMENT_QR_ROWS: usize = 24;
 
 #[derive(Clone)]
 struct GatewayServer {
@@ -1102,25 +1100,28 @@ Use the plaintext secret or URI below.\n\n"
     }
 }
 
-fn terminal_dimensions_from_env() -> (usize, usize) {
+fn terminal_dimensions_from_env() -> Option<(usize, usize)> {
     let columns = env::var("COLUMNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_ENROLLMENT_QR_COLUMNS);
+        .filter(|value| *value > 0);
     let rows = env::var("LINES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_ENROLLMENT_QR_ROWS);
-    (columns, rows)
+        .filter(|value| *value > 0);
+
+    match (columns, rows) {
+        (Some(columns), Some(rows)) => Some((columns, rows)),
+        _ => None,
+    }
 }
 
 fn render_enrollment_qr_if_terminal_fits(url: &str) -> Result<Option<String>> {
-    let (columns, rows) = terminal_dimensions_from_env();
-    let (required_columns, required_rows) = GatewayHandler::enrollment_qr_dimensions(url)?;
-    if columns < required_columns || rows < required_rows {
-        return Ok(None);
+    if let Some((columns, rows)) = terminal_dimensions_from_env() {
+        let (required_columns, required_rows) = GatewayHandler::enrollment_qr_dimensions(url)?;
+        if columns < required_columns || rows < required_rows {
+            return Ok(None);
+        }
     }
 
     Ok(Some(render_enrollment_qr(url)?))
@@ -1792,7 +1793,13 @@ fn validate_host_key_security(path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    fn terminal_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn server_transport_config_disables_idle_reap_and_enables_sparse_keepalives() {
@@ -1898,14 +1905,45 @@ mod tests {
     }
 
     #[test]
-    fn terminal_dimensions_default_when_env_missing() {
+    fn terminal_dimensions_are_absent_when_env_missing() {
+        let _guard = terminal_env_lock().lock().expect("terminal env lock");
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
         }
 
-        let (columns, rows) = terminal_dimensions_from_env();
-        assert_eq!(columns, DEFAULT_ENROLLMENT_QR_COLUMNS);
-        assert_eq!(rows, DEFAULT_ENROLLMENT_QR_ROWS);
+        assert_eq!(terminal_dimensions_from_env(), None);
+    }
+
+    #[test]
+    fn enrollment_qr_renders_when_terminal_size_is_unavailable() {
+        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        unsafe {
+            env::remove_var("COLUMNS");
+            env::remove_var("LINES");
+        }
+
+        let rendered = render_enrollment_qr_if_terminal_fits(
+            "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CentralSSH",
+        )
+        .expect("qr render result");
+
+        assert!(rendered.is_some());
+    }
+
+    #[test]
+    fn enrollment_qr_is_suppressed_when_terminal_is_explicitly_too_small() {
+        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        unsafe {
+            env::set_var("COLUMNS", "20");
+            env::set_var("LINES", "10");
+        }
+
+        let rendered = render_enrollment_qr_if_terminal_fits(
+            "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CentralSSH",
+        )
+        .expect("qr render result");
+
+        assert!(rendered.is_none());
     }
 }

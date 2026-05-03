@@ -129,6 +129,7 @@ jobs:
           EOF
           dpkg-deb --build stage/linux "dist/${CI_PACKAGE_NAME}_${CI_PACKAGE_VERSION}_amd64.deb"
 
+          rm -rf stage/linux/DEBIAN
           install -d "stage/rpmbuild/SOURCES"
           tar -C stage/linux -czf "stage/rpmbuild/SOURCES/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-linux-root.tar.gz" .
           install -d "stage/rpmbuild/SPECS"
