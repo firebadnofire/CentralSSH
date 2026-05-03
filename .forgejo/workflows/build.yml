@@ -277,6 +277,7 @@ jobs:
 
   freebsd:
     runs-on: ubuntu-22.04
+    if: ${{ env.ACT != 'true' }}
     steps:
       - name: Prepare action runtime
         shell: sh
@@ -509,7 +510,7 @@ jobs:
     steps:
       - name: Check build status
         run: |
-          if [ "${{ needs.linux.result }}" = "success" ] && [ "${{ needs.freebsd.result }}" = "success" ]; then
+          if [ "${{ needs.linux.result }}" = "success" ] && { [ "${{ needs.freebsd.result }}" = "success" ] || [ "${{ needs.freebsd.result }}" = "skipped" ]; }; then
             echo "::notice::All builds succeeded"
           else
             echo "::error::Build failed: linux=${{ needs.linux.result }}, freebsd=${{ needs.freebsd.result }}"
