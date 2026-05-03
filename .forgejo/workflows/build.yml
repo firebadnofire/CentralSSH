@@ -69,6 +69,20 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth=1
 
+      - name: Normalize workspace path for FreeBSD VM sync
+        shell: sh
+        run: |
+          set -eu
+          actual_workspace="${GITHUB_WORKSPACE:-$PWD}"
+          if [ ! -d "$actual_workspace" ]; then
+            actual_workspace="$PWD"
+          fi
+
+          mkdir -p /root
+          if [ ! -e /root/work ]; then
+            ln -s "$actual_workspace" /root/work
+          fi
+
       - name: Derive package metadata
         shell: sh
         run: |
