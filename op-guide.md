@@ -553,6 +553,7 @@ centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/etc/centralssh/users"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
+centralssh_whitelist="/etc/centralssh/whitelist.txt"
 ```
 
 Important note:

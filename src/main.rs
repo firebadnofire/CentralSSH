@@ -37,6 +37,7 @@ use tracing::info;
       --known-hosts /etc/centralssh/known_hosts
       --user-key-root /var/lib/centralssh/keys
       --audit-log   /var/log/centralssh/audit.jsonl
+      --whitelist   disabled unless configured
 
   Dev quick-start (non-strict mode):
     mkdir -p ./tmp/keys ./examples
@@ -70,6 +71,9 @@ struct Cli {
 
     #[arg(long, env = "CENTRALSSH_AUDIT_LOG")]
     audit_log: Option<PathBuf>,
+
+    #[arg(long, env = "CENTRALSSH_WHITELIST")]
+    whitelist: Option<PathBuf>,
 
     #[arg(
         long,
@@ -109,6 +113,7 @@ async fn run() -> Result<()> {
         cli.known_hosts.clone(),
         cli.user_key_root.clone(),
         cli.audit_log.clone(),
+        cli.whitelist.clone(),
         Some(&seed_config.settings),
     );
     ensure_user_key_root_directory(&paths.user_key_root)?;

@@ -29,8 +29,10 @@ pub mod proxy;
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
 const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
-const ENROLLMENT_QR_DARK_MODULE: &str = "##";
-const ENROLLMENT_QR_LIGHT_MODULE: &str = "  ";
+const ENROLLMENT_QR_DARK_MODULE: &str = "\x1b[30;40m \x1b[0m";
+const ENROLLMENT_QR_LIGHT_MODULE: &str = "\x1b[37;47m \x1b[0m";
+const ENROLLMENT_QR_TOP_HALF_DARK_BOTTOM_LIGHT: &str = "\x1b[30;47m▀\x1b[0m";
+const ENROLLMENT_QR_TOP_HALF_LIGHT_BOTTOM_DARK: &str = "\x1b[37;40m▀\x1b[0m";
 
 #[derive(Clone)]
 struct GatewayServer {
@@ -210,7 +212,7 @@ Use the plaintext secret or URI above.\n\n"
         let qr = QrCode::new(url.as_bytes())
             .map_err(|e| CentralSshError::InvalidConfig(format!("failed to generate QR: {e}")))?;
         let side_modules = qr.width() + (ENROLLMENT_QR_QUIET_ZONE * 2);
-        Ok((side_modules * ENROLLMENT_QR_DARK_MODULE.len(), side_modules))
+        Ok((side_modules, side_modules.div_ceil(2)))
     }
 
     fn build_pending_context(
@@ -1137,12 +1139,16 @@ fn render_enrollment_qr(url: &str) -> Result<String> {
     let total = width + (ENROLLMENT_QR_QUIET_ZONE * 2);
     let mut out = String::new();
 
-    for y in 0..total {
+    for y in (0..total).step_by(2) {
         for x in 0..total {
-            let module = if qr_module_is_dark(&colors, width, x, y) {
-                ENROLLMENT_QR_DARK_MODULE
-            } else {
-                ENROLLMENT_QR_LIGHT_MODULE
+            let module = match (
+                qr_module_is_dark(&colors, width, x, y),
+                qr_module_is_dark(&colors, width, x, y + 1),
+            ) {
+                (true, true) => ENROLLMENT_QR_DARK_MODULE,
+                (false, false) => ENROLLMENT_QR_LIGHT_MODULE,
+                (true, false) => ENROLLMENT_QR_TOP_HALF_DARK_BOTTOM_LIGHT,
+                (false, true) => ENROLLMENT_QR_TOP_HALF_LIGHT_BOTTOM_DARK,
             };
             out.push_str(module);
         }

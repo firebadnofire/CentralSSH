@@ -91,6 +91,7 @@ centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/etc/centralssh/users"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
+centralssh_whitelist="/etc/centralssh/whitelist.txt"
 ```
 
 ## Makefile Behavior
@@ -138,6 +139,7 @@ allowed_servers = ["dns"]
 user_key_root = "/etc/centralssh/users"
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
+whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = true
 
 [fail2ban]
@@ -167,6 +169,7 @@ Fields:
 - `settings.user_key_root`: optional path override.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
+- `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.
 - `settings.enforce_password_policy`: optional bool, default `true`.
 - `fail2ban.enabled`: optional bool, default `true`.
 - `fail2ban.max_failures`: optional integer threshold inside the sliding window, default `5`.
@@ -195,13 +198,14 @@ Behavior:
 - `max_failures` inside `find_time` creates a ban for `ban_time`.
 - Repeated bans for the same IP use exponential backoff and stop growing at `max_ban_time`.
 - Optional tarpitting applies `delay_time` just before the ban threshold when `delay_before_ban=true`.
-- CIDR whitelist entries bypass bans and failure tracking.
+- CIDR whitelist entries and `settings.whitelist_path` file entries bypass bans and failure tracking.
 - If persistence is enabled, ban state is atomically saved and reloaded from `fail2ban.state_path`.
 
 Operational notes:
 
 - Whitelist trusted admin networks deliberately to avoid locking out operators during maintenance.
 - Keep the whitelist as narrow as practical; prefer a management subnet over broad RFC1918 ranges.
+- `settings.whitelist_path` expects one exact IP address per line and accepts both IPv4 and IPv6.
 - The persisted state file contains timestamps, IPs, usernames, target names, and ban metadata only. It does not contain passwords or TOTP material.
 
 ### `/etc/centralssh/servers.toml`

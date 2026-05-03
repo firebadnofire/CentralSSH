@@ -28,6 +28,7 @@ pub struct SettingsConfig {
     pub user_key_root: Option<PathBuf>,
     pub known_hosts_path: Option<PathBuf>,
     pub audit_log_path: Option<PathBuf>,
+    pub whitelist_path: Option<PathBuf>,
     pub enforce_password_policy: Option<bool>,
 }
 
@@ -63,6 +64,7 @@ pub struct EffectivePaths {
     pub known_hosts_path: PathBuf,
     pub user_key_root: PathBuf,
     pub audit_log_path: PathBuf,
+    pub whitelist_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,19 +82,22 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub async fn load(paths: EffectivePaths, enforce_strict_security: bool) -> Result<Self> {
-        let config = load_config_file(&paths.config_path)?;
+        let mut config = load_config_file(&paths.config_path)?;
         let servers = load_servers_file(&paths.servers_path)?;
+        apply_runtime_overrides(&mut config, &paths);
 
         if enforce_strict_security {
             validate_file_security(&paths.config_path, 0o600, true)?;
             validate_file_security(&paths.servers_path, 0o600, true)?;
             validate_file_security(&paths.known_hosts_path, 0o600, true)?;
             validate_directory_security(&paths.user_key_root, 0o700, true)?;
+            validate_optional_file_security(paths.whitelist_path.as_deref(), 0o600)?;
         } else {
             validate_path_has_no_symlinks(&paths.config_path)?;
             validate_path_has_no_symlinks(&paths.servers_path)?;
             validate_path_has_no_symlinks(&paths.known_hosts_path)?;
             validate_path_has_no_symlinks(&paths.user_key_root)?;
+            validate_optional_path_has_no_symlinks(paths.whitelist_path.as_deref())?;
         }
 
         validate_semantics(&config, &servers)?;
@@ -112,19 +117,22 @@ impl ConfigStore {
     }
 
     pub async fn reload(&self, enforce_strict_security: bool) -> Result<()> {
-        let config = load_config_file(&self.paths.config_path)?;
+        let mut config = load_config_file(&self.paths.config_path)?;
         let servers = load_servers_file(&self.paths.servers_path)?;
+        apply_runtime_overrides(&mut config, &self.paths);
 
         if enforce_strict_security {
             validate_file_security(&self.paths.config_path, 0o600, true)?;
             validate_file_security(&self.paths.servers_path, 0o600, true)?;
             validate_file_security(&self.paths.known_hosts_path, 0o600, true)?;
             validate_directory_security(&self.paths.user_key_root, 0o700, true)?;
+            validate_optional_file_security(self.paths.whitelist_path.as_deref(), 0o600)?;
         } else {
             validate_path_has_no_symlinks(&self.paths.config_path)?;
             validate_path_has_no_symlinks(&self.paths.servers_path)?;
             validate_path_has_no_symlinks(&self.paths.known_hosts_path)?;
             validate_path_has_no_symlinks(&self.paths.user_key_root)?;
+            validate_optional_path_has_no_symlinks(self.paths.whitelist_path.as_deref())?;
         }
 
         validate_semantics(&config, &servers)?;
@@ -210,6 +218,7 @@ pub fn resolve_paths(
     known_hosts_path: Option<PathBuf>,
     user_key_root: Option<PathBuf>,
     audit_log_path: Option<PathBuf>,
+    whitelist_path: Option<PathBuf>,
     settings: Option<&SettingsConfig>,
 ) -> EffectivePaths {
     EffectivePaths {
@@ -224,7 +233,13 @@ pub fn resolve_paths(
         audit_log_path: audit_log_path
             .or_else(|| settings.and_then(|config| config.audit_log_path.clone()))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_AUDIT_LOG_PATH)),
+        whitelist_path: whitelist_path
+            .or_else(|| settings.and_then(|config| config.whitelist_path.clone())),
     }
+}
+
+fn apply_runtime_overrides(config: &mut ConfigFile, paths: &EffectivePaths) {
+    config.settings.whitelist_path = paths.whitelist_path.clone();
 }
 
 pub fn load_config_file(path: &Path) -> Result<ConfigFile> {
@@ -237,6 +252,20 @@ pub fn load_servers_file(path: &Path) -> Result<ServersFile> {
     let bytes = fs::read(path)?;
     let servers = toml::from_slice(&bytes)?;
     Ok(servers)
+}
+
+fn validate_optional_file_security(path: Option<&Path>, mode: u32) -> Result<()> {
+    if let Some(path) = path {
+        validate_file_security(path, mode, true)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_path_has_no_symlinks(path: Option<&Path>) -> Result<()> {
+    if let Some(path) = path {
+        validate_path_has_no_symlinks(path)?;
+    }
+    Ok(())
 }
 
 fn load_config_document(path: &Path) -> Result<DocumentMut> {
@@ -289,7 +318,7 @@ fn update_user_record_in_document(
 
 pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<()> {
     if let Some(fail2ban) = &config.fail2ban {
-        fail2ban.effective()?;
+        fail2ban.effective(config.settings.whitelist_path.as_deref())?;
     }
 
     if config.users.is_empty() {
@@ -776,6 +805,7 @@ allowed_servers = ["git"]
         assert!(loaded.settings.user_key_root.is_none());
         assert!(loaded.settings.known_hosts_path.is_none());
         assert!(loaded.settings.audit_log_path.is_none());
+        assert!(loaded.settings.whitelist_path.is_none());
         assert_eq!(loaded.settings.enforce_password_policy, None);
     }
 
@@ -801,6 +831,7 @@ allowed_servers = ["git"]
 user_key_root = "/var/lib/centralssh/keys"
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
+whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = false
 "#,
         );
@@ -821,6 +852,10 @@ enforce_password_policy = false
         assert_eq!(
             loaded.settings.audit_log_path,
             Some(PathBuf::from("/var/log/centralssh/audit.jsonl"))
+        );
+        assert_eq!(
+            loaded.settings.whitelist_path,
+            Some(PathBuf::from("/etc/centralssh/whitelist.txt"))
         );
         assert_eq!(loaded.settings.enforce_password_policy, Some(false));
     }

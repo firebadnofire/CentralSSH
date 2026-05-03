@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::IpAddr;
@@ -93,7 +93,7 @@ impl Fail2banSettings {
 }
 
 impl Fail2banConfig {
-    pub fn effective(&self) -> Result<Fail2banSettings> {
+    pub fn effective(&self, whitelist_path: Option<&Path>) -> Result<Fail2banSettings> {
         let defaults = Fail2banSettings::default();
         let settings = Fail2banSettings {
             enabled: self.enabled.unwrap_or(defaults.enabled),
@@ -127,7 +127,7 @@ impl Fail2banConfig {
                 .state_path
                 .clone()
                 .unwrap_or_else(|| defaults.state_path.clone()),
-            whitelist: parse_whitelist(&self.whitelist.ips)?,
+            whitelist: parse_whitelist(&self.whitelist.ips, whitelist_path)?,
         };
 
         validate_fail2ban_settings(&settings)?;
@@ -148,21 +148,63 @@ fn parse_duration_option(value: Option<&str>, default: Duration, field: &str) ->
         .map(|duration| duration.unwrap_or(default))
 }
 
-fn parse_whitelist(values: &[String]) -> Result<Vec<IpNet>> {
-    if values.is_empty() {
-        return Ok(Fail2banSettings::default().whitelist);
+fn parse_whitelist(values: &[String], whitelist_path: Option<&Path>) -> Result<Vec<IpNet>> {
+    let mut whitelist = Fail2banSettings::default().whitelist;
+    let mut seen = whitelist.iter().cloned().collect::<HashSet<_>>();
+
+    for entry in values {
+        let cidr = entry.parse::<IpNet>().map_err(|error| {
+            CentralSshError::InvalidConfig(format!(
+                "invalid fail2ban whitelist entry '{entry}': {error}"
+            ))
+        })?;
+        if seen.insert(cidr) {
+            whitelist.push(cidr);
+        }
     }
 
-    values
-        .iter()
-        .map(|entry| {
-            entry.parse::<IpNet>().map_err(|error| {
-                CentralSshError::InvalidConfig(format!(
-                    "invalid fail2ban whitelist entry '{entry}': {error}"
-                ))
-            })
-        })
-        .collect()
+    if let Some(path) = whitelist_path {
+        for entry in read_whitelist_file(path)? {
+            if seen.insert(entry) {
+                whitelist.push(entry);
+            }
+        }
+    }
+
+    Ok(whitelist)
+}
+
+fn read_whitelist_file(path: &Path) -> Result<Vec<IpNet>> {
+    let content = fs::read_to_string(path)?;
+    let mut whitelist = Vec::new();
+
+    for (line_number, raw_line) in content.lines().enumerate() {
+        let line = raw_line
+            .split_once('#')
+            .map(|(head, _)| head)
+            .unwrap_or(raw_line)
+            .trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let ip = line.parse::<IpAddr>().map_err(|error| {
+            CentralSshError::InvalidConfig(format!(
+                "invalid fail2ban whitelist IP '{}' at {}:{}: {}",
+                line,
+                path.display(),
+                line_number + 1,
+                error
+            ))
+        })?;
+        whitelist.push(single_host_net(ip));
+    }
+
+    Ok(whitelist)
+}
+
+fn single_host_net(ip: IpAddr) -> IpNet {
+    IpNet::from(ip)
 }
 
 pub fn validate_fail2ban_settings(settings: &Fail2banSettings) -> Result<()> {
@@ -508,7 +550,11 @@ pub struct AbuseTracker {
 
 impl AbuseTracker {
     pub async fn from_config(config: &ConfigFile, audit: AuditLogger) -> Result<Self> {
-        let effective = config.fail2ban.clone().unwrap_or_default().effective()?;
+        let effective = config
+            .fail2ban
+            .clone()
+            .unwrap_or_default()
+            .effective(config.settings.whitelist_path.as_deref())?;
         let tracker = Self {
             settings: Arc::new(RwLock::new(effective.clone())),
             core: Arc::new(Mutex::new(AbuseTrackerCore::default())),
@@ -519,7 +565,11 @@ impl AbuseTracker {
     }
 
     pub async fn reload_from_config(&self, config: &ConfigFile) -> Result<()> {
-        let effective = config.fail2ban.clone().unwrap_or_default().effective()?;
+        let effective = config
+            .fail2ban
+            .clone()
+            .unwrap_or_default()
+            .effective(config.settings.whitelist_path.as_deref())?;
         {
             let mut guard = self.settings.write().await;
             *guard = effective.clone();
@@ -721,6 +771,7 @@ mod tests {
     use super::*;
     use std::str::FromStr;
     use std::sync::Arc;
+    use crate::config::{ConfigFile, SettingsConfig};
     use tempfile::TempDir;
     use tokio::task::JoinSet;
 
@@ -934,6 +985,58 @@ mod tests {
         assert!(outcome.whitelisted);
     }
 
+    #[test]
+    fn whitelist_file_supports_ipv4_and_ipv6_per_row() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let whitelist_path = tempdir.path().join("whitelist.txt");
+        fs::write(
+            &whitelist_path,
+            "203.0.113.10\n\n# comment\n2001:db8::10  # inline comment\n",
+        )
+        .expect("write whitelist");
+
+        let loaded = read_whitelist_file(&whitelist_path).expect("load whitelist");
+
+        assert!(loaded.contains(&single_host_net(IpAddr::from_str("203.0.113.10").expect("ipv4"))));
+        assert!(loaded.contains(&single_host_net(IpAddr::from_str("2001:db8::10").expect("ipv6"))));
+    }
+
+    #[test]
+    fn fail2ban_effective_merges_inline_and_file_whitelist_entries() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let whitelist_path = tempdir.path().join("whitelist.txt");
+        fs::write(&whitelist_path, "203.0.113.10\n2001:db8::10\n").expect("write whitelist");
+
+        let config = Fail2banConfig {
+            whitelist: Fail2banWhitelistConfig {
+                ips: vec!["198.51.100.0/24".to_string()],
+            },
+            ..Fail2banConfig::default()
+        };
+
+        let effective = config
+            .effective(Some(&whitelist_path))
+            .expect("effective settings");
+
+        assert!(effective.is_whitelisted(IpAddr::from_str("127.0.0.1").expect("localhost")));
+        assert!(effective.is_whitelisted(IpAddr::from_str("198.51.100.42").expect("inline")));
+        assert!(effective.is_whitelisted(IpAddr::from_str("203.0.113.10").expect("file ipv4")));
+        assert!(effective.is_whitelisted(IpAddr::from_str("2001:db8::10").expect("file ipv6")));
+    }
+
+    #[test]
+    fn fail2ban_effective_rejects_invalid_whitelist_file_ip() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let whitelist_path = tempdir.path().join("whitelist.txt");
+        fs::write(&whitelist_path, "not-an-ip\n").expect("write whitelist");
+
+        let error = Fail2banConfig::default()
+            .effective(Some(&whitelist_path))
+            .expect_err("invalid whitelist file must fail");
+
+        assert!(error.to_string().contains("invalid fail2ban whitelist IP"));
+    }
+
     #[tokio::test]
     async fn corrupted_or_missing_state_file_does_not_crash() {
         let tempdir = TempDir::new().expect("tempdir");
@@ -993,5 +1096,30 @@ mod tests {
 
         let check = tracker.check_ip(ip).await;
         assert!(check.banned);
+    }
+
+    #[tokio::test]
+    async fn abuse_tracker_honors_whitelist_path_from_config_settings() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let whitelist_path = tempdir.path().join("whitelist.txt");
+        fs::write(&whitelist_path, "203.0.113.10\n").expect("write whitelist");
+        let logger = AuditLogger::new(tempdir.path().join("audit.jsonl"), false).expect("logger");
+        let config = ConfigFile {
+            users: Vec::new(),
+            settings: SettingsConfig {
+                whitelist_path: Some(whitelist_path),
+                ..SettingsConfig::default()
+            },
+            fail2ban: Some(Fail2banConfig::default()),
+        };
+
+        let tracker = AbuseTracker::from_config(&config, logger)
+            .await
+            .expect("tracker");
+        let outcome = tracker
+            .record_failure(IpAddr::from_str("203.0.113.10").expect("ip"), None, None)
+            .await;
+
+        assert!(outcome.whitelisted);
     }
 }

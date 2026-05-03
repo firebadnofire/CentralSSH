@@ -21,7 +21,8 @@ jobs:
             echo 'Acquire::https::Proxy "http://apt-cacher-ng:3142";'
           } > /etc/apt/apt.conf.d/01proxy
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git jq make dpkg-dev rpm xz-utils file pkg-config clang lld
+          apt-get install -y --no-install-recommends ca-certificates curl git jq make dpkg-dev rpm xz-utils file pkg-config clang lld python3 python3-pip
+          pip3 install --no-cache-dir --break-system-packages ziglang
 
       - name: Check out repository
         shell: sh
@@ -170,11 +171,19 @@ jobs:
           cp "stage/rpmbuild/RPMS/x86_64/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm" "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
 
           rustup target add x86_64-unknown-freebsd
-          export CC_x86_64_unknown_freebsd=clang
-          export AR_x86_64_unknown_freebsd=llvm-ar
-          export CFLAGS_x86_64_unknown_freebsd="--target=x86_64-unknown-freebsd"
-          export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER=clang
-          export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Clink-arg=--target=x86_64-unknown-freebsd -Clink-arg=-fuse-ld=lld"
+          mkdir -p stage/toolchain
+          cat > stage/toolchain/zig-cc-freebsd <<'EOF'
+          #!/bin/sh
+          exec zig cc -target x86_64-freebsd.14.0 "$@"
+          EOF
+          cat > stage/toolchain/zig-ar-freebsd <<'EOF'
+          #!/bin/sh
+          exec zig ar "$@"
+          EOF
+          chmod 0755 stage/toolchain/zig-cc-freebsd stage/toolchain/zig-ar-freebsd
+          export CC_x86_64_unknown_freebsd="$PWD/stage/toolchain/zig-cc-freebsd"
+          export AR_x86_64_unknown_freebsd="$PWD/stage/toolchain/zig-ar-freebsd"
+          export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER="$PWD/stage/toolchain/zig-cc-freebsd"
           cargo build --release --target x86_64-unknown-freebsd
 
           install -d "stage/freebsd/usr/local/sbin"
