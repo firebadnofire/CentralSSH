@@ -277,7 +277,6 @@ jobs:
 
   freebsd:
     runs-on: ubuntu-22.04
-    if: ${{ env.ACT != 'true' }}
     steps:
       - name: Prepare action runtime
         shell: sh
@@ -303,53 +302,17 @@ jobs:
           fi
 
           node --version
+          if [ -e /dev/kvm ]; then
+            echo "/dev/kvm is available"
+          else
+            echo "/dev/kvm is not available; FreeBSD VM will use software emulation"
+          fi
 
       - name: Check out repository
-        shell: sh
-        env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
-        run: |
-          set -eu
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
-          sha="${FORGEJO_SHA:-${GITHUB_SHA:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          remote_url="${server_url%/}/${repository}.git"
-
-          if [ -z "$server_url" ] || [ -z "$repository" ]; then
-            echo "Missing server context for checkout." >&2
-            exit 1
-          fi
-
-          git init .
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$remote_url"
-
-          if [ -n "$token" ]; then
-            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-            git_fetch() {
-              git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
-            }
-          else
-            git_fetch() {
-              git "$@"
-            }
-          fi
-
-          if [ -n "$ref" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "+${ref}:${ref}"
-            git checkout --force --detach "$ref"
-          elif [ -n "$sha" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "$sha"
-            git checkout --force --detach "$sha"
-          else
-            echo "Missing both ref and sha for checkout." >&2
-            exit 1
-          fi
-
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth=1
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
 
       - name: Prepare FreeBSD cache workspace
         shell: sh
@@ -510,7 +473,7 @@ jobs:
     steps:
       - name: Check build status
         run: |
-          if [ "${{ needs.linux.result }}" = "success" ] && { [ "${{ needs.freebsd.result }}" = "success" ] || [ "${{ needs.freebsd.result }}" = "skipped" ]; }; then
+          if [ "${{ needs.linux.result }}" = "success" ] && [ "${{ needs.freebsd.result }}" = "success" ]; then
             echo "::notice::All builds succeeded"
           else
             echo "::error::Build failed: linux=${{ needs.linux.result }}, freebsd=${{ needs.freebsd.result }}"
