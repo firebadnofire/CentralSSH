@@ -178,7 +178,14 @@ jobs:
           mkdir -p stage/toolchain
           cat > stage/toolchain/zig-cc-freebsd <<'EOF'
           #!/bin/sh
-          exec zig cc -target x86_64-freebsd.14.0 "$@"
+          ARGS=""
+          for arg in "$@"; do
+            case "$arg" in
+              --target=*) ;;
+              *) ARGS="$ARGS $arg" ;;
+            esac
+          done
+          exec zig cc -target x86_64-freebsd.14.0 $ARGS
           EOF
           cat > stage/toolchain/zig-ar-freebsd <<'EOF'
           #!/bin/sh
