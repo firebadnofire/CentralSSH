@@ -180,7 +180,9 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
     }
 
     fn should_prompt_existing_totp(user: Option<&UserRecord>) -> bool {
-        user.is_none_or(|candidate| candidate.totp_secret.is_some())
+        user.is_none_or(|candidate| {
+            !candidate.must_change_password && candidate.totp_secret.is_some()
+        })
     }
 
     fn build_pending_context(
@@ -1660,6 +1662,19 @@ mod tests {
             name: "alice".to_string(),
             password: "ignored".to_string(),
             totp_secret: None,
+            must_change_password: true,
+            allowed_servers: vec!["git".to_string()],
+        };
+
+        assert!(!GatewayHandler::should_prompt_existing_totp(Some(&user)));
+    }
+
+    #[test]
+    fn existing_totp_prompt_is_skipped_while_password_change_is_required() {
+        let user = UserRecord {
+            name: "alice".to_string(),
+            password: "ignored".to_string(),
+            totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
             must_change_password: true,
             allowed_servers: vec!["git".to_string()],
         };

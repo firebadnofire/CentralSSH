@@ -7,8 +7,6 @@ on:
 jobs:
   build-freebsd-package:
     runs-on: ubuntu-22.04
-    env:
-      GITHUB_WORKSPACE: /root/work
     container:
       image: node:20-bookworm
       options: --network ci-network
@@ -71,24 +69,28 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth=1
 
-      - name: Normalize workspace path for FreeBSD VM sync
+      - name: Prepare mirrored workspace for FreeBSD VM sync
         shell: sh
         run: |
           set -eu
-          actual_workspace="${GITHUB_WORKSPACE:-$PWD}"
-          if [ ! -d "$actual_workspace" ]; then
-            actual_workspace="$PWD"
-          fi
+          actual_workspace="$PWD"
+          repo_path="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-local/CentralSSH}}"
+          mirror_workspace="/root/work/${repo_path}"
 
-          mkdir -p /root
-          if [ ! -e /root/work ]; then
-            ln -s "$actual_workspace" /root/work
-          fi
+          mkdir -p "$(dirname "$mirror_workspace")"
+          rsync -a --delete --exclude .git --exclude target "${actual_workspace}/" "${mirror_workspace}/"
+
+          {
+            echo "CI_ACTUAL_WORKSPACE=${actual_workspace}"
+            echo "CI_MIRROR_WORKSPACE=${mirror_workspace}"
+            echo "GITHUB_WORKSPACE=${mirror_workspace}"
+          } >> "$GITHUB_ENV"
 
       - name: Derive package metadata
         shell: sh
         run: |
           set -eu
+          cd "${CI_ACTUAL_WORKSPACE:-$PWD}"
           package_name="$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           package_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           package_comment="$(sed -n 's/^description = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
@@ -155,12 +157,23 @@ jobs:
 
             pkg create -M "$meta_dir/+MANIFEST" -p "$meta_dir/pkg-plist" -r "$stage_dir" -o "$dist_dir"
 
+      - name: Sync FreeBSD package artifacts back to checkout workspace
+        shell: sh
+        run: |
+          set -eu
+          actual_workspace="${CI_ACTUAL_WORKSPACE:-$PWD}"
+          mirror_workspace="${CI_MIRROR_WORKSPACE:?missing mirrored workspace}"
+
+          mkdir -p "${actual_workspace}/dist"
+          rsync -a "${mirror_workspace}/dist/" "${actual_workspace}/dist/"
+
       - name: Validate FreeBSD package output
         shell: sh
         env:
           CI_PACKAGE_FILE: ${{ env.CI_PACKAGE_FILE }}
         run: |
           set -eu
+          cd "${CI_ACTUAL_WORKSPACE:-$PWD}"
           if [ ! -f "$CI_PACKAGE_FILE" ]; then
             echo "Missing expected FreeBSD package: $CI_PACKAGE_FILE" >&2
             exit 1
@@ -175,6 +188,7 @@ jobs:
           CI_RELEASE_TAG: ${{ env.CI_RELEASE_TAG }}
         run: |
           set -eu
+          cd "${CI_ACTUAL_WORKSPACE:-$PWD}"
 
           ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
           if [ "${ref#refs/tags/}" = "$ref" ]; then
