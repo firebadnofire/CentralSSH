@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
@@ -7,6 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use qrcode::QrCode;
+use qrcode::types::Color;
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig, client};
 use ssh_key::{LineEnding, PrivateKey};
@@ -25,6 +28,7 @@ pub mod proxy;
 
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
+const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
 
 #[derive(Clone)]
 struct GatewayServer {
@@ -122,15 +126,11 @@ impl GatewayHandler {
     }
 
     fn password_prompt(username: &str) -> Auth {
-        Self::keyboard_prompt(
-            format!("CentralSSH Gateway\nUser: {username}\n"),
-            "Password: ",
-            false,
-        )
+        Self::keyboard_prompt(format!("User: {username}\n"), "Password: ", false)
     }
 
     fn new_password_prompt(username: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        let mut instructions = format!("User: {username}\n");
         if let Some(message) = message {
             instructions.push('\n');
             instructions.push_str(message);
@@ -142,14 +142,14 @@ impl GatewayHandler {
 
     fn confirm_password_prompt(username: &str) -> Auth {
         Self::keyboard_prompt(
-            format!("CentralSSH Gateway\nUser: {username}\n\nConfirm your new password.\n"),
+            format!("User: {username}\n\nConfirm your new password.\n"),
             "Confirm password: ",
             false,
         )
     }
 
     fn totp_prompt(username: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        let mut instructions = format!("User: {username}\n");
         if let Some(message) = message {
             instructions.push('\n');
             instructions.push_str(message);
@@ -160,7 +160,7 @@ impl GatewayHandler {
     }
 
     fn enrollment_prompt(username: &str, secret: &str, url: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        let mut instructions = format!("User: {username}\n");
         if let Some(message) = message {
             instructions.push('\n');
             instructions.push_str(message);
@@ -170,6 +170,25 @@ impl GatewayHandler {
             "\nTOTP enrollment is required before target access.\n\
 Add this account to your authenticator app and enter the resulting code.\n\n",
         );
+        match render_enrollment_qr_if_terminal_fits(url) {
+            Ok(Some(qr)) => {
+                instructions.push_str("Scan this QR code with your authenticator app.\n\n");
+                instructions.push_str(&qr);
+                instructions.push('\n');
+            }
+            Ok(None) => {
+                instructions.push_str(
+                    "Terminal is too small for the inline QR code, or terminal size is unavailable.\n\
+Use the plaintext secret or URI below.\n\n",
+                );
+            }
+            Err(error) => {
+                instructions.push_str(&format!(
+                    "Unable to render the inline QR code: {error}\n\
+Use the plaintext secret or URI below.\n\n"
+                ));
+            }
+        }
         instructions.push_str("Secret: ");
         instructions.push_str(secret);
         instructions.push('\n');
@@ -183,6 +202,13 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         user.is_none_or(|candidate| {
             !candidate.must_change_password && candidate.totp_secret.is_some()
         })
+    }
+
+    fn enrollment_qr_dimensions(url: &str) -> Result<(usize, usize)> {
+        let qr = QrCode::new(url.as_bytes())
+            .map_err(|e| CentralSshError::InvalidConfig(format!("failed to generate QR: {e}")))?;
+        let side_modules = qr.width() + (ENROLLMENT_QR_QUIET_ZONE * 2);
+        Ok((side_modules, side_modules.div_ceil(2)))
     }
 
     fn build_pending_context(
@@ -214,7 +240,7 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
                 return Err(error);
             }
         };
-        let mut instructions = format!("CentralSSH Gateway\nUser: {username}\n");
+        let mut instructions = format!("User: {username}\n");
         if let Some(message) = error_message {
             instructions.push('\n');
             instructions.push_str(message);
@@ -222,7 +248,7 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
         }
         instructions.push_str("\nSelect a server:\n\n");
         for (index, (name, host)) in entries.iter().enumerate() {
-            instructions.push_str(&format!("{} ) {} ({})\n", index + 1, name, host));
+            instructions.push_str(&format!("{}) {} ({})\n", index + 1, name, host));
         }
 
         Ok(Self::keyboard_prompt(
@@ -1074,6 +1100,62 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
     }
 }
 
+fn terminal_dimensions_from_env() -> Option<(usize, usize)> {
+    let columns = env::var("COLUMNS").ok()?.parse::<usize>().ok()?;
+    let rows = env::var("LINES").ok()?.parse::<usize>().ok()?;
+    Some((columns, rows))
+}
+
+fn render_enrollment_qr_if_terminal_fits(url: &str) -> Result<Option<String>> {
+    let Some((columns, rows)) = terminal_dimensions_from_env() else {
+        return Ok(None);
+    };
+
+    let (required_columns, required_rows) = GatewayHandler::enrollment_qr_dimensions(url)?;
+    if columns < required_columns || rows < required_rows {
+        return Ok(None);
+    }
+
+    Ok(Some(render_enrollment_qr(url)?))
+}
+
+fn render_enrollment_qr(url: &str) -> Result<String> {
+    let qr = QrCode::new(url.as_bytes())
+        .map_err(|e| CentralSshError::InvalidConfig(format!("failed to generate QR: {e}")))?;
+    let colors = qr.to_colors();
+    let width = qr.width();
+    let total = width + (ENROLLMENT_QR_QUIET_ZONE * 2);
+    let mut out = String::new();
+
+    for y in (0..total).step_by(2) {
+        for x in 0..total {
+            let top = qr_module_is_dark(&colors, width, x, y);
+            let bottom = qr_module_is_dark(&colors, width, x, y + 1);
+            out.push(match (top, bottom) {
+                (false, false) => ' ',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (true, true) => '█',
+            });
+        }
+        out.push('\n');
+    }
+
+    Ok(out.replace('\n', "\r\n"))
+}
+
+fn qr_module_is_dark(colors: &[Color], width: usize, x: usize, y: usize) -> bool {
+    let src_x = x as isize - ENROLLMENT_QR_QUIET_ZONE as isize;
+    let src_y = y as isize - ENROLLMENT_QR_QUIET_ZONE as isize;
+
+    if src_x < 0 || src_y < 0 || (src_x as usize) >= width || (src_y as usize) >= width {
+        return false;
+    }
+
+    let idx = (src_y as usize) * width + (src_x as usize);
+    colors[idx] == Color::Dark
+}
+
 fn apply_server_transport_config(config: &mut server::Config) {
     // Russh defaults to a 10-minute inactivity timeout, which breaks quiet
     // long-lived exec sessions. Keep them alive with infrequent SSH keepalives
@@ -1784,5 +1866,27 @@ mod tests {
 
         assert!(GatewayHandler::should_prompt_existing_totp(Some(&user)));
         assert!(GatewayHandler::should_prompt_existing_totp(None));
+    }
+
+    #[test]
+    fn enrollment_qr_dimensions_are_positive() {
+        let (columns, rows) = GatewayHandler::enrollment_qr_dimensions(
+            "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CentralSSH",
+        )
+        .expect("dimensions");
+
+        assert!(columns > 0);
+        assert!(rows > 0);
+    }
+
+    #[test]
+    fn render_enrollment_qr_emits_block_rows() {
+        let rendered = render_enrollment_qr(
+            "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CentralSSH",
+        )
+        .expect("rendered qr");
+
+        assert!(rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'));
+        assert!(rendered.contains("\r\n"));
     }
 }

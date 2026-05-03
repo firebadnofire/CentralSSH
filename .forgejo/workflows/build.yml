@@ -1,14 +1,14 @@
-name: Build FreeBSD Package
+name: Package Releases
 
 on:
   push:
   pull_request:
 
 jobs:
-  build-freebsd-package:
+  package:
     runs-on: ubuntu-22.04
     container:
-      image: node:20-bookworm
+      image: rust:1.89-bookworm
       options: --network ci-network
 
     steps:
@@ -21,7 +21,7 @@ jobs:
             echo 'Acquire::https::Proxy "http://apt-cacher-ng:3142";'
           } > /etc/apt/apt.conf.d/01proxy
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git jq sudo zstd rsync
+          apt-get install -y --no-install-recommends ca-certificates curl git jq make dpkg-dev rpm xz-utils file pkg-config clang lld
 
       - name: Check out repository
         shell: sh
@@ -69,28 +69,10 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth=1
 
-      - name: Prepare mirrored workspace for FreeBSD VM sync
-        shell: sh
-        run: |
-          set -eu
-          actual_workspace="$PWD"
-          repo_path="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-local/CentralSSH}}"
-          mirror_workspace="/root/work/${repo_path}"
-
-          mkdir -p "$(dirname "$mirror_workspace")"
-          rsync -a --delete --exclude .git --exclude target "${actual_workspace}/" "${mirror_workspace}/"
-
-          {
-            echo "CI_ACTUAL_WORKSPACE=${actual_workspace}"
-            echo "CI_MIRROR_WORKSPACE=${mirror_workspace}"
-            echo "GITHUB_WORKSPACE=${mirror_workspace}"
-          } >> "$GITHUB_ENV"
-
       - name: Derive package metadata
         shell: sh
         run: |
           set -eu
-          cd "${CI_ACTUAL_WORKSPACE:-$PWD}"
           package_name="$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           package_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           package_comment="$(sed -n 's/^description = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
@@ -107,12 +89,11 @@ jobs:
             echo "CI_PACKAGE_WWW=${repo_url}"
             echo "CI_PACKAGE_MAINTAINER=root@localhost"
             echo "CI_PACKAGE_DESC=${package_comment}"
-            echo "CI_PACKAGE_FILE=dist/${package_name}-${package_version}.pkg"
             echo "CI_RELEASE_TAG=${tag_name}"
           } >> "$GITHUB_ENV"
 
-      - name: Build FreeBSD package
-        uses: vmactions/freebsd-vm@v1
+      - name: Build binaries and packages
+        shell: sh
         env:
           CI_PACKAGE_NAME: ${{ env.CI_PACKAGE_NAME }}
           CI_PACKAGE_VERSION: ${{ env.CI_PACKAGE_VERSION }}
@@ -121,74 +102,121 @@ jobs:
           CI_PACKAGE_WWW: ${{ env.CI_PACKAGE_WWW }}
           CI_PACKAGE_MAINTAINER: ${{ env.CI_PACKAGE_MAINTAINER }}
           CI_PACKAGE_DESC: ${{ env.CI_PACKAGE_DESC }}
-        with:
-          release: "14.2"
-          usesh: true
-          prepare: |
-            pkg install -y rust
-          run: |
-            set -eu
-
-            stage_dir="$PWD/stage"
-            meta_dir="$PWD/pkgmeta"
-            dist_dir="$PWD/dist"
-
-            rm -rf "$stage_dir" "$meta_dir" "$dist_dir"
-            mkdir -p "$stage_dir" "$meta_dir" "$dist_dir"
-
-            cargo build --release
-            make install DESTDIR="$stage_dir" PREFIX=/usr/local
-
-            find "$stage_dir" -type f | sed "s|^$stage_dir||" | sort > "$meta_dir/pkg-plist"
-            find "$stage_dir" -type d -empty | sed "s|^$stage_dir||" | sort -r | sed 's|^|@dir |' >> "$meta_dir/pkg-plist"
-
-            cat > "$meta_dir/+MANIFEST" <<EOF
-            name: ${CI_PACKAGE_NAME}
-            version: "${CI_PACKAGE_VERSION}"
-            origin: ${CI_PACKAGE_ORIGIN}
-            comment: "${CI_PACKAGE_COMMENT}"
-            maintainer: ${CI_PACKAGE_MAINTAINER}
-            www: ${CI_PACKAGE_WWW}
-            prefix: /
-            desc: <<EOD
-            ${CI_PACKAGE_DESC}
-            EOD
-            EOF
-
-            pkg create -M "$meta_dir/+MANIFEST" -p "$meta_dir/pkg-plist" -r "$stage_dir" -o "$dist_dir"
-
-      - name: Sync FreeBSD package artifacts back to checkout workspace
-        shell: sh
         run: |
           set -eu
-          actual_workspace="${CI_ACTUAL_WORKSPACE:-$PWD}"
-          mirror_workspace="${CI_MIRROR_WORKSPACE:?missing mirrored workspace}"
 
-          mkdir -p "${actual_workspace}/dist"
-          rsync -a "${mirror_workspace}/dist/" "${actual_workspace}/dist/"
+          mkdir -p dist
+          mkdir -p stage/linux stage/freebsd stage/meta stage/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
-      - name: Validate FreeBSD package output
+          cargo build --release
+          make install DESTDIR="$PWD/stage/linux" PREFIX=/usr
+
+          mkdir -p stage/linux/DEBIAN
+          cat > stage/linux/DEBIAN/control <<EOF
+          Package: ${CI_PACKAGE_NAME}
+          Version: ${CI_PACKAGE_VERSION}
+          Section: admin
+          Priority: optional
+          Architecture: amd64
+          Maintainer: ${CI_PACKAGE_MAINTAINER}
+          Description: ${CI_PACKAGE_DESC}
+          EOF
+          dpkg-deb --build stage/linux "dist/${CI_PACKAGE_NAME}_${CI_PACKAGE_VERSION}_amd64.deb"
+
+          tar -C stage/linux -czf "stage/rpmbuild/SOURCES/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-linux-root.tar.gz" .
+          cat > "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec" <<EOF
+          Name: ${CI_PACKAGE_NAME}
+          Version: ${CI_PACKAGE_VERSION}
+          Release: 1%{?dist}
+          Summary: ${CI_PACKAGE_COMMENT}
+          License: GPL-3.0-only
+          URL: ${CI_PACKAGE_WWW}
+          BuildArch: x86_64
+          Source0: ${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-linux-root.tar.gz
+
+          %description
+          ${CI_PACKAGE_DESC}
+
+          %prep
+
+          %build
+
+          %install
+          mkdir -p %{buildroot}
+          tar -C %{buildroot} -xzf %{SOURCE0}
+
+          %files
+          /usr/sbin/${CI_PACKAGE_NAME}
+          /usr/bin/cssh-keyscan
+          /etc/systemd/system/${CI_PACKAGE_NAME}.service
+          %dir /etc/centralssh
+          %dir /etc/centralssh/users
+          /etc/centralssh/config.toml
+          /etc/centralssh/servers.toml
+          /etc/centralssh/known_hosts
+          %dir /var/log/centralssh
+          /var/log/centralssh/audit.jsonl
+          EOF
+          rpmbuild --define "_topdir $PWD/stage/rpmbuild" -bb "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec"
+          cp "stage/rpmbuild/RPMS/x86_64/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm" "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
+
+          rustup target add x86_64-unknown-freebsd
+          cargo build --release --target x86_64-unknown-freebsd
+
+          install -d "stage/freebsd/usr/local/sbin"
+          install -d "stage/freebsd/usr/local/bin"
+          install -d "stage/freebsd/usr/local/etc/rc.d"
+          install -d -m 0700 "stage/freebsd/etc/centralssh/users"
+          install -d -m 0700 "stage/freebsd/var/log/centralssh"
+          install -m 0755 "target/x86_64-unknown-freebsd/release/${CI_PACKAGE_NAME}" "stage/freebsd/usr/local/sbin/${CI_PACKAGE_NAME}"
+          install -m 0755 "tools/cssh-keyscan" "stage/freebsd/usr/local/bin/cssh-keyscan"
+          install -m 0555 "packaging/freebsd/centralssh" "stage/freebsd/usr/local/etc/rc.d/${CI_PACKAGE_NAME}"
+          install -m 0600 "examples/config.toml" "stage/freebsd/etc/centralssh/config.toml"
+          install -m 0600 "examples/servers.toml" "stage/freebsd/etc/centralssh/servers.toml"
+          install -m 0600 /dev/null "stage/freebsd/etc/centralssh/known_hosts"
+          install -m 0600 /dev/null "stage/freebsd/var/log/centralssh/audit.jsonl"
+
+          find "stage/freebsd" -type f | sed 's|^stage/freebsd/||' | sort > stage/meta/pkg-plist
+          find "stage/freebsd" -type d -empty | sed 's|^stage/freebsd/||' | sort -r | sed 's|^|@dir |' >> stage/meta/pkg-plist
+
+          cat > stage/meta/+MANIFEST <<EOF
+          name: ${CI_PACKAGE_NAME}
+          version: "${CI_PACKAGE_VERSION}"
+          origin: ${CI_PACKAGE_ORIGIN}
+          comment: "${CI_PACKAGE_COMMENT}"
+          maintainer: ${CI_PACKAGE_MAINTAINER}
+          www: ${CI_PACKAGE_WWW}
+          prefix: /
+          arch: freebsd:14:x86:64
+          desc: <<EOD
+          ${CI_PACKAGE_DESC}
+          EOD
+          EOF
+
+          mkdir -p stage/pkg-archive
+          cp stage/meta/+MANIFEST stage/pkg-archive/+MANIFEST
+          (cd stage/freebsd && tar -cf - .) | (cd stage/pkg-archive && tar -xf -)
+          tar -C stage/pkg-archive -c +MANIFEST $(cd stage/pkg-archive && find . -mindepth 1 ! -name +MANIFEST -print | LC_ALL=C sort) | xz -T0 -9e > "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-freebsd-amd64.pkg"
+
+      - name: Validate package outputs
         shell: sh
         env:
-          CI_PACKAGE_FILE: ${{ env.CI_PACKAGE_FILE }}
+          CI_PACKAGE_NAME: ${{ env.CI_PACKAGE_NAME }}
+          CI_PACKAGE_VERSION: ${{ env.CI_PACKAGE_VERSION }}
         run: |
           set -eu
-          cd "${CI_ACTUAL_WORKSPACE:-$PWD}"
-          if [ ! -f "$CI_PACKAGE_FILE" ]; then
-            echo "Missing expected FreeBSD package: $CI_PACKAGE_FILE" >&2
-            exit 1
-          fi
-          tar -tf "$CI_PACKAGE_FILE" >/dev/null
+          test -f "dist/${CI_PACKAGE_NAME}_${CI_PACKAGE_VERSION}_amd64.deb"
+          test -f "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
+          test -f "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-freebsd-amd64.pkg"
+          tar -tf "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-freebsd-amd64.pkg" >/dev/null
 
-      - name: Publish release asset
+      - name: Publish release assets
         shell: sh
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
-          CI_PACKAGE_FILE: ${{ env.CI_PACKAGE_FILE }}
           CI_RELEASE_TAG: ${{ env.CI_RELEASE_TAG }}
         run: |
           set -eu
-          cd "${CI_ACTUAL_WORKSPACE:-$PWD}"
 
           ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
           if [ "${ref#refs/tags/}" = "$ref" ]; then
@@ -199,7 +227,6 @@ jobs:
           api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:-}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          asset_name="$(basename "$CI_PACKAGE_FILE")"
           auth_header="Authorization: token ${token}"
 
           if [ -z "$api_url" ] || [ -z "$repository" ] || [ -z "$token" ]; then
@@ -222,15 +249,18 @@ jobs:
             exit 1
           fi
 
-          existing_asset_id="$(printf '%s' "$release_json" | jq -r --arg name "$asset_name" '.assets[]? | select(.name == $name) | .id' | head -n1)"
-          if [ -n "$existing_asset_id" ] && [ "$existing_asset_id" != "null" ]; then
-            delete_url="${api_url%/}/repos/${repository}/releases/${release_id}/assets/${existing_asset_id}"
-            curl -fsS -X DELETE -H "$auth_header" "$delete_url"
-          fi
+          for asset_path in dist/*; do
+            asset_name="$(basename "$asset_path")"
+            existing_asset_id="$(printf '%s' "$release_json" | jq -r --arg name "$asset_name" '.assets[]? | select(.name == $name) | .id' | head -n1)"
+            if [ -n "$existing_asset_id" ] && [ "$existing_asset_id" != "null" ]; then
+              delete_url="${api_url%/}/repos/${repository}/releases/${release_id}/assets/${existing_asset_id}"
+              curl -fsS -X DELETE -H "$auth_header" "$delete_url"
+            fi
 
-          upload_url="${api_url%/}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}"
-          curl -fsS -X POST \
-            -H "$auth_header" \
-            -H 'Content-Type: application/octet-stream' \
-            --data-binary @"$CI_PACKAGE_FILE" \
-            "$upload_url"
+            upload_url="${api_url%/}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}"
+            curl -fsS -X POST \
+              -H "$auth_header" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary @"$asset_path" \
+              "$upload_url"
+          done

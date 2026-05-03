@@ -141,8 +141,8 @@ async fn run() -> Result<()> {
     info!(
         migrated_passwords = report.migrated_passwords,
         created_user_dirs = report.created_user_dirs,
-        created_server_dirs = report.created_server_dirs,
         created_private_keys = report.created_private_keys,
+        created_public_keys = report.created_public_keys,
         "startup bootstrap completed"
     );
 

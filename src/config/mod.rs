@@ -544,6 +544,7 @@ pub fn validate_path_has_no_symlinks(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn atomic_write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut encoded = toml::to_string_pretty(value)?.into_bytes();
     if !encoded.ends_with(b"\n") {
