@@ -29,6 +29,8 @@ pub mod proxy;
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
 const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
+const DEFAULT_ENROLLMENT_QR_COLUMNS: usize = 80;
+const DEFAULT_ENROLLMENT_QR_ROWS: usize = 24;
 
 #[derive(Clone)]
 struct GatewayServer {
@@ -178,7 +180,7 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
             }
             Ok(None) => {
                 instructions.push_str(
-                    "Terminal is too small for the inline QR code, or terminal size is unavailable.\n\
+                    "Terminal is too small for the inline QR code.\n\
 Use the plaintext secret or URI below.\n\n",
                 );
             }
@@ -1100,17 +1102,22 @@ Use the plaintext secret or URI below.\n\n"
     }
 }
 
-fn terminal_dimensions_from_env() -> Option<(usize, usize)> {
-    let columns = env::var("COLUMNS").ok()?.parse::<usize>().ok()?;
-    let rows = env::var("LINES").ok()?.parse::<usize>().ok()?;
-    Some((columns, rows))
+fn terminal_dimensions_from_env() -> (usize, usize) {
+    let columns = env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ENROLLMENT_QR_COLUMNS);
+    let rows = env::var("LINES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ENROLLMENT_QR_ROWS);
+    (columns, rows)
 }
 
 fn render_enrollment_qr_if_terminal_fits(url: &str) -> Result<Option<String>> {
-    let Some((columns, rows)) = terminal_dimensions_from_env() else {
-        return Ok(None);
-    };
-
+    let (columns, rows) = terminal_dimensions_from_env();
     let (required_columns, required_rows) = GatewayHandler::enrollment_qr_dimensions(url)?;
     if columns < required_columns || rows < required_rows {
         return Ok(None);
@@ -1888,5 +1895,17 @@ mod tests {
 
         assert!(rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'));
         assert!(rendered.contains("\r\n"));
+    }
+
+    #[test]
+    fn terminal_dimensions_default_when_env_missing() {
+        unsafe {
+            env::remove_var("COLUMNS");
+            env::remove_var("LINES");
+        }
+
+        let (columns, rows) = terminal_dimensions_from_env();
+        assert_eq!(columns, DEFAULT_ENROLLMENT_QR_COLUMNS);
+        assert_eq!(rows, DEFAULT_ENROLLMENT_QR_ROWS);
     }
 }

@@ -106,7 +106,13 @@ jobs:
           set -eu
 
           mkdir -p dist
-          mkdir -p stage/linux stage/freebsd stage/meta stage/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          mkdir -p stage/linux stage/freebsd stage/meta
+          mkdir -p stage/rpmbuild/BUILD
+          mkdir -p stage/rpmbuild/BUILDROOT
+          mkdir -p stage/rpmbuild/RPMS
+          mkdir -p stage/rpmbuild/SOURCES
+          mkdir -p stage/rpmbuild/SPECS
+          mkdir -p stage/rpmbuild/SRPMS
 
           cargo build --release
           make install DESTDIR="$PWD/stage/linux" PREFIX=/usr
