@@ -1120,7 +1120,23 @@ fn terminal_dimensions_from_env() -> Option<(usize, usize)> {
     }
 }
 
+fn terminal_likely_supports_utf8() -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|key| {
+        env::var(key)
+            .ok()
+            .map(|value| {
+                let upper = value.to_ascii_uppercase();
+                upper.contains("UTF-8") || upper.contains("UTF8")
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn render_enrollment_qr_if_terminal_fits(url: &str) -> Result<Option<String>> {
+    if !terminal_likely_supports_utf8() {
+        return Ok(None);
+    }
+
     if let Some((columns, rows)) = terminal_dimensions_from_env() {
         let (required_columns, required_rows) = GatewayHandler::enrollment_qr_dimensions(url)?;
         if columns < required_columns || rows < required_rows {
@@ -1959,6 +1975,7 @@ mod tests {
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
+            env::set_var("LANG", "en_US.UTF-8");
         }
 
         let rendered = render_enrollment_qr_if_terminal_fits(
@@ -1975,6 +1992,26 @@ mod tests {
         unsafe {
             env::set_var("COLUMNS", "20");
             env::set_var("LINES", "10");
+            env::set_var("LANG", "en_US.UTF-8");
+        }
+
+        let rendered = render_enrollment_qr_if_terminal_fits(
+            "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CentralSSH",
+        )
+        .expect("qr render result");
+
+        assert!(rendered.is_none());
+    }
+
+    #[test]
+    fn enrollment_qr_is_suppressed_without_utf8_locale() {
+        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        unsafe {
+            env::remove_var("LC_ALL");
+            env::remove_var("LC_CTYPE");
+            env::set_var("LANG", "C");
+            env::remove_var("COLUMNS");
+            env::remove_var("LINES");
         }
 
         let rendered = render_enrollment_qr_if_terminal_fits(
