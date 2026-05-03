@@ -2,12 +2,13 @@
 set -eu
 
 usage() {
-  echo "usage: $0 <prepare-image|build>" >&2
+  echo "usage: $0 <prepare-image|build> [amd64|aarch64]" >&2
   exit 1
 }
 
 command_name=${1:-}
 [ -n "$command_name" ] || usage
+FREEBSD_ARCH=${FREEBSD_ARCH:-${2:-amd64}}
 
 ensure_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -20,10 +21,33 @@ sanitize() {
   printf '%s' "$1" | tr '[:upper:]/:' '[:lower:]--' | tr -cs 'a-z0-9._-' '-'
 }
 
+resolve_arch_settings() {
+  case "$FREEBSD_ARCH" in
+    amd64)
+      FREEBSD_IMAGE_SOURCE_FILENAME="FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+      FREEBSD_IMAGE_URL=${FREEBSD_IMAGE_URL:-https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/amd64/Latest/${FREEBSD_IMAGE_SOURCE_FILENAME}}
+      FREEBSD_CHECKSUM_URL=${FREEBSD_CHECKSUM_URL:-https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/amd64/Latest/CHECKSUM.SHA512}
+      FREEBSD_QEMU_SYSTEM="qemu-system-x86_64"
+      FREEBSD_PACKAGE_SUFFIX="freebsd-amd64"
+      ;;
+    aarch64)
+      FREEBSD_IMAGE_SOURCE_FILENAME="FreeBSD-15.0-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+      FREEBSD_IMAGE_URL=${FREEBSD_IMAGE_URL:-https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/aarch64/Latest/${FREEBSD_IMAGE_SOURCE_FILENAME}}
+      FREEBSD_CHECKSUM_URL=${FREEBSD_CHECKSUM_URL:-https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/aarch64/Latest/CHECKSUM.SHA512}
+      FREEBSD_QEMU_SYSTEM="qemu-system-aarch64"
+      FREEBSD_PACKAGE_SUFFIX="freebsd-aarch64"
+      ;;
+    *)
+      echo "unsupported FreeBSD architecture: ${FREEBSD_ARCH}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 init_paths() {
   REPO_ROOT=${REPO_ROOT:-$PWD}
-  FREEBSD_VERSION=${FREEBSD_VERSION:-14.2}
-  FREEBSD_IMAGE_URL=${FREEBSD_IMAGE_URL:-https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE/amd64/Latest/FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64.qcow2.xz}
+  FREEBSD_VERSION=15.0
+  resolve_arch_settings
   FREEBSD_QEMU_MEM=${FREEBSD_QEMU_MEM:-4096}
   FREEBSD_QEMU_CPUS=${FREEBSD_QEMU_CPUS:-4}
   SSH_USER=${FREEBSD_VM_USER:-ci}
@@ -37,8 +61,9 @@ init_paths() {
   CACHE_STAGE="${REPO_ROOT}/.ci-cache/freebsd"
   CACHE_EXPORT_STAGE="${REPO_ROOT}/.ci-cache/freebsd-out"
   DIST_DIR="${REPO_ROOT}/dist"
-  IMAGE_XZ="${IMAGE_ROOT}/FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64.qcow2.xz"
-  BASE_QCOW2="${IMAGE_ROOT}/FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64.qcow2"
+  IMAGE_XZ="${IMAGE_ROOT}/freebsd-${FREEBSD_ARCH}.qcow2.xz"
+  BASE_QCOW2="${IMAGE_ROOT}/freebsd-${FREEBSD_ARCH}.qcow2"
+  CHECKSUM_FILE="${IMAGE_ROOT}/freebsd-${FREEBSD_ARCH}.CHECKSUM.SHA512"
   OVERLAY_QCOW2="${WORKDIR}/freebsd-overlay.qcow2"
   SEED_DIR="${WORKDIR}/seed"
   SEED_ISO="${WORKDIR}/seed.iso"
@@ -57,7 +82,9 @@ init_paths() {
   export CACHE_STAGE CACHE_EXPORT_STAGE DIST_DIR IMAGE_XZ BASE_QCOW2 OVERLAY_QCOW2 SEED_DIR
   export SEED_ISO SSH_KEY SSH_PORT_FILE QEMU_PID_FILE QEMU_LOG BUILD_SCRIPT IMAGE_LOCKDIR
   export REPO_ARCHIVE CACHE_ARCHIVE SSH_HOST SSH_PORT SSH_USER REMOTE_HOME
-  export FREEBSD_VERSION FREEBSD_IMAGE_URL FREEBSD_QEMU_MEM FREEBSD_QEMU_CPUS
+  export FREEBSD_VERSION FREEBSD_ARCH FREEBSD_IMAGE_URL FREEBSD_CHECKSUM_URL
+  export FREEBSD_IMAGE_SOURCE_FILENAME FREEBSD_QEMU_MEM FREEBSD_QEMU_CPUS
+  export FREEBSD_QEMU_SYSTEM FREEBSD_PACKAGE_SUFFIX CHECKSUM_FILE
 }
 
 prepare_dirs() {
@@ -74,24 +101,103 @@ release_image_lock() {
   rmdir "$IMAGE_LOCKDIR" 2>/dev/null || true
 }
 
+download_to_file() {
+  url=$1
+  output=$2
+  curl -fsSL "$url" -o "$output"
+}
+
+extract_sha512_for_image() {
+  checksum_path=$1
+  awk -v target="$FREEBSD_IMAGE_SOURCE_FILENAME" '
+    $0 ~ ("^SHA512 \\(" target "\\) = ") { print $NF; found = 1; exit }
+    $2 == target { print $1; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$checksum_path"
+}
+
+verify_image_archive() {
+  image_path=$1
+  checksum_path=$2
+  checksum_value=$(extract_sha512_for_image "$checksum_path") || {
+    echo "missing checksum entry for ${FREEBSD_IMAGE_SOURCE_FILENAME}" >&2
+    return 1
+  }
+  checksum_line="${image_path}.sha512"
+  printf '%s  %s\n' "$checksum_value" "$image_path" > "$checksum_line"
+  if ! sha512sum -c "$checksum_line"; then
+    rm -f "$checksum_line"
+    return 1
+  fi
+  rm -f "$checksum_line"
+}
+
+refresh_checksum_file() {
+  tmp_checksum="${CHECKSUM_FILE}.tmp.$$"
+  rm -f "$tmp_checksum"
+  download_to_file "$FREEBSD_CHECKSUM_URL" "$tmp_checksum"
+  mv "$tmp_checksum" "$CHECKSUM_FILE"
+}
+
+redownload_image_archive() {
+  tmp_xz="${IMAGE_XZ}.tmp.$$"
+  rm -f "$tmp_xz" "$IMAGE_XZ" "$BASE_QCOW2"
+  echo "Downloading FreeBSD image: ${FREEBSD_IMAGE_URL}"
+  download_to_file "$FREEBSD_IMAGE_URL" "$tmp_xz"
+  if ! verify_image_archive "$tmp_xz" "$CHECKSUM_FILE"; then
+    rm -f "$tmp_xz"
+    echo "FreeBSD image checksum verification failed for ${FREEBSD_ARCH}" >&2
+    exit 1
+  fi
+  mv "$tmp_xz" "$IMAGE_XZ"
+}
+
+ensure_verified_image_archive() {
+  refresh_checksum_file
+  if [ -f "$IMAGE_XZ" ] && verify_image_archive "$IMAGE_XZ" "$CHECKSUM_FILE"; then
+    echo "Using cached FreeBSD image archive: ${IMAGE_XZ}"
+    return 0
+  fi
+  rm -f "$IMAGE_XZ" "$BASE_QCOW2"
+  redownload_image_archive
+}
+
+ensure_base_qcow2() {
+  tmp_qcow2="${BASE_QCOW2}.tmp.$$"
+  if [ -f "$BASE_QCOW2" ] && qemu-img info "$BASE_QCOW2" >/dev/null 2>&1; then
+    echo "Using cached FreeBSD base image: ${BASE_QCOW2}"
+    return 0
+  fi
+  rm -f "$BASE_QCOW2" "$tmp_qcow2"
+  xz -dc "$IMAGE_XZ" > "$tmp_qcow2"
+  mv "$tmp_qcow2" "$BASE_QCOW2"
+  qemu-img info "$BASE_QCOW2" >/dev/null
+}
+
+find_aarch64_firmware() {
+  for candidate in \
+    "${AARCH64_EFI:-}" \
+    /usr/share/AAVMF/AAVMF_CODE.fd \
+    /usr/share/AAVMF/AAVMF_CODE.ms.fd \
+    /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+    /usr/share/edk2/aarch64/QEMU_EFI.fd
+  do
+    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "missing aarch64 UEFI firmware; set AARCH64_EFI to a readable firmware image" >&2
+  return 1
+}
+
 download_base_image() {
   init_paths
   prepare_dirs
   acquire_image_lock
-  trap 'release_image_lock' EXIT INT TERM
-
-  if [ ! -f "$BASE_QCOW2" ]; then
-    tmp_xz="${IMAGE_XZ}.tmp.$$"
-    tmp_qcow2="${BASE_QCOW2}.tmp.$$"
-    echo "Downloading FreeBSD image: ${FREEBSD_IMAGE_URL}"
-    curl -fsSL "$FREEBSD_IMAGE_URL" -o "$tmp_xz"
-    xz -dc "$tmp_xz" > "$tmp_qcow2"
-    mv "$tmp_xz" "$IMAGE_XZ"
-    mv "$tmp_qcow2" "$BASE_QCOW2"
-  else
-    echo "Using cached FreeBSD base image: ${BASE_QCOW2}"
-  fi
-
+  trap 'rm -f "${IMAGE_XZ}.tmp.$$" "${BASE_QCOW2}.tmp.$$" "${CHECKSUM_FILE}.tmp.$$"; release_image_lock' EXIT INT TERM
+  ensure_verified_image_archive
+  ensure_base_qcow2
   qemu-img info "$BASE_QCOW2"
 }
 
@@ -250,6 +356,8 @@ CI_PACKAGE_DESC="\${CI_PACKAGE_COMMENT}"
 CI_PACKAGE_ORIGIN="security/\${CI_PACKAGE_NAME}"
 CI_PACKAGE_MAINTAINER="root@localhost"
 CI_PACKAGE_WWW="${repo_url}"
+CI_PACKAGE_ARCH="\$(pkg config ABI)"
+CI_PACKAGE_SUFFIX="${FREEBSD_PACKAGE_SUFFIX}"
 
 rm -rf stage dist
 mkdir -p stage dist
@@ -278,7 +386,7 @@ comment: "\${CI_PACKAGE_COMMENT}"
 maintainer: \${CI_PACKAGE_MAINTAINER}
 www: \${CI_PACKAGE_WWW}
 prefix: /
-arch: freebsd:14:x86:64
+arch: \${CI_PACKAGE_ARCH}
 desc: |
   \${CI_PACKAGE_DESC}
 MANIFEST
@@ -289,23 +397,15 @@ if ! pkg create -M stage/+MANIFEST -p stage/pkg-plist -r stage -o dist; then
 fi
 
 PKG_FILE="\$(find dist -type f -name '*.pkg' | head -n1)"
-cp "\$PKG_FILE" "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-freebsd-amd64.pkg"
-test -f "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-freebsd-amd64.pkg"
-pkg info -F "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-freebsd-amd64.pkg" >/dev/null
+cp "\$PKG_FILE" "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
+test -f "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
+pkg info -F "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg" >/dev/null
 EOF
 
   chmod +x "$BUILD_SCRIPT"
 }
 
-boot_vm() {
-  rm -rf "$WORKDIR"
-  mkdir -p "$WORKDIR"
-  prepare_ssh_key
-  prepare_seed_iso
-
-  qemu-img create -f qcow2 -F qcow2 -b "$BASE_QCOW2" "$OVERLAY_QCOW2" >/dev/null
-  qemu-img info "$OVERLAY_QCOW2"
-
+boot_vm_amd64() {
   if [ -e /dev/kvm ]; then
     accel_args="-enable-kvm -cpu host"
   else
@@ -325,6 +425,41 @@ boot_vm() {
     -serial mon:stdio \
     -pidfile "$QEMU_PID_FILE" \
     > "$QEMU_LOG" 2>&1 &
+}
+
+boot_vm_aarch64() {
+  firmware_path=$(find_aarch64_firmware)
+  qemu-system-aarch64 \
+    -accel tcg \
+    -machine virt \
+    -cpu cortex-a72 \
+    -m "$FREEBSD_QEMU_MEM" \
+    -smp "$FREEBSD_QEMU_CPUS" \
+    -bios "$firmware_path" \
+    -drive file="$OVERLAY_QCOW2",if=virtio,format=qcow2 \
+    -drive file="$SEED_ISO",if=virtio,media=cdrom,readonly=on,format=raw \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
+    -device virtio-net-pci,netdev=net0 \
+    -nographic \
+    -serial mon:stdio \
+    -pidfile "$QEMU_PID_FILE" \
+    > "$QEMU_LOG" 2>&1 &
+}
+
+boot_vm() {
+  rm -rf "$WORKDIR"
+  mkdir -p "$WORKDIR"
+  prepare_ssh_key
+  prepare_seed_iso
+
+  qemu-img create -f qcow2 -F qcow2 -b "$BASE_QCOW2" "$OVERLAY_QCOW2" >/dev/null
+  qemu-img info "$OVERLAY_QCOW2"
+
+  case "$FREEBSD_ARCH" in
+    amd64) boot_vm_amd64 ;;
+    aarch64) boot_vm_aarch64 ;;
+    *) usage ;;
+  esac
 
   sleep 2
   [ -f "$QEMU_PID_FILE" ] || {
@@ -384,21 +519,23 @@ store_cache_back() {
 case "$command_name" in
   prepare-image)
     ensure_command curl
+    ensure_command sha512sum
     ensure_command qemu-img
     ensure_command xz
     init_paths
     download_base_image
     ;;
   build)
+    init_paths
     ensure_command curl
     ensure_command git
     ensure_command qemu-img
-    ensure_command qemu-system-x86_64
+    ensure_command "$FREEBSD_QEMU_SYSTEM"
     ensure_command ssh
     ensure_command ssh-keygen
+    ensure_command sha512sum
     ensure_command tar
     ensure_command xz
-    init_paths
     prepare_dirs
     download_base_image
     trap cleanup EXIT INT TERM
