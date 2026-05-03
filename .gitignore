@@ -27,3 +27,5 @@ ACCESS-DEBIAN.md
 # Added by cargo
 
 /target
+.ci-cache/
+.ci-host-cache/

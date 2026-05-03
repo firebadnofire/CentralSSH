@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: rust:1.89-bookworm
-      options: --network ci-network
+      options: --network ci-network -v /data/cache/cargo:/cache/cargo-home -v /data/cache/sccache:/cache/sccache -v /data/cache/target/centralssh/linux:/cache/target
     env:
       CI_PACKAGE_NAME: centralssh
       CI_PACKAGE_VERSION: 0.0.0
@@ -100,6 +100,15 @@ jobs:
             echo "CI_RELEASE_TAG=${tag_name}"
           } >> "$GITHUB_ENV"
 
+      - name: Install pinned sccache
+        shell: sh
+        run: |
+          set -eu
+          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu /cache)"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          ./ci/install-sccache.sh 0.10.0
+          ./ci/log-rust-cache-stats.sh
+
       - name: Build Linux packages
         shell: sh
         env:
@@ -112,11 +121,16 @@ jobs:
           CI_PACKAGE_DESC: ${{ env.CI_PACKAGE_DESC }}
         run: |
           set -eu
+          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu /cache)"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER=sccache
+          fi
 
           mkdir -p dist
           mkdir -p stage/linux stage/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
-          cargo build --release
+          time cargo build --locked --release
           make install DESTDIR="$PWD/stage/linux" PREFIX=/usr
 
           # --- .deb ---
@@ -173,6 +187,15 @@ jobs:
           rpmbuild --define "_topdir $PWD/stage/rpmbuild" -bb "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec"
           cp "stage/rpmbuild/RPMS/x86_64/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm" \
              "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
+
+      - name: Log Linux cache stats
+        if: always()
+        shell: sh
+        run: |
+          set -eu
+          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu /cache)"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          ./ci/log-rust-cache-stats.sh
 
       - name: Validate Linux packages
         shell: sh
@@ -279,6 +302,15 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: Prepare FreeBSD cache workspace
+        shell: sh
+        run: |
+          set -eu
+          SHARED_CACHE_ROOT="$(./ci/select-cache-root.sh /data/cache "$PWD/.ci-host-cache")"
+          echo "Using shared cache root: ${SHARED_CACHE_ROOT}"
+          ./ci/sync-cache-dir.sh restore "${SHARED_CACHE_ROOT}/freebsd/centralssh" "$PWD/.ci-cache/freebsd"
+          du -sh "$PWD/.ci-cache/freebsd" 2>/dev/null || true
+
       - name: Build and validate FreeBSD package
         uses: vmactions/freebsd-vm@v1
         with:
@@ -304,8 +336,17 @@ jobs:
             repo_path="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
             server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
             CI_PACKAGE_WWW="${server_url%/}/${repo_path}"
+            WORKSPACE_CACHE_ROOT="$PWD/.ci-cache/freebsd"
 
-            cargo build --release
+            eval "$(sh ./ci/cache-env.sh freebsd-release release x86_64-unknown-freebsd "$WORKSPACE_CACHE_ROOT")"
+            export PATH="$CARGO_HOME/bin:$PATH"
+            sh ./ci/install-sccache.sh 0.10.0
+            if command -v sccache >/dev/null 2>&1; then
+              export RUSTC_WRAPPER=sccache
+            fi
+            sh ./ci/log-rust-cache-stats.sh
+
+            time cargo build --locked --release
             gmake install DESTDIR="$PWD/stage" PREFIX=/usr/local
 
             # Required dirs
@@ -393,6 +434,17 @@ jobs:
                   || echo "Failed to upload ${asset_name}" >&2
               fi
             fi
+
+            sh ./ci/log-rust-cache-stats.sh
+
+      - name: Persist FreeBSD cache workspace
+        if: always()
+        shell: sh
+        run: |
+          set -eu
+          SHARED_CACHE_ROOT="$(./ci/select-cache-root.sh /data/cache "$PWD/.ci-host-cache")"
+          ./ci/sync-cache-dir.sh store "${SHARED_CACHE_ROOT}/freebsd/centralssh" "$PWD/.ci-cache/freebsd"
+          du -sh "${SHARED_CACHE_ROOT}/freebsd/centralssh" 2>/dev/null || true
 
       - name: Check publish status
         run: |
