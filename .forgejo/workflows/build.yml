@@ -7,6 +7,8 @@ on:
 jobs:
   build-freebsd-package:
     runs-on: ubuntu-22.04
+    env:
+      GITHUB_WORKSPACE: /root/work
     container:
       image: node:20-bookworm
       options: --network ci-network
