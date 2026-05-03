@@ -22,7 +22,6 @@ jobs:
           } > /etc/apt/apt.conf.d/01proxy
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl git jq make dpkg-dev rpm xz-utils file pkg-config clang lld python3 python3-pip
-          pip3 install --no-cache-dir --break-system-packages ziglang
 
       - name: Check out repository
         shell: sh
@@ -170,6 +169,11 @@ jobs:
           rpmbuild --define "_topdir $PWD/stage/rpmbuild" -bb "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec"
           cp "stage/rpmbuild/RPMS/x86_64/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm" "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
 
+          ZIG_VERSION="0.13.0"
+          curl -fsSLO "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          tar -xf "zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          export PATH="$PWD/zig-linux-x86_64-${ZIG_VERSION}:$PATH"
+          zig version
           rustup target add x86_64-unknown-freebsd
           mkdir -p stage/toolchain
           cat > stage/toolchain/zig-cc-freebsd <<'EOF'
