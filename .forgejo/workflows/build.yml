@@ -319,24 +319,38 @@ jobs:
         run: |
           set -eu
           SHARED_CACHE_ROOT="$(./ci/select-cache-root.sh /data/cache "$PWD/.ci-host-cache")"
+          CACHE_FINGERPRINT="$(cat Cargo.lock Cargo.toml Makefile | sha256sum | cut -c1-16)"
+          FREEBSD_CACHE_ROOT="${SHARED_CACHE_ROOT}/freebsd/centralssh/${CACHE_FINGERPRINT}"
           echo "Using shared cache root: ${SHARED_CACHE_ROOT}"
-          ./ci/sync-cache-dir.sh restore "${SHARED_CACHE_ROOT}/freebsd/centralssh" "$PWD/.ci-cache/freebsd"
+          echo "Using FreeBSD cache bucket: ${FREEBSD_CACHE_ROOT}"
+          ./ci/sync-cache-dir.sh restore "${FREEBSD_CACHE_ROOT}" "$PWD/.ci-cache/freebsd"
           du -sh "$PWD/.ci-cache/freebsd" 2>/dev/null || true
 
       - name: Build and validate FreeBSD package
-        uses: vmactions/freebsd-vm@v1
+        uses: https://github.com/vmactions/freebsd-vm@v1
         with:
           release: '14'
           usesh: true
           run: |
             set -eu
 
-            pkg install -y --no-repo-update curl git gmake jq pkg
+            WORKSPACE_CACHE_ROOT="$PWD/.ci-cache/freebsd"
+            export CARGO_HOME="$WORKSPACE_CACHE_ROOT/cargo"
+            export RUSTUP_HOME="$WORKSPACE_CACHE_ROOT/rustup"
+            export CARGO_TARGET_DIR="$WORKSPACE_CACHE_ROOT/target"
+            export SCCACHE_DIR="$WORKSPACE_CACHE_ROOT/sccache"
+            export PKG_CACHEDIR="$WORKSPACE_CACHE_ROOT/pkg"
+
+            mkdir -p "$CARGO_HOME" "$RUSTUP_HOME" "$CARGO_TARGET_DIR" "$SCCACHE_DIR" "$PKG_CACHEDIR"
+
+            pkg -o PKG_CACHEDIR="$PKG_CACHEDIR" install -y --no-repo-update curl git gmake jq pkg
 
             # Install Rust
-            fetch -q -o /tmp/rustup.sh https://sh.rustup.rs
-            sh /tmp/rustup.sh -y --default-toolchain stable
-            . $HOME/.cargo/env
+            if [ ! -x "$CARGO_HOME/bin/rustc" ]; then
+              fetch -q -o /tmp/rustup.sh https://sh.rustup.rs
+              sh /tmp/rustup.sh -y --no-modify-path --default-toolchain stable
+            fi
+            . "$CARGO_HOME/env"
 
             # Derive metadata from Cargo.toml
             CI_PACKAGE_NAME="$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
@@ -348,15 +362,16 @@ jobs:
             repo_path="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
             server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
             CI_PACKAGE_WWW="${server_url%/}/${repo_path}"
-            WORKSPACE_CACHE_ROOT="$PWD/.ci-cache/freebsd"
 
-            export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/freebsd-local"
-            eval "$(sh ./ci/cache-env.sh freebsd-release release x86_64-unknown-freebsd "$WORKSPACE_CACHE_ROOT")"
             export PATH="$CARGO_HOME/bin:$PATH"
-            sh ./ci/install-sccache.sh 0.10.0
-            if command -v sccache >/dev/null 2>&1; then
-              export RUSTC_WRAPPER=sccache
+            if [ ! -x "$CARGO_HOME/bin/sccache" ]; then
+              cargo install --locked sccache
             fi
+            if [ -x "$CARGO_HOME/bin/sccache" ]; then
+              export RUSTC_WRAPPER="$CARGO_HOME/bin/sccache"
+            fi
+
+            cargo fetch --locked
             sh ./ci/log-rust-cache-stats.sh
 
             sh ./ci/time-command.sh cargo build --locked --release
@@ -456,8 +471,10 @@ jobs:
         run: |
           set -eu
           SHARED_CACHE_ROOT="$(./ci/select-cache-root.sh /data/cache "$PWD/.ci-host-cache")"
-          ./ci/sync-cache-dir.sh store "${SHARED_CACHE_ROOT}/freebsd/centralssh" "$PWD/.ci-cache/freebsd"
-          du -sh "${SHARED_CACHE_ROOT}/freebsd/centralssh" 2>/dev/null || true
+          CACHE_FINGERPRINT="$(cat Cargo.lock Cargo.toml Makefile | sha256sum | cut -c1-16)"
+          FREEBSD_CACHE_ROOT="${SHARED_CACHE_ROOT}/freebsd/centralssh/${CACHE_FINGERPRINT}"
+          ./ci/sync-cache-dir.sh store "${FREEBSD_CACHE_ROOT}" "$PWD/.ci-cache/freebsd"
+          du -sh "${FREEBSD_CACHE_ROOT}" 2>/dev/null || true
 
       - name: Check publish status
         run: |

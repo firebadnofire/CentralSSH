@@ -26,6 +26,12 @@ FreeBSD job:
 - Preferred host root: `/data/cache`
 - Fallback host root when `/data/cache` is unavailable: `.ci-host-cache/`
 - Workspace staging area shared with the VM action: `.ci-cache/freebsd/`
+- Persistent VM subdirectories:
+  - `.ci-cache/freebsd/cargo`
+  - `.ci-cache/freebsd/rustup`
+  - `.ci-cache/freebsd/target`
+  - `.ci-cache/freebsd/sccache`
+  - `.ci-cache/freebsd/pkg`
 
 ## Cache Keys
 
@@ -45,6 +51,8 @@ FreeBSD job:
 - `CI_CROSS_COMPILE`
 
 Cargo registry and git caches stay under a shared `CARGO_HOME`, which is safe because those contents are immutable or content-addressed by Cargo.
+
+The FreeBSD VM cache bucket is separated by a hash of `Cargo.lock`, `Cargo.toml`, and `Makefile`, so toolchains, package cache, Cargo downloads, and build outputs stay aligned with the dependency graph and packaging inputs.
 
 ## Clearing Caches
 
