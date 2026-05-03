@@ -10,6 +10,7 @@ use argon2::password_hash::PasswordHash;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use toml_edit::{DocumentMut, Item, value};
 
 use crate::abuse::Fail2banConfig;
 use crate::auth::{AuthEngine, build_totp_from_secret};
@@ -137,18 +138,27 @@ impl ConfigStore {
 
     pub async fn migrate_bootstrap_passwords(&self, auth: &AuthEngine) -> Result<usize> {
         let mut guard = self.state.write().await;
+        let mut document = load_config_document(&self.paths.config_path)?;
         let mut changed = 0usize;
 
         for user in &mut guard.config.users {
             if !auth.is_hash_format(&user.password) {
-                user.password = auth.hash_password(&user.password)?;
+                let new_password_hash = auth.hash_password(&user.password)?;
+                update_user_record_in_document(
+                    &mut document,
+                    &user.name,
+                    Some(new_password_hash.clone()),
+                    None,
+                    Some(true),
+                )?;
+                user.password = new_password_hash;
                 user.must_change_password = true;
                 changed += 1;
             }
         }
 
         if changed > 0 {
-            atomic_write_toml(&self.paths.config_path, &guard.config)?;
+            atomic_write_document(&self.paths.config_path, &document)?;
         }
 
         Ok(changed)
@@ -162,6 +172,8 @@ impl ConfigStore {
         must_change_password: Option<bool>,
     ) -> Result<()> {
         let mut guard = self.state.write().await;
+        let password_hash_for_doc = new_password_hash.clone();
+        let totp_secret_for_doc = new_totp_secret.clone();
         let user = guard
             .config
             .users
@@ -179,7 +191,15 @@ impl ConfigStore {
             user.must_change_password = flag;
         }
 
-        atomic_write_toml(&self.paths.config_path, &guard.config)?;
+        let mut document = load_config_document(&self.paths.config_path)?;
+        update_user_record_in_document(
+            &mut document,
+            username,
+            password_hash_for_doc,
+            totp_secret_for_doc,
+            must_change_password,
+        )?;
+        atomic_write_document(&self.paths.config_path, &document)?;
         Ok(())
     }
 }
@@ -217,6 +237,54 @@ pub fn load_servers_file(path: &Path) -> Result<ServersFile> {
     let bytes = fs::read(path)?;
     let servers = toml::from_slice(&bytes)?;
     Ok(servers)
+}
+
+fn load_config_document(path: &Path) -> Result<DocumentMut> {
+    let content = fs::read_to_string(path)?;
+    content.parse::<DocumentMut>().map_err(|error| {
+        CentralSshError::InvalidConfig(format!(
+            "failed to parse config.toml for in-place update: {error}"
+        ))
+    })
+}
+
+fn update_user_record_in_document(
+    document: &mut DocumentMut,
+    username: &str,
+    new_password_hash: Option<String>,
+    new_totp_secret: Option<String>,
+    must_change_password: Option<bool>,
+) -> Result<()> {
+    let users = document["users"]
+        .as_array_of_tables_mut()
+        .ok_or_else(|| {
+            CentralSshError::InvalidConfig(
+                "config.toml is missing [[users]] for credential update".to_string(),
+            )
+        })?;
+
+    let Some(user_table) = users.iter_mut().find(|table| {
+        table
+            .get("name")
+            .and_then(Item::as_str)
+            .is_some_and(|name| name == username)
+    }) else {
+        return Err(CentralSshError::InvalidConfig(format!(
+            "user not found in config.toml: {username}"
+        )));
+    };
+
+    if let Some(password_hash) = new_password_hash {
+        user_table["password"] = value(password_hash);
+    }
+    if let Some(totp_secret) = new_totp_secret {
+        user_table["totp_secret"] = value(totp_secret);
+    }
+    if let Some(flag) = must_change_password {
+        user_table["must_change_password"] = value(flag);
+    }
+
+    Ok(())
 }
 
 pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<()> {
@@ -477,6 +545,22 @@ pub fn validate_path_has_no_symlinks(path: &Path) -> Result<()> {
 }
 
 pub fn atomic_write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut encoded = toml::to_string_pretty(value)?.into_bytes();
+    if !encoded.ends_with(b"\n") {
+        encoded.push(b'\n');
+    }
+    atomic_write_bytes(path, &encoded)
+}
+
+fn atomic_write_document(path: &Path, document: &DocumentMut) -> Result<()> {
+    let mut encoded = document.to_string().into_bytes();
+    if !encoded.ends_with(b"\n") {
+        encoded.push(b'\n');
+    }
+    atomic_write_bytes(path, &encoded)
+}
+
+fn atomic_write_bytes(path: &Path, encoded: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         CentralSshError::InvalidConfig(format!("path has no parent: {}", path.display()))
     })?;
@@ -503,10 +587,6 @@ pub fn atomic_write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     ));
 
     let metadata = fs::metadata(path).ok();
-    let mut encoded = toml::to_string_pretty(value)?.into_bytes();
-    if !encoded.ends_with(b"\n") {
-        encoded.push(b'\n');
-    }
 
     let mut options = OpenOptions::new();
     options.write(true).create_new(true).mode(0o600);
@@ -519,7 +599,7 @@ pub fn atomic_write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         )?;
     }
 
-    temp_file.write_all(&encoded)?;
+    temp_file.write_all(encoded)?;
     temp_file.sync_all()?;
     drop(temp_file);
 
@@ -842,6 +922,39 @@ servers = ["git"]
 
         assert!(!encoded.contains("totp_secret"));
         assert!(!encoded.contains("user_key_root"));
+    }
+
+    #[test]
+    fn config_document_update_preserves_comments() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "config.toml",
+            r#"# top comment
+[[users]]
+# user comment
+name = "alice"
+password = "BootstrapPass123!"
+must_change_password = true
+allowed_servers = ["git"]
+"#,
+        );
+
+        let mut document = load_config_document(&path).expect("load document");
+        update_user_record_in_document(
+            &mut document,
+            "alice",
+            Some("$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$abcdefghijklmnopqrstuv".to_string()),
+            Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
+            Some(false),
+        )
+        .expect("update document");
+        atomic_write_document(&path, &document).expect("write document");
+
+        let encoded = fs::read_to_string(&path).expect("read string");
+        assert!(encoded.contains("# top comment"));
+        assert!(encoded.contains("# user comment"));
+        assert!(encoded.contains("totp_secret"));
     }
 
     #[test]

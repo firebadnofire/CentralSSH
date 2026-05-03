@@ -399,6 +399,25 @@ mod tests {
         assert_eq!(verified.name, user.name);
     }
 
+    #[test]
+    fn verify_password_constant_time_rejects_invalid_password() {
+        let auth = AuthEngine::new().expect("engine");
+        let user = UserRecord {
+            name: "alice".to_string(),
+            password: auth
+                .hash_password("correct horse battery staple")
+                .expect("hash"),
+            totp_secret: None,
+            must_change_password: true,
+            allowed_servers: vec!["git".to_string()],
+        };
+
+        let result =
+            auth.verify_password_constant_time(&[user], "alice", "definitely the wrong password");
+
+        assert!(matches!(result, Err(CentralSshError::AuthenticationFailed)));
+    }
+
     #[tokio::test]
     async fn token_bucket_depletes() {
         let auth = AuthEngine::new().expect("engine");

@@ -448,12 +448,102 @@ Add this account to your authenticator app and enter the resulting code.\n\n",
             return Ok(Self::totp_prompt(&username, None));
         }
 
-        let Some(user) = matched_user.cloned() else {
+        let Some(_) = matched_user.cloned() else {
             return Ok(Self::totp_prompt(&username, None));
         };
 
+        self.log_event(
+            "auth_attempt",
+            Some(&username),
+            None,
+            Some("keyboard_interactive"),
+            AuditResult::Success,
+            Some("received password response".to_string()),
+            None,
+            None,
+        )
+        .await;
+
+        if let Err(error) = self
+            .state
+            .auth
+            .consume_rate_limit_token(self.peer_ip, &username)
+            .await
+        {
+            self.log_event(
+                "auth_failure",
+                Some(&username),
+                None,
+                Some("keyboard_interactive"),
+                AuditResult::Denied,
+                Some(error.to_string()),
+                None,
+                None,
+            )
+            .await;
+            let outcome = self
+                .state
+                .abuse
+                .record_failure(self.peer_ip, Some(&username), None)
+                .await;
+            self.apply_failure_outcome(
+                &outcome,
+                Some(&username),
+                None,
+                Some("keyboard_interactive"),
+            )
+            .await;
+            return Ok(Self::reject_to_keyboard_interactive());
+        }
+
+        let user = match self.state.auth.verify_password_constant_time(
+            &snapshot.config.users,
+            &username,
+            &password,
+        ) {
+            Ok(user) => user,
+            Err(error) => {
+                self.log_event(
+                    "auth_failure",
+                    Some(&username),
+                    None,
+                    Some("keyboard_interactive"),
+                    AuditResult::Failure,
+                    Some(error.to_string()),
+                    None,
+                    None,
+                )
+                .await;
+                let outcome = self
+                    .state
+                    .abuse
+                    .record_failure(self.peer_ip, Some(&username), None)
+                    .await;
+                self.apply_failure_outcome(
+                    &outcome,
+                    Some(&username),
+                    None,
+                    Some("keyboard_interactive"),
+                )
+                .await;
+                return Ok(Self::reject_to_keyboard_interactive());
+            }
+        };
+
+        self.log_event(
+            "auth_password",
+            Some(&username),
+            None,
+            Some("keyboard_interactive"),
+            AuditResult::Success,
+            None,
+            None,
+            None,
+        )
+        .await;
+
         self.advance_after_initial_auth(
-            Self::build_pending_context(user, Some(Zeroizing::new(password))),
+            Self::build_pending_context(user, None),
             snapshot
                 .config
                 .settings
