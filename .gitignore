@@ -27,4 +27,4 @@ ACCESS-DEBIAN.md
 /target
 .ci-cache/
 .ci-host-cache/
-.ci-actions/
+.ci-qemu/

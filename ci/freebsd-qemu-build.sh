@@ -1,0 +1,417 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  echo "usage: $0 <prepare-image|build>" >&2
+  exit 1
+}
+
+command_name=${1:-}
+[ -n "$command_name" ] || usage
+
+ensure_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "missing required command: $1" >&2
+    exit 1
+  }
+}
+
+sanitize() {
+  printf '%s' "$1" | tr '[:upper:]/:' '[:lower:]--' | tr -cs 'a-z0-9._-' '-'
+}
+
+init_paths() {
+  REPO_ROOT=${REPO_ROOT:-$PWD}
+  FREEBSD_VERSION=${FREEBSD_VERSION:-14.2}
+  FREEBSD_IMAGE_URL=${FREEBSD_IMAGE_URL:-https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE/amd64/Latest/FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64.qcow2.xz}
+  FREEBSD_QEMU_MEM=${FREEBSD_QEMU_MEM:-4096}
+  FREEBSD_QEMU_CPUS=${FREEBSD_QEMU_CPUS:-4}
+  SSH_USER=${FREEBSD_VM_USER:-ci}
+  SSH_HOST=127.0.0.1
+
+  SHARED_CACHE_TOP=$(./ci/select-cache-root.sh /data/cache "$REPO_ROOT/.ci-host-cache")
+  CACHE_FINGERPRINT=$(cat "$REPO_ROOT/Cargo.lock" "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Makefile" 2>/dev/null | sha256sum | cut -c1-16)
+  FREEBSD_CACHE_ROOT="${SHARED_CACHE_TOP}/freebsd/centralssh/${CACHE_FINGERPRINT}"
+  IMAGE_ROOT="${SHARED_CACHE_TOP}/freebsd/images"
+  WORKDIR="${REPO_ROOT}/.ci-qemu/freebsd"
+  CACHE_STAGE="${REPO_ROOT}/.ci-cache/freebsd"
+  CACHE_EXPORT_STAGE="${REPO_ROOT}/.ci-cache/freebsd-out"
+  DIST_DIR="${REPO_ROOT}/dist"
+  IMAGE_XZ="${IMAGE_ROOT}/FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64.qcow2.xz"
+  BASE_QCOW2="${IMAGE_ROOT}/FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64.qcow2"
+  OVERLAY_QCOW2="${WORKDIR}/freebsd-overlay.qcow2"
+  SEED_DIR="${WORKDIR}/seed"
+  SEED_ISO="${WORKDIR}/seed.iso"
+  SSH_KEY="${WORKDIR}/id_ed25519"
+  SSH_PORT_FILE="${WORKDIR}/ssh-port"
+  QEMU_PID_FILE="${WORKDIR}/qemu.pid"
+  QEMU_LOG="${WORKDIR}/qemu.log"
+  BUILD_SCRIPT="${WORKDIR}/build-freebsd.sh"
+  IMAGE_LOCKDIR="${IMAGE_ROOT}/.lock"
+  REPO_ARCHIVE="${WORKDIR}/repo.tar.gz"
+  CACHE_ARCHIVE="${WORKDIR}/cache.tar.gz"
+  REMOTE_HOME="/home/${SSH_USER}"
+  SSH_PORT=${FREEBSD_SSH_PORT:-$(awk 'BEGIN{srand(); print 2200 + int(rand()*2000)}')}
+
+  export REPO_ROOT SHARED_CACHE_TOP CACHE_FINGERPRINT FREEBSD_CACHE_ROOT IMAGE_ROOT WORKDIR
+  export CACHE_STAGE CACHE_EXPORT_STAGE DIST_DIR IMAGE_XZ BASE_QCOW2 OVERLAY_QCOW2 SEED_DIR
+  export SEED_ISO SSH_KEY SSH_PORT_FILE QEMU_PID_FILE QEMU_LOG BUILD_SCRIPT IMAGE_LOCKDIR
+  export REPO_ARCHIVE CACHE_ARCHIVE SSH_HOST SSH_PORT SSH_USER REMOTE_HOME
+  export FREEBSD_VERSION FREEBSD_IMAGE_URL FREEBSD_QEMU_MEM FREEBSD_QEMU_CPUS
+}
+
+prepare_dirs() {
+  mkdir -p "$IMAGE_ROOT" "$WORKDIR" "$CACHE_STAGE" "$DIST_DIR"
+}
+
+acquire_image_lock() {
+  while ! mkdir "$IMAGE_LOCKDIR" 2>/dev/null; do
+    sleep 2
+  done
+}
+
+release_image_lock() {
+  rmdir "$IMAGE_LOCKDIR" 2>/dev/null || true
+}
+
+download_base_image() {
+  init_paths
+  prepare_dirs
+  acquire_image_lock
+  trap 'release_image_lock' EXIT INT TERM
+
+  if [ ! -f "$BASE_QCOW2" ]; then
+    tmp_xz="${IMAGE_XZ}.tmp.$$"
+    tmp_qcow2="${BASE_QCOW2}.tmp.$$"
+    echo "Downloading FreeBSD image: ${FREEBSD_IMAGE_URL}"
+    curl -fsSL "$FREEBSD_IMAGE_URL" -o "$tmp_xz"
+    xz -dc "$tmp_xz" > "$tmp_qcow2"
+    mv "$tmp_xz" "$IMAGE_XZ"
+    mv "$tmp_qcow2" "$BASE_QCOW2"
+  else
+    echo "Using cached FreeBSD base image: ${BASE_QCOW2}"
+  fi
+
+  qemu-img info "$BASE_QCOW2"
+}
+
+prepare_seed_iso() {
+  mkdir -p "$SEED_DIR"
+  pubkey=$(cat "${SSH_KEY}.pub")
+
+  cat > "${SEED_DIR}/user-data" <<EOF
+#cloud-config
+users:
+  - name: ${SSH_USER}
+    groups: wheel
+    shell: /bin/sh
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${pubkey}
+ssh_pwauth: false
+disable_root: false
+package_update: false
+runcmd:
+  - pkg bootstrap -yf || true
+  - pkg install -y sudo ca_root_nss || true
+  - sysrc sshd_enable=YES
+  - service sshd start || service sshd restart
+EOF
+
+  cat > "${SEED_DIR}/meta-data" <<EOF
+instance-id: centralssh-ci
+local-hostname: centralssh-freebsd-ci
+EOF
+
+  rm -f "$SEED_ISO"
+  if command -v cloud-localds >/dev/null 2>&1; then
+    cloud-localds "$SEED_ISO" "${SEED_DIR}/user-data" "${SEED_DIR}/meta-data"
+  elif command -v genisoimage >/dev/null 2>&1; then
+    genisoimage -output "$SEED_ISO" -volid cidata -joliet -rock "${SEED_DIR}/user-data" "${SEED_DIR}/meta-data" >/dev/null 2>&1
+  elif command -v xorriso >/dev/null 2>&1; then
+    xorriso -as mkisofs -output "$SEED_ISO" -volid cidata -joliet -rock "${SEED_DIR}/user-data" "${SEED_DIR}/meta-data" >/dev/null 2>&1
+  else
+    echo "no ISO creation tool available" >&2
+    exit 1
+  fi
+}
+
+prepare_ssh_key() {
+  rm -f "$SSH_KEY" "${SSH_KEY}.pub"
+  ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" >/dev/null
+  printf '%s\n' "$SSH_PORT" > "$SSH_PORT_FILE"
+}
+
+run_ssh() {
+  ssh -i "$SSH_KEY" \
+    -p "$SSH_PORT" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o ConnectTimeout=5 \
+    "${SSH_USER}@${SSH_HOST}" "$@"
+}
+
+wait_for_ssh() {
+  i=1
+  while [ "$i" -le 150 ]; do
+    if run_ssh 'command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready' >/dev/null 2>&1; then
+      echo "SSH is ready on port ${SSH_PORT}"
+      return 0
+    fi
+    sleep 2
+    i=$((i + 1))
+  done
+  echo "Timed out waiting for FreeBSD SSH" >&2
+  tail -n 200 "$QEMU_LOG" >&2 || true
+  return 1
+}
+
+dump_debug() {
+  echo "---- qemu-img info ----" >&2
+  qemu-img info "$OVERLAY_QCOW2" >&2 || true
+  echo "---- cache usage ----" >&2
+  du -sh "$FREEBSD_CACHE_ROOT" "$CACHE_STAGE" "$CACHE_EXPORT_STAGE" 2>/dev/null >&2 || true
+  echo "---- qemu log tail ----" >&2
+  tail -n 200 "$QEMU_LOG" >&2 || true
+}
+
+shutdown_vm() {
+  if [ -f "$QEMU_PID_FILE" ]; then
+    qemu_pid=$(cat "$QEMU_PID_FILE" 2>/dev/null || true)
+    if [ -n "${qemu_pid:-}" ] && kill -0 "$qemu_pid" 2>/dev/null; then
+      run_ssh 'sudo shutdown -p now' >/dev/null 2>&1 || true
+      sleep 5
+      kill "$qemu_pid" 2>/dev/null || true
+      sleep 2
+      kill -9 "$qemu_pid" 2>/dev/null || true
+    fi
+  fi
+}
+
+cleanup() {
+  exit_code=$?
+  shutdown_vm
+  release_image_lock
+  if [ "$exit_code" -ne 0 ]; then
+    dump_debug
+  fi
+  exit "$exit_code"
+}
+
+create_guest_build_script() {
+  repo_path=${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-centralssh/centralssh}}
+  server_url=${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-https://github.com}}
+  repo_url="${server_url%/}/${repo_path}"
+
+  cat > "$BUILD_SCRIPT" <<EOF
+#!/bin/sh
+set -eu
+
+cd "\$HOME/work"
+
+export CARGO_HOME="\$HOME/cache/cargo"
+export RUSTUP_HOME="\$HOME/cache/rustup"
+export CARGO_TARGET_DIR="\$HOME/cache/target"
+export SCCACHE_DIR="\$HOME/cache/sccache"
+export PKG_CACHEDIR="\$HOME/cache/pkg"
+mkdir -p "\$CARGO_HOME" "\$RUSTUP_HOME" "\$CARGO_TARGET_DIR" "\$SCCACHE_DIR" "\$PKG_CACHEDIR"
+
+sudo mkdir -p "\$PKG_CACHEDIR"
+sudo pkg -o PKG_CACHEDIR="\$PKG_CACHEDIR" update -f
+sudo pkg -o PKG_CACHEDIR="\$PKG_CACHEDIR" install -y curl git gmake jq pkg xz zstd ca_root_nss sudo
+
+if [ ! -x "\$CARGO_HOME/bin/rustc" ]; then
+  fetch -q -o /tmp/rustup.sh https://sh.rustup.rs
+  sh /tmp/rustup.sh -y --no-modify-path --default-toolchain stable
+fi
+
+. "\$CARGO_HOME/env"
+export PATH="\$CARGO_HOME/bin:\$PATH"
+
+if [ ! -x "\$CARGO_HOME/bin/sccache" ]; then
+  cargo install --locked sccache || echo "warning: failed to install sccache; continuing without compiler cache" >&2
+fi
+
+if [ -x "\$CARGO_HOME/bin/sccache" ]; then
+  export RUSTC_WRAPPER="\$CARGO_HOME/bin/sccache"
+fi
+
+cargo fetch --locked
+sccache --show-stats || true
+cargo build --locked --release
+sccache --show-stats || true
+
+CI_PACKAGE_NAME="\$(sed -n 's/^name = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
+CI_PACKAGE_VERSION="\$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
+CI_PACKAGE_COMMENT="\$(sed -n 's/^description = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
+CI_PACKAGE_DESC="\${CI_PACKAGE_COMMENT}"
+CI_PACKAGE_ORIGIN="security/\${CI_PACKAGE_NAME}"
+CI_PACKAGE_MAINTAINER="root@localhost"
+CI_PACKAGE_WWW="${repo_url}"
+
+rm -rf stage dist
+mkdir -p stage dist
+
+gmake install DESTDIR="\$PWD/stage" PREFIX=/usr/local
+
+mkdir -p "\$PWD/stage/etc/centralssh/users"
+mkdir -p "\$PWD/stage/var/log/centralssh"
+
+cp examples/config.toml "\$PWD/stage/etc/centralssh/config.toml"
+cp examples/servers.toml "\$PWD/stage/etc/centralssh/servers.toml"
+touch "\$PWD/stage/etc/centralssh/known_hosts"
+touch "\$PWD/stage/var/log/centralssh/audit.jsonl"
+
+chmod 0700 "\$PWD/stage/etc/centralssh/users"
+chmod 0700 "\$PWD/stage/var/log/centralssh"
+
+find "stage" -type f | sed 's|^stage/||' | LC_ALL=C sort > stage/pkg-plist
+find "stage" -type d -empty | sed 's|^stage/||' | LC_ALL=C sort -r | sed 's|^|@dir |' >> stage/pkg-plist
+
+cat > stage/+MANIFEST <<MANIFEST
+name: \${CI_PACKAGE_NAME}
+version: "\${CI_PACKAGE_VERSION}"
+origin: \${CI_PACKAGE_ORIGIN}
+comment: "\${CI_PACKAGE_COMMENT}"
+maintainer: \${CI_PACKAGE_MAINTAINER}
+www: \${CI_PACKAGE_WWW}
+prefix: /
+arch: freebsd:14:x86:64
+desc: |
+  \${CI_PACKAGE_DESC}
+MANIFEST
+
+if ! pkg create -M stage/+MANIFEST -p stage/pkg-plist -r stage -o dist; then
+  echo "pkg create failed" >&2
+  exit 1
+fi
+
+PKG_FILE="\$(find dist -type f -name '*.pkg' | head -n1)"
+cp "\$PKG_FILE" "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-freebsd-amd64.pkg"
+test -f "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-freebsd-amd64.pkg"
+pkg info -F "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-freebsd-amd64.pkg" >/dev/null
+EOF
+
+  chmod +x "$BUILD_SCRIPT"
+}
+
+boot_vm() {
+  rm -rf "$WORKDIR"
+  mkdir -p "$WORKDIR"
+  prepare_ssh_key
+  prepare_seed_iso
+
+  qemu-img create -f qcow2 -F qcow2 -b "$BASE_QCOW2" "$OVERLAY_QCOW2" >/dev/null
+  qemu-img info "$OVERLAY_QCOW2"
+
+  if [ -e /dev/kvm ]; then
+    accel_args="-enable-kvm -cpu host"
+  else
+    accel_args="-accel tcg"
+  fi
+
+  # shellcheck disable=SC2086
+  qemu-system-x86_64 \
+    $accel_args \
+    -m "$FREEBSD_QEMU_MEM" \
+    -smp "$FREEBSD_QEMU_CPUS" \
+    -drive file="$OVERLAY_QCOW2",if=virtio,format=qcow2 \
+    -drive file="$SEED_ISO",if=virtio,media=cdrom,readonly=on,format=raw \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
+    -device virtio-net-pci,netdev=net0 \
+    -nographic \
+    -serial mon:stdio \
+    -pidfile "$QEMU_PID_FILE" \
+    > "$QEMU_LOG" 2>&1 &
+
+  sleep 2
+  [ -f "$QEMU_PID_FILE" ] || {
+    echo "QEMU pidfile was not created" >&2
+    dump_debug
+    exit 1
+  }
+}
+
+transfer_repo() {
+  rm -rf "$DIST_DIR"
+  mkdir -p "$DIST_DIR"
+  tar \
+    --exclude='.git' \
+    --exclude='.ci-cache' \
+    --exclude='.ci-host-cache' \
+    --exclude='.ci-qemu' \
+    --exclude='target' \
+    --exclude='dist' \
+    -czf "$REPO_ARCHIVE" .
+  cat "$REPO_ARCHIVE" | run_ssh "rm -rf ${REMOTE_HOME}/work && mkdir -p ${REMOTE_HOME}/work && tar -xzf - -C ${REMOTE_HOME}/work"
+}
+
+transfer_cache_in() {
+  if [ -d "$FREEBSD_CACHE_ROOT" ]; then
+    tar -C "$FREEBSD_CACHE_ROOT" -czf "$CACHE_ARCHIVE" .
+    cat "$CACHE_ARCHIVE" | run_ssh "mkdir -p ${REMOTE_HOME}/cache && tar -xzf - -C ${REMOTE_HOME}/cache"
+  else
+    run_ssh "mkdir -p ${REMOTE_HOME}/cache"
+  fi
+}
+
+run_build() {
+  cat "$BUILD_SCRIPT" | run_ssh "cat > ${REMOTE_HOME}/build-freebsd.sh && chmod +x ${REMOTE_HOME}/build-freebsd.sh"
+  run_ssh "sh ${REMOTE_HOME}/build-freebsd.sh"
+}
+
+download_outputs() {
+  mkdir -p "$DIST_DIR"
+  run_ssh "tar -C ${REMOTE_HOME}/work/dist -czf - ." | tar -C "$DIST_DIR" -xzf -
+  test -n "$(find "$DIST_DIR" -maxdepth 1 -type f -name '*.pkg' -print -quit)"
+
+  rm -rf "$CACHE_EXPORT_STAGE"
+  mkdir -p "$CACHE_EXPORT_STAGE"
+  run_ssh "tar -C ${REMOTE_HOME}/cache -czf - ." | tar -C "$CACHE_EXPORT_STAGE" -xzf -
+}
+
+store_cache_back() {
+  tmp_root="${FREEBSD_CACHE_ROOT}.tmp"
+  rm -rf "$tmp_root"
+  mkdir -p "$tmp_root"
+  cp -a "$CACHE_EXPORT_STAGE"/. "$tmp_root"/
+  rm -rf "$FREEBSD_CACHE_ROOT"
+  mv "$tmp_root" "$FREEBSD_CACHE_ROOT"
+}
+
+case "$command_name" in
+  prepare-image)
+    ensure_command curl
+    ensure_command qemu-img
+    ensure_command xz
+    init_paths
+    download_base_image
+    ;;
+  build)
+    ensure_command curl
+    ensure_command git
+    ensure_command qemu-img
+    ensure_command qemu-system-x86_64
+    ensure_command ssh
+    ensure_command ssh-keygen
+    ensure_command tar
+    ensure_command xz
+    init_paths
+    prepare_dirs
+    download_base_image
+    trap cleanup EXIT INT TERM
+    boot_vm
+    wait_for_ssh
+    create_guest_build_script
+    transfer_repo
+    transfer_cache_in
+    run_build
+    download_outputs
+    store_cache_back
+    ;;
+  *)
+    usage
+    ;;
+esac

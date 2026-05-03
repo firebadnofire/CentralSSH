@@ -25,13 +25,16 @@ FreeBSD job:
 
 - Preferred host root: `/data/cache`
 - Fallback host root when `/data/cache` is unavailable: `.ci-host-cache/`
-- Workspace staging area shared with the VM action: `.ci-cache/freebsd/`
-- Persistent VM subdirectories:
-  - `.ci-cache/freebsd/cargo`
-  - `.ci-cache/freebsd/rustup`
-  - `.ci-cache/freebsd/target`
-  - `.ci-cache/freebsd/sccache`
-  - `.ci-cache/freebsd/pkg`
+- Cached base images: `/data/cache/freebsd/images`
+- Host-side cache bucket: `/data/cache/freebsd/centralssh/<fingerprint>`
+- QEMU workspace: `.ci-qemu/freebsd/`
+- Extracted guest cache snapshot: `.ci-cache/freebsd-out/`
+- Guest cache subdirectories under `~/cache`:
+  - `cargo`
+  - `rustup`
+  - `target`
+  - `sccache`
+  - `pkg`
 
 ## Cache Keys
 
@@ -52,14 +55,14 @@ FreeBSD job:
 
 Cargo registry and git caches stay under a shared `CARGO_HOME`, which is safe because those contents are immutable or content-addressed by Cargo.
 
-The FreeBSD VM cache bucket is separated by a hash of `Cargo.lock`, `Cargo.toml`, and `Makefile`, so toolchains, package cache, Cargo downloads, and build outputs stay aligned with the dependency graph and packaging inputs.
+The FreeBSD QEMU cache bucket is separated by a hash of `Cargo.lock`, `Cargo.toml`, and `Makefile`, so the base cache contents stay aligned with the dependency graph and packaging inputs while the qcow2 base image remains immutable.
 
 ## Clearing Caches
 
 Delete only what you need:
 
 - Full reset: remove `/data/cache/cargo`, `/data/cache/sccache`, and `/data/cache/target/centralssh`
-- FreeBSD fallback reset: remove `.ci-host-cache/` and `.ci-cache/freebsd/`
+- FreeBSD fallback reset: remove `.ci-host-cache/freebsd/`, `.ci-qemu/freebsd/`, and `.ci-cache/freebsd-out/`
 - Single build state reset: remove the specific keyed directory printed as `CI_CACHE_KEY` in workflow logs
 
 ## Debugging
@@ -75,6 +78,7 @@ Workflow logs print:
 - `CI_CACHE_ROOT`
 - `sccache --show-stats` when available
 - disk usage for registry, git, target, and sccache directories
+- QEMU overlay and log details on failure
 
 ## Caveats
 
