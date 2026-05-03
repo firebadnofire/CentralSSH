@@ -9,6 +9,8 @@ CentralSSH CI uses persistent caches to speed up package builds without changing
 - `SCCACHE_DIR`: Rust compiler object cache when `sccache` is available
 - `CARGO_TARGET_DIR`: build outputs, keyed per job/platform/toolchain/profile/dependency state
 
+If the preferred persistent cache root is mounted read-only or unavailable, the workflow falls back to a writable workspace-local cache directory so the build still succeeds.
+
 Cold builds still run `cargo build --locked --release` directly. Release artifacts are always rebuilt in the job and then packaged from that fresh build.
 
 ## Cache Locations
@@ -62,6 +64,7 @@ Workflow logs print:
 - `CARGO_TARGET_DIR`
 - `SCCACHE_DIR`
 - `CI_CACHE_KEY`
+- `CI_CACHE_ROOT`
 - `sccache --show-stats` when available
 - disk usage for registry, git, target, and sccache directories
 

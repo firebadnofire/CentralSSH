@@ -50,6 +50,7 @@ jobs:
           fi
 
           git init .
+          git remote remove origin 2>/dev/null || true
           git remote add origin "$remote_url"
 
           if [ -n "$token" ]; then
@@ -104,7 +105,9 @@ jobs:
         shell: sh
         run: |
           set -eu
-          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu /cache)"
+          CACHE_ROOT="$(./ci/select-cache-root.sh /cache "$PWD/.ci-cache/linux")"
+          export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
+          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
           ./ci/install-sccache.sh 0.10.0
           ./ci/log-rust-cache-stats.sh
@@ -121,7 +124,9 @@ jobs:
           CI_PACKAGE_DESC: ${{ env.CI_PACKAGE_DESC }}
         run: |
           set -eu
-          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu /cache)"
+          CACHE_ROOT="$(./ci/select-cache-root.sh /cache "$PWD/.ci-cache/linux")"
+          export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
+          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
           if command -v sccache >/dev/null 2>&1; then
             export RUSTC_WRAPPER=sccache
@@ -130,7 +135,7 @@ jobs:
           mkdir -p dist
           mkdir -p stage/linux stage/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
-          time cargo build --locked --release
+          ./ci/time-command.sh cargo build --locked --release
           make install DESTDIR="$PWD/stage/linux" PREFIX=/usr
 
           # --- .deb ---
@@ -193,7 +198,9 @@ jobs:
         shell: sh
         run: |
           set -eu
-          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu /cache)"
+          CACHE_ROOT="$(./ci/select-cache-root.sh /cache "$PWD/.ci-cache/linux")"
+          export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
+          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
           ./ci/log-rust-cache-stats.sh
 
@@ -282,7 +289,7 @@ jobs:
           fi
 
           ${SUDO} apt-get update
-          ${SUDO} apt-get install -y --no-install-recommends ca-certificates curl gnupg
+          ${SUDO} apt-get install -y --no-install-recommends ca-certificates curl git gnupg
 
           node_major=0
           if command -v node >/dev/null 2>&1; then
@@ -297,10 +304,51 @@ jobs:
           node --version
 
       - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
+        shell: sh
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
+        run: |
+          set -eu
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
+          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
+          sha="${FORGEJO_SHA:-${GITHUB_SHA:-}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
+          remote_url="${server_url%/}/${repository}.git"
+
+          if [ -z "$server_url" ] || [ -z "$repository" ]; then
+            echo "Missing server context for checkout." >&2
+            exit 1
+          fi
+
+          git init .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$remote_url"
+
+          if [ -n "$token" ]; then
+            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+            git_fetch() {
+              git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
+            }
+          else
+            git_fetch() {
+              git "$@"
+            }
+          fi
+
+          if [ -n "$ref" ]; then
+            git_fetch fetch --force --tags --prune --depth=1 origin "+${ref}:${ref}"
+            git checkout --force --detach "$ref"
+          elif [ -n "$sha" ]; then
+            git_fetch fetch --force --tags --prune --depth=1 origin "$sha"
+            git checkout --force --detach "$sha"
+          else
+            echo "Missing both ref and sha for checkout." >&2
+            exit 1
+          fi
+
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
 
       - name: Prepare FreeBSD cache workspace
         shell: sh
@@ -338,6 +386,7 @@ jobs:
             CI_PACKAGE_WWW="${server_url%/}/${repo_path}"
             WORKSPACE_CACHE_ROOT="$PWD/.ci-cache/freebsd"
 
+            export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/freebsd-local"
             eval "$(sh ./ci/cache-env.sh freebsd-release release x86_64-unknown-freebsd "$WORKSPACE_CACHE_ROOT")"
             export PATH="$CARGO_HOME/bin:$PATH"
             sh ./ci/install-sccache.sh 0.10.0
@@ -346,7 +395,7 @@ jobs:
             fi
             sh ./ci/log-rust-cache-stats.sh
 
-            time cargo build --locked --release
+            sh ./ci/time-command.sh cargo build --locked --release
             gmake install DESTDIR="$PWD/stage" PREFIX=/usr/local
 
             # Required dirs

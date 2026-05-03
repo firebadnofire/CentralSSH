@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
+use crate::config::UserRecord;
 use crate::error::{CentralSshError, Result};
 use argon2::password_hash::rand_core::RngCore;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -317,6 +317,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_MIN_PASSWORD_POLICY;
 
     #[test]
     fn build_totp_from_secret_accepts_runtime_valid_secret() {
