@@ -248,6 +248,23 @@ jobs:
   freebsd:
     runs-on: ubuntu-22.04
     steps:
+      - name: Prepare action runtime
+        shell: sh
+        run: |
+          set -eu
+          if command -v node >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          else
+            SUDO=""
+          fi
+
+          ${SUDO} apt-get update
+          ${SUDO} apt-get install -y --no-install-recommends ca-certificates curl nodejs npm
+
       - name: Check out repository
         uses: actions/checkout@v4
         with:
@@ -262,7 +279,7 @@ jobs:
           run: |
             set -eu
 
-            pkg install -y --no-repo-update git gmake pkg
+            pkg install -y --no-repo-update curl git gmake jq pkg
 
             # Install Rust
             fetch -q -o /tmp/rustup.sh https://sh.rustup.rs
@@ -276,8 +293,11 @@ jobs:
             CI_PACKAGE_DESC="${CI_PACKAGE_COMMENT}"
             CI_PACKAGE_ORIGIN="security/${CI_PACKAGE_NAME}"
             CI_PACKAGE_MAINTAINER="root@localhost"
+            repo_path="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
+            server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
+            CI_PACKAGE_WWW="${server_url%/}/${repo_path}"
 
-            # Install
+            cargo build --release
             gmake install DESTDIR="$PWD/stage" PREFIX=/usr/local
 
             # Required dirs
