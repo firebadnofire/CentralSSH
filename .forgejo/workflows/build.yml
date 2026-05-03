@@ -171,11 +171,8 @@ jobs:
 
           rustup target add x86_64-unknown-freebsd
           export CC_x86_64_unknown_freebsd=clang
-          export CC_x86_64-unknown-freebsd=clang
           export AR_x86_64_unknown_freebsd=llvm-ar
-          export AR_x86_64-unknown-freebsd=llvm-ar
           export CFLAGS_x86_64_unknown_freebsd="--target=x86_64-unknown-freebsd"
-          export CFLAGS_x86_64-unknown-freebsd="--target=x86_64-unknown-freebsd"
           export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER=clang
           export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Clink-arg=--target=x86_64-unknown-freebsd -Clink-arg=-fuse-ld=lld"
           cargo build --release --target x86_64-unknown-freebsd
