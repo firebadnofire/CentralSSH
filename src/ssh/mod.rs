@@ -29,10 +29,10 @@ pub mod proxy;
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
 const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
-const ENROLLMENT_QR_DARK_MODULE: &str = "\x1b[30;40m \x1b[0m";
-const ENROLLMENT_QR_LIGHT_MODULE: &str = "\x1b[37;47m \x1b[0m";
-const ENROLLMENT_QR_TOP_HALF_DARK_BOTTOM_LIGHT: &str = "\x1b[30;47m▀\x1b[0m";
-const ENROLLMENT_QR_TOP_HALF_LIGHT_BOTTOM_DARK: &str = "\x1b[37;40m▀\x1b[0m";
+const ENROLLMENT_QR_DARK_MODULE: &str = "█";
+const ENROLLMENT_QR_LIGHT_MODULE: &str = " ";
+const ENROLLMENT_QR_TOP_HALF_DARK_BOTTOM_LIGHT: &str = "▀";
+const ENROLLMENT_QR_TOP_HALF_LIGHT_BOTTOM_DARK: &str = "▄";
 
 #[derive(Clone)]
 struct GatewayServer {
@@ -1900,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn render_enrollment_qr_emits_ascii_rows() {
+    fn render_enrollment_qr_emits_compact_unicode_rows() {
         let rendered = render_enrollment_qr(
             "otpauth://totp/CentralSSH:alice?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CentralSSH",
         )
@@ -1908,7 +1908,8 @@ mod tests {
 
         assert!(rendered.contains(ENROLLMENT_QR_DARK_MODULE));
         assert!(rendered.contains("\r\n"));
-        assert!(!rendered.contains('█'));
+        assert!(rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'));
+        assert!(!rendered.contains("\x1b["));
     }
 
     #[test]
