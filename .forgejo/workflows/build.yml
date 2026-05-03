@@ -314,6 +314,16 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: Clone FreeBSD action locally
+        shell: sh
+        run: |
+          set -eu
+          rm -rf "$PWD/.ci-actions/freebsd-vm"
+          git clone https://github.com/vmactions/freebsd-vm.git "$PWD/.ci-actions/freebsd-vm"
+          git -C "$PWD/.ci-actions/freebsd-vm" checkout v1
+          test -f "$PWD/.ci-actions/freebsd-vm/conf/14.conf"
+          ls "$PWD/.ci-actions/freebsd-vm/conf"
+
       - name: Prepare FreeBSD cache workspace
         shell: sh
         run: |
@@ -327,7 +337,7 @@ jobs:
           du -sh "$PWD/.ci-cache/freebsd" 2>/dev/null || true
 
       - name: Build and validate FreeBSD package
-        uses: https://github.com/vmactions/freebsd-vm@v1
+        uses: ./.ci-actions/freebsd-vm
         with:
           release: '14'
           usesh: true
