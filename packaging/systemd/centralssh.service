@@ -7,14 +7,14 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/local/sbin/centralssh --listen 0.0.0.0:7788 --config /etc/centralssh/config.toml --servers /etc/centralssh/servers.toml --known-hosts /etc/centralssh/known_hosts --user-key-root /etc/centralssh/users --audit-log /var/log/centralssh/audit.jsonl
+ExecStart=/usr/local/sbin/centralssh --listen 0.0.0.0:7788 --config /etc/centralssh/config.toml --servers /etc/centralssh/servers.toml --known-hosts /etc/centralssh/known_hosts --user-key-root /var/lib/centralssh/keys --audit-log /var/log/centralssh/audit.jsonl
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/centralssh /var/log/centralssh
+ReadWritePaths=/etc/centralssh /var/lib/centralssh /var/log/centralssh
 
 [Install]
 WantedBy=multi-user.target

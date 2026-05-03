@@ -40,13 +40,17 @@ CentralSSH uses a small set of files and directories:
 - Binary: `/usr/local/sbin/centralssh`
 - Host-key helper: `/usr/local/bin/cssh-keyscan`
 
-There is one important path discrepancy in the repo:
+The repo now standardizes on `/var/lib/centralssh/keys` as the default outbound key root.
 
-- The compiled default outbound key root is `/var/lib/centralssh/keys`.
-- The packaged service files and parts of the README still pass `/etc/centralssh/users`.
-- The example config also points at `/var/lib/centralssh/keys`.
+Default key mode:
 
-Operator recommendation: pick one layout and standardize it everywhere. The cleaner choice is `/var/lib/centralssh/keys` for private keys and `/etc/centralssh` for config and trust data.
+- `PER_USER_PER_SERVER=true`
+- key path pattern: `<user_key_root>/<username>/<server_name>/id_ed25519`
+
+Fallback mode:
+
+- `PER_USER_PER_SERVER=false`
+- key path pattern: `<user_key_root>/<username>/id_ed25519`
 
 ## 4. Path precedence
 
@@ -54,7 +58,7 @@ CentralSSH resolves its paths in this order:
 
 1. Explicit CLI flags
 2. Environment variables used by those flags
-3. `settings` overrides inside `config.toml` for key root, known_hosts, and audit log
+3. `settings` overrides inside `config.toml` for key root, key mode, known_hosts, and audit log
 4. Compiled defaults
 
 Important detail:
@@ -72,6 +76,7 @@ Supported CLI flags:
 - `--servers`
 - `--known-hosts`
 - `--user-key-root`
+- `--per-user-per-server`
 - `--audit-log`
 - `--enforce-strict-security`
 
@@ -82,6 +87,7 @@ Matching environment variables:
 - `CENTRALSSH_SERVERS`
 - `CENTRALSSH_KNOWN_HOSTS`
 - `CENTRALSSH_USER_KEY_ROOT`
+- `PER_USER_PER_SERVER`
 - `CENTRALSSH_AUDIT_LOG`
 - `CENTRALSSH_ENFORCE_STRICT_SECURITY`
 
@@ -104,6 +110,7 @@ allowed_servers = ["git", "httpd"]
 
 [settings]
 user_key_root = "/var/lib/centralssh/keys"
+per_user_per_server = true
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
@@ -136,6 +143,7 @@ ips = ["127.0.0.1/32", "::1/128", "192.168.0.0/16"]
 ### Settings fields
 
 - `user_key_root`: optional override for outbound private key root
+- `per_user_per_server`: optional boolean; defaults to `true`
 - `known_hosts_path`: optional override for target host trust store
 - `audit_log_path`: optional override for audit log file
 - `enforce_password_policy`: optional boolean; defaults to `true`
@@ -295,7 +303,7 @@ If your target systems need different login names, the current code does not pro
 
 ## 14. Outbound private key layout
 
-The current key resolver expects one private key per user per server:
+The default key resolver expects one private key per user per server:
 
 - `<user_key_root>/<username>/<server_name>/id_ed25519`
 
@@ -303,13 +311,17 @@ Example:
 
 - `/var/lib/centralssh/keys/alice/git/id_ed25519`
 
+If `PER_USER_PER_SERVER=false`, CentralSSH falls back to one outbound key per user:
+
+- `<user_key_root>/<username>/id_ed25519`
+
 Validation rules:
 
 - username and server name must use the safe component character set
 - no path traversal
 - no symlinks in the path
 - strict mode requires real directories and files with exact permissions
-- startup creates missing user directories, server directories, and `id_ed25519` files for configured user/server pairs
+- startup creates missing user directories, server directories when enabled, and `id_ed25519` files
 - existing private keys are left untouched and are not overwritten
 
 Recommended production layout:
@@ -334,12 +346,7 @@ Recommended permissions:
 - private key file: `0600`
 - owner: `root`
 
-Important discrepancy to know:
-
-- The README still says a simpler path like `/etc/centralssh/users/<username>/id_ed25519`.
-- The current resolver code expects the extra server-name directory level.
-
-Use the resolver's layout, not the stale README example.
+When `PER_USER_PER_SERVER=true`, use the server-specific layout above. Only use the simpler user-only layout when you explicitly disable the default mode.
 
 ## 15. Target host key verification
 
@@ -553,15 +560,15 @@ centralssh_listen="0.0.0.0:7788"
 centralssh_config="/etc/centralssh/config.toml"
 centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
-centralssh_user_key_root="/etc/centralssh/users"
+centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
 ```
 
 Important note:
 
-- The rc script still defaults `centralssh_user_key_root` to `/etc/centralssh/users`.
-- If you choose `/var/lib/centralssh/keys`, override this explicitly in `rc.conf`.
+- The rc script now defaults `centralssh_user_key_root` to `/var/lib/centralssh/keys`.
+- Set `PER_USER_PER_SERVER=false` in the service environment only if you intentionally want one outbound key per user.
 
 ### Linux
 
@@ -575,8 +582,8 @@ sudo systemctl status centralssh
 
 Important note:
 
-- The shipped unit also passes `--user-key-root /etc/centralssh/users`.
-- If you want `/var/lib/centralssh/keys`, update the unit or override it.
+- The shipped unit now passes `--user-key-root /var/lib/centralssh/keys`.
+- If you want user-only keys, set `PER_USER_PER_SERVER=false` in the unit environment.
 
 ## 22. Installation behavior
 
@@ -629,8 +636,6 @@ sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/central
 sudo find /var/lib/centralssh/keys -type d -exec ls -ld {} \;
 sudo find /var/lib/centralssh/keys -type f -exec ls -l {} \;
 ```
-
-If you stayed with `/etc/centralssh/users`, substitute that path consistently.
 
 ## 26. Reload behavior
 
@@ -743,9 +748,8 @@ Check the audit log for `config_reload` and confirm:
 These are the main ones to be aware of:
 
 - README feature claims are behind the actual proxy implementation.
-- README and service scripts still point at `/etc/centralssh/users` in places.
-- The code default and example config use `/var/lib/centralssh/keys`.
-- The code expects keys under `<root>/<user>/<server>/id_ed25519`, which is more specific than the older README text.
+- The README can still lag feature behavior if proxy support moves faster than docs.
+- Key mode is now explicit: default `<root>/<user>/<server>/id_ed25519`, optional fallback `<root>/<user>/id_ed25519` with `PER_USER_PER_SERVER=false`.
 
 If you are deploying this, resolve those inconsistencies in your own local packaging and runbook first.
 
@@ -767,5 +771,7 @@ Then update service configuration so the process is launched with:
 - `--known-hosts /etc/centralssh/known_hosts`
 - `--user-key-root /var/lib/centralssh/keys`
 - `--audit-log /var/log/centralssh/audit.jsonl`
+
+Leave `PER_USER_PER_SERVER=true` unless you are deliberately sharing one outbound key across all allowed targets for each user.
 
 That matches the current code structure best and keeps config, trust data, secrets, and logs separated cleanly.

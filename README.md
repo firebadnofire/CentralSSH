@@ -35,7 +35,7 @@ Default runtime paths:
 - Config: `/etc/centralssh/config.toml`
 - Servers map: `/etc/centralssh/servers.toml`
 - Known hosts: `/etc/centralssh/known_hosts`
-- User key root: `/etc/centralssh/users`
+- User key root: `/var/lib/centralssh/keys`
 - Audit log: `/var/log/centralssh/audit.jsonl`
 - Binary: `/usr/local/sbin/centralssh`
 - Helper tool: `/usr/local/bin/cssh-keyscan`
@@ -89,7 +89,7 @@ centralssh_listen="0.0.0.0:7788"
 centralssh_config="/etc/centralssh/config.toml"
 centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
-centralssh_user_key_root="/etc/centralssh/users"
+centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
 ```
@@ -136,7 +136,8 @@ must_change_password = true
 allowed_servers = ["dns"]
 
 [settings]
-user_key_root = "/etc/centralssh/users"
+user_key_root = "/var/lib/centralssh/keys"
+per_user_per_server = true
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 whitelist_path = "/etc/centralssh/whitelist.txt"
@@ -168,6 +169,7 @@ Fields:
 - `users[].must_change_password`: boolean.
 - `users[].allowed_servers`: required non-empty list of server names in `servers.toml`.
 - `settings.user_key_root`: optional path override.
+- `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.
@@ -256,12 +258,13 @@ Supported approaches:
 
 Outbound private key path pattern:
 
-- `<user_key_root>/<username>/<server>/id_ed25519`
+- Default: `<user_key_root>/<username>/<server>/id_ed25519`
+- With `PER_USER_PER_SERVER=false`: `<user_key_root>/<username>/id_ed25519`
 
 Behavior:
 
 - On startup, CentralSSH reconciles configured users and allowed servers.
-- Missing user directories, server directories, and `id_ed25519` files are created automatically.
+- Missing user directories, server directories when enabled, and `id_ed25519` files are created automatically.
 - Existing keys are not overwritten.
 - Keys are for outbound proxy auth only, not gateway login.
 
@@ -303,7 +306,7 @@ Required for strict mode (`--enforce-strict-security true`, default):
 - `/etc/centralssh/config.toml`: owner `root`, mode `0600`
 - `/etc/centralssh/servers.toml`: owner `root`, mode `0600`
 - `/etc/centralssh/known_hosts`: owner `root`, mode `0600`
-- `/etc/centralssh/users`: owner `root`, mode `0700`
+- `/var/lib/centralssh/keys`: owner `root`, mode `0700`
 - `/var/log/centralssh/audit.jsonl`: owner `root`, mode `0600`
 
 ## Post-Install Validation Checklist
@@ -311,7 +314,7 @@ Required for strict mode (`--enforce-strict-security true`, default):
 Run these checks after installation:
 
 ```bash
-sudo ls -ld /etc/centralssh /etc/centralssh/users /var/log/centralssh
+sudo ls -ld /etc/centralssh /var/lib/centralssh/keys /var/log/centralssh
 sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
 sudo service centralssh status || sudo systemctl status centralssh
 ```
@@ -338,7 +341,7 @@ Run manually:
   --config /etc/centralssh/config.toml \
   --servers /etc/centralssh/servers.toml \
   --known-hosts /etc/centralssh/known_hosts \
-  --user-key-root /etc/centralssh/users \
+  --user-key-root /var/lib/centralssh/keys \
   --audit-log /var/log/centralssh/audit.jsonl
 ```
 
@@ -349,6 +352,7 @@ Flags:
 - `--servers`
 - `--known-hosts`
 - `--user-key-root`
+- `--per-user-per-server`
 - `--audit-log`
 - `--enforce-strict-security` (default `true`)
 
@@ -359,6 +363,7 @@ Environment variables:
 - `CENTRALSSH_SERVERS`
 - `CENTRALSSH_KNOWN_HOSTS`
 - `CENTRALSSH_USER_KEY_ROOT`
+- `PER_USER_PER_SERVER`
 - `CENTRALSSH_AUDIT_LOG`
 - `CENTRALSSH_ENFORCE_STRICT_SECURITY`
 

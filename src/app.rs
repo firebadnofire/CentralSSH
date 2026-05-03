@@ -26,6 +26,7 @@ pub struct AppState {
 pub struct BootstrapReport {
     pub migrated_passwords: usize,
     pub created_user_dirs: usize,
+    pub created_server_dirs: usize,
     pub created_private_keys: usize,
     pub created_public_keys: usize,
 }
@@ -40,11 +41,13 @@ impl AppState {
         let key_report = ensure_private_keys_for_config_users(
             &self.config_store.paths.user_key_root,
             &snapshot.config,
+            self.config_store.paths.per_user_per_server,
         )?;
 
         Ok(BootstrapReport {
             migrated_passwords,
             created_user_dirs: key_report.created_user_dirs,
+            created_server_dirs: key_report.created_server_dirs,
             created_private_keys: key_report.created_private_keys,
             created_public_keys: key_report.created_public_keys,
         })

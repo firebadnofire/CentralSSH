@@ -36,6 +36,7 @@ use tracing::info;
       --servers     /etc/centralssh/servers.toml
       --known-hosts /etc/centralssh/known_hosts
       --user-key-root /var/lib/centralssh/keys
+      --per-user-per-server true
       --audit-log   /var/log/centralssh/audit.jsonl
       --whitelist   disabled unless configured
 
@@ -76,6 +77,9 @@ struct Cli {
     #[arg(long, env = "CENTRALSSH_WHITELIST")]
     whitelist: Option<PathBuf>,
 
+    #[arg(long, env = "PER_USER_PER_SERVER")]
+    per_user_per_server: Option<bool>,
+
     #[arg(
         long,
         env = "CENTRALSSH_ENFORCE_STRICT_SECURITY",
@@ -115,6 +119,7 @@ async fn run() -> Result<()> {
         cli.user_key_root.clone(),
         cli.audit_log.clone(),
         cli.whitelist.clone(),
+        cli.per_user_per_server,
         Some(&seed_config.settings),
     );
     ensure_user_key_root_directory(&paths.user_key_root)?;
@@ -147,8 +152,10 @@ async fn run() -> Result<()> {
     info!(
         migrated_passwords = report.migrated_passwords,
         created_user_dirs = report.created_user_dirs,
+        created_server_dirs = report.created_server_dirs,
         created_private_keys = report.created_private_keys,
         created_public_keys = report.created_public_keys,
+        per_user_per_server = paths.per_user_per_server,
         "startup bootstrap completed"
     );
 

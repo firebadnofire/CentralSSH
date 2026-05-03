@@ -254,6 +254,7 @@ impl ProxySession {
             &app_state.config_store.paths.user_key_root,
             &username,
             &target.name,
+            app_state.config_store.paths.per_user_per_server,
             app_state.strict_security,
         )?;
 
