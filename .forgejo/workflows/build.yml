@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: rust:1.89-bookworm
-      options: --network ci-network --user 0:0 -v /build-cache/cargo:/build-cache/cargo-home:Z -v /build-cache/sccache:/build-cache/sccache:Z -v /build-cache/target/centralssh/linux:/build-cache/target:Z
+      options: --network ci-network --user 0:0 -v /build-cache/cargo:/build-cache/cargo-home:z -v /build-cache/sccache:/build-cache/sccache:z -v /build-cache/target/centralssh/linux:/build-cache/target:z
     env:
       CI_PACKAGE_NAME: centralssh
       CI_PACKAGE_VERSION: 0.0.0
@@ -108,6 +108,7 @@ jobs:
           install -d /build-cache /build-cache/cargo /build-cache/cargo-home /build-cache/sccache /build-cache/target /build-cache/target/centralssh /build-cache/target/centralssh/linux
           id
           ls -ld /build-cache /build-cache/*
+          ls -Zd /build-cache /build-cache/* || true
           CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
           if [ "$CACHE_ROOT" != "/build-cache" ]; then
             echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
@@ -120,6 +121,7 @@ jobs:
           set -eu
           id
           ls -ld /build-cache /build-cache/*
+          ls -Zd /build-cache /build-cache/* || true
           CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
           if [ "$CACHE_ROOT" != "/build-cache" ]; then
             echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
@@ -145,6 +147,7 @@ jobs:
           set -eu
           id
           ls -ld /build-cache /build-cache/*
+          ls -Zd /build-cache /build-cache/* || true
           CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
           if [ "$CACHE_ROOT" != "/build-cache" ]; then
             echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
@@ -225,6 +228,7 @@ jobs:
           set -eu
           id
           ls -ld /build-cache /build-cache/* 2>/dev/null || true
+          ls -Zd /build-cache /build-cache/* 2>/dev/null || true
           CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
           if [ "$CACHE_ROOT" != "/build-cache" ]; then
             echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
