@@ -9,6 +9,14 @@ usage() {
 command_name=${1:-}
 [ -n "$command_name" ] || usage
 FREEBSD_ARCH=${FREEBSD_ARCH:-${2:-amd64}}
+CURRENT_STEP=initializing
+CLOUDINIT_READY_FILE=/var/tmp/centralssh-cloudinit-ready
+CLOUDINIT_FAILED_FILE=/var/tmp/centralssh-cloudinit-failed
+
+set_step() {
+  CURRENT_STEP=$1
+  echo "==> ${CURRENT_STEP}" >&2
+}
 
 ensure_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -217,11 +225,22 @@ users:
 ssh_pwauth: false
 disable_root: false
 package_update: false
+write_files:
+  - path: /var/tmp/centralssh-cloudinit-provision.sh
+    permissions: '0700'
+    owner: root:wheel
+    content: |
+      #!/bin/sh
+      set -eu
+      rm -f "${CLOUDINIT_READY_FILE}" "${CLOUDINIT_FAILED_FILE}"
+      trap 'rc=\$?; if [ "\$rc" -ne 0 ]; then echo "\$rc" > "${CLOUDINIT_FAILED_FILE}"; fi; exit "\$rc"' EXIT
+      pkg bootstrap -yf
+      pkg install -y sudo ca_root_nss
+      sysrc sshd_enable=YES
+      service sshd start || service sshd restart
+      touch "${CLOUDINIT_READY_FILE}"
 runcmd:
-  - pkg bootstrap -yf || true
-  - pkg install -y sudo ca_root_nss || true
-  - sysrc sshd_enable=YES
-  - service sshd start || service sshd restart
+  - /var/tmp/centralssh-cloudinit-provision.sh
 EOF
 
   cat > "${SEED_DIR}/meta-data" <<EOF
@@ -262,9 +281,13 @@ run_ssh() {
 wait_for_ssh() {
   i=1
   while [ "$i" -le 150 ]; do
-    if run_ssh 'command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready' >/dev/null 2>&1; then
+    if run_ssh "test -f '${CLOUDINIT_READY_FILE}' && test ! -f '${CLOUDINIT_FAILED_FILE}' && command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready" >/dev/null 2>&1; then
       echo "SSH is ready on port ${SSH_PORT}"
       return 0
+    fi
+    if run_ssh "test -f '${CLOUDINIT_FAILED_FILE}'" >/dev/null 2>&1; then
+      echo "FreeBSD cloud-init provisioning failed; readiness marker was not created" >&2
+      return 1
     fi
     sleep 2
     i=$((i + 1))
@@ -274,13 +297,42 @@ wait_for_ssh() {
   return 1
 }
 
+guest_debug_available() {
+  run_ssh 'echo guest-debug-ready' >/dev/null 2>&1
+}
+
+dump_guest_debug() {
+  if ! guest_debug_available; then
+    echo "---- guest debug unavailable (SSH not reachable) ----" >&2
+    return 0
+  fi
+
+  echo "---- guest process state ----" >&2
+  run_ssh 'ps auxww' >&2 || true
+  echo "---- guest pkg state ----" >&2
+  run_ssh "pkg -vv || sudo pkg -vv" >&2 || true
+  echo "---- guest cloud-init markers ----" >&2
+  run_ssh "ls -l '${CLOUDINIT_READY_FILE}' '${CLOUDINIT_FAILED_FILE}' 2>/dev/null || true" >&2 || true
+  echo "---- guest cloud-init.log ----" >&2
+  run_ssh "sudo tail -n 200 /var/log/cloud-init.log" >&2 || true
+  echo "---- guest cloud-init-output.log ----" >&2
+  run_ssh "sudo tail -n 200 /var/log/cloud-init-output.log" >&2 || true
+  echo "---- guest messages ----" >&2
+  run_ssh "sudo tail -n 200 /var/log/messages" >&2 || true
+}
+
 dump_debug() {
+  echo "---- host failure context ----" >&2
+  echo "last host step: ${CURRENT_STEP}" >&2
+  echo "freebsd arch: ${FREEBSD_ARCH}" >&2
+  echo "ssh endpoint: ${SSH_USER}@${SSH_HOST}:${SSH_PORT}" >&2
   echo "---- qemu-img info ----" >&2
   qemu-img info "$OVERLAY_QCOW2" >&2 || true
   echo "---- cache usage ----" >&2
   du -sh "$FREEBSD_CACHE_ROOT" "$CACHE_STAGE" "$CACHE_EXPORT_STAGE" 2>/dev/null >&2 || true
   echo "---- qemu log tail ----" >&2
   tail -n 200 "$QEMU_LOG" >&2 || true
+  dump_guest_debug
 }
 
 shutdown_vm() {
@@ -298,6 +350,9 @@ shutdown_vm() {
 
 cleanup() {
   exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    echo "FreeBSD CI step failed during '${CURRENT_STEP}' with exit code ${exit_code}; cleanup is now running" >&2
+  fi
   shutdown_vm
   release_image_lock
   if [ "$exit_code" -ne 0 ]; then
@@ -324,6 +379,8 @@ export SCCACHE_DIR="\$HOME/cache/sccache"
 export PKG_CACHEDIR="\$HOME/cache/pkg"
 mkdir -p "\$CARGO_HOME" "\$RUSTUP_HOME" "\$CARGO_TARGET_DIR" "\$SCCACHE_DIR" "\$PKG_CACHEDIR"
 
+test -f "${CLOUDINIT_READY_FILE}"
+test ! -f "${CLOUDINIT_FAILED_FILE}"
 sudo mkdir -p "\$PKG_CACHEDIR"
 sudo pkg -o PKG_CACHEDIR="\$PKG_CACHEDIR" update -f
 sudo pkg -o PKG_CACHEDIR="\$PKG_CACHEDIR" install -y curl git gmake jq pkg xz zstd ca_root_nss sudo
@@ -493,21 +550,32 @@ transfer_cache_in() {
 }
 
 run_build() {
+  set_step "uploading guest build script"
   cat "$BUILD_SCRIPT" | run_ssh "cat > ${REMOTE_HOME}/build-freebsd.sh && chmod +x ${REMOTE_HOME}/build-freebsd.sh"
-  run_ssh "sh ${REMOTE_HOME}/build-freebsd.sh"
+  set_step "executing guest build script"
+  if run_ssh "sh ${REMOTE_HOME}/build-freebsd.sh"; then
+    return 0
+  else
+    build_exit_code=$?
+  fi
+  echo "Guest build script failed with exit code ${build_exit_code}; cleanup is now running" >&2
+  return "$build_exit_code"
 }
 
 download_outputs() {
+  set_step "downloading build artifacts"
   mkdir -p "$DIST_DIR"
   run_ssh "tar -C ${REMOTE_HOME}/work/dist -czf - ." | tar -C "$DIST_DIR" -xzf -
-  test -n "$(find "$DIST_DIR" -maxdepth 1 -type f -name '*.pkg' -print -quit)"
+  test -n "$(find "$DIST_DIR" -maxdepth 1 -type f -name "*-${FREEBSD_PACKAGE_SUFFIX}.pkg" -print -quit)"
 
+  set_step "exporting guest cache"
   rm -rf "$CACHE_EXPORT_STAGE"
   mkdir -p "$CACHE_EXPORT_STAGE"
   run_ssh "tar -C ${REMOTE_HOME}/cache -czf - ." | tar -C "$CACHE_EXPORT_STAGE" -xzf -
 }
 
 store_cache_back() {
+  set_step "storing cache back to host"
   tmp_root="${FREEBSD_CACHE_ROOT}.tmp"
   rm -rf "$tmp_root"
   mkdir -p "$tmp_root"
@@ -539,10 +607,15 @@ case "$command_name" in
     prepare_dirs
     download_base_image
     trap cleanup EXIT INT TERM
+    set_step "booting FreeBSD VM"
     boot_vm
+    set_step "waiting for cloud-init readiness"
     wait_for_ssh
+    set_step "generating guest build script"
     create_guest_build_script
+    set_step "transferring repository"
     transfer_repo
+    set_step "transferring cache into guest"
     transfer_cache_in
     run_build
     download_outputs
