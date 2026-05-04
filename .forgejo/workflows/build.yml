@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: rust:1.89-bookworm
-      options: --network ci-network -v /data/cache/cargo:/cache/cargo-home -v /data/cache/sccache:/cache/sccache -v /data/cache/target/centralssh/linux:/cache/target
+      options: --network ci-network -v /test/cargo:/test/cargo-home -v /test/sccache:/test/sccache -v /test/target/centralssh/linux:/test/target
     env:
       CI_PACKAGE_NAME: centralssh
       CI_PACKAGE_VERSION: 0.0.0
@@ -105,7 +105,7 @@ jobs:
         shell: sh
         run: |
           set -eu
-          CACHE_ROOT="$(./ci/select-cache-root.sh /cache "$PWD/.ci-cache/linux")"
+          CACHE_ROOT="$(./ci/select-cache-root.sh /test "$PWD/.ci-cache/linux")"
           export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
           eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
@@ -124,7 +124,7 @@ jobs:
           CI_PACKAGE_DESC: ${{ env.CI_PACKAGE_DESC }}
         run: |
           set -eu
-          CACHE_ROOT="$(./ci/select-cache-root.sh /cache "$PWD/.ci-cache/linux")"
+          CACHE_ROOT="$(./ci/select-cache-root.sh /test "$PWD/.ci-cache/linux")"
           export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
           eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
@@ -198,7 +198,7 @@ jobs:
         shell: sh
         run: |
           set -eu
-          CACHE_ROOT="$(./ci/select-cache-root.sh /cache "$PWD/.ci-cache/linux")"
+          CACHE_ROOT="$(./ci/select-cache-root.sh /test "$PWD/.ci-cache/linux")"
           export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
           eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
