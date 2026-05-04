@@ -1,7 +1,7 @@
 # CentralSSH Operator Guide
 
 This guide is for the person who installs, configures, runs, and troubleshoots CentralSSH.
-It is based on the current repository state on 2026-05-01, not just the design spec.
+It is based on the current repository state on 2026-05-04, not just the design spec.
 
 ## 1. What CentralSSH is
 
@@ -23,7 +23,7 @@ The operator should know that the repo currently contains both old and new assum
 
 - The top-level spec in `AGENTS.md` requires transparent SSH proxying, including `exec`, SFTP, PTY forwarding, and forwarding support.
 - The current proxy code does relay `session`, `exec`, `subsystem`, PTY, `direct-tcpip`, and remote forwarding requests.
-- The current `README.md` still says `exec`, `subsystem`, and forwarding are denied. That is stale relative to the current code.
+- The `README.md` has been updated to match this transparent proxy model.
 - Agent forwarding is still rejected by policy.
 
 Practical conclusion: operate this build as a transparent SSH gateway in progress, not as a shell-only broker, but do not rely on the README alone for feature expectations.
@@ -104,7 +104,7 @@ Example:
 ```toml
 [[users]]
 name = "alice"
-password = "TemporaryPassword123!"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
 must_change_password = true
 allowed_servers = ["git", "httpd"]
 
@@ -174,6 +174,7 @@ CentralSSH rejects config at load or reload time if:
 - an Argon2id string is malformed
 - a bootstrap plaintext password is empty or longer than 256 chars
 - a bootstrap plaintext password is used without `must_change_password=true`
+- a bootstrap plaintext password is one of the documented placeholder values
 - a TOTP secret cannot be parsed into a valid runtime TOTP config
 
 ## 7. `servers.toml`
@@ -236,6 +237,7 @@ Operational meaning:
 - You can provision accounts quickly with temporary plaintext passwords.
 - After the first process start, those passwords are replaced on disk by Argon2id hashes.
 - Operators should still treat any plaintext bootstrap secret as high risk until the service has started and rewritten config.
+- The packaged example uses a rejected placeholder. Replace it with a unique temporary password before first start.
 
 Password policy when enabled:
 
@@ -625,6 +627,9 @@ Before you put this into regular service, choose and document:
 - how target host key rotation is approved and executed
 - how per-user outbound keys are generated, distributed, and rotated
 - how audit logs are rotated and archived
+- how config, key, audit-log, and fail2ban-state backups are encrypted, retained, and destroyed
+- when target and gateway host keys are rotated, and how old keys are retired
+- which component will be upgraded first when SSH hybrid/PQC key exchange becomes available
 
 ## 25. Operational checks
 
@@ -677,8 +682,9 @@ Current code rejects:
 
 Operator caution:
 
-- The code path supports much more than the stale README claims.
-- Treat feature support as code-defined until the documentation is reconciled.
+- The SSH transport policy is centralized in `src/crypto_policy.rs`.
+- Current SSH transport still depends on classical Curve25519 key exchange because `russh 0.53.0` does not provide a hybrid/PQC KEX.
+- See `SECURITY-SNDL.md` before using this gateway for data that must remain confidential for years.
 
 ## 28. Troubleshooting
 

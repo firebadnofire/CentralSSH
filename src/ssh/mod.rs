@@ -20,8 +20,12 @@ use zeroize::Zeroizing;
 use crate::abuse::{BanEvent, BanEventKind, FailureOutcome, PreAuthCheck};
 use crate::app::AppState;
 use crate::audit::{AuditEvent, AuditResult};
-use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
 use crate::config::validate_path_has_no_symlinks;
+use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
+use crate::crypto_policy::{
+    SSH_REKEY_BYTES, SSH_REKEY_TIME, apply_client_transport_crypto_policy,
+    apply_server_transport_crypto_policy,
+};
 use crate::error::{CentralSshError, Result};
 
 pub mod proxy;
@@ -845,15 +849,11 @@ Use the plaintext secret or URI above.\n\n"
 
         let new_password = candidate_password.as_str();
         if password_policy.enforce {
-            if let Err(error) = self
-                .state
-                .auth
-                .enforce_password_policy(
-                    new_password,
-                    &context.user.password,
-                    password_policy.min_length,
-                )
-            {
+            if let Err(error) = self.state.auth.enforce_password_policy(
+                new_password,
+                &context.user.password,
+                password_policy.min_length,
+            ) {
                 let message = match error {
                     CentralSshError::InvalidConfig(message) => message,
                     other => other.to_string(),
@@ -1211,6 +1211,7 @@ fn qr_module_is_dark(colors: &[Color], width: usize, x: usize, y: usize) -> bool
 }
 
 fn apply_server_transport_config(config: &mut server::Config) {
+    apply_server_transport_crypto_policy(config);
     // Russh defaults to a 10-minute inactivity timeout, which breaks quiet
     // long-lived exec sessions. Keep them alive with infrequent SSH keepalives
     // instead of a hard idle reap.
@@ -1220,6 +1221,7 @@ fn apply_server_transport_config(config: &mut server::Config) {
 }
 
 fn apply_client_transport_config(config: &mut client::Config) {
+    apply_client_transport_crypto_policy(config);
     config.inactivity_timeout = None;
     config.keepalive_interval = Some(SSH_KEEPALIVE_INTERVAL);
     config.keepalive_max = SSH_KEEPALIVE_MAX;
@@ -1375,9 +1377,10 @@ impl server::Handler for GatewayHandler {
             KeyboardAuthState::AwaitNewPassword {
                 context,
                 password_policy,
-            } => self
-                .handle_new_password_response(context, password_policy, response_text)
-                .await,
+            } => {
+                self.handle_new_password_response(context, password_policy, response_text)
+                    .await
+            }
             KeyboardAuthState::AwaitConfirmPassword {
                 context,
                 password_policy,
@@ -1854,6 +1857,9 @@ mod tests {
         assert_eq!(config.inactivity_timeout, None);
         assert_eq!(config.keepalive_interval, Some(SSH_KEEPALIVE_INTERVAL));
         assert_eq!(config.keepalive_max, SSH_KEEPALIVE_MAX);
+        assert_eq!(config.limits.rekey_write_limit, SSH_REKEY_BYTES);
+        assert_eq!(config.limits.rekey_read_limit, SSH_REKEY_BYTES);
+        assert_eq!(config.limits.rekey_time_limit, SSH_REKEY_TIME);
     }
 
     #[test]
@@ -1864,6 +1870,9 @@ mod tests {
         assert_eq!(config.inactivity_timeout, None);
         assert_eq!(config.keepalive_interval, Some(SSH_KEEPALIVE_INTERVAL));
         assert_eq!(config.keepalive_max, SSH_KEEPALIVE_MAX);
+        assert_eq!(config.limits.rekey_write_limit, SSH_REKEY_BYTES);
+        assert_eq!(config.limits.rekey_read_limit, SSH_REKEY_BYTES);
+        assert_eq!(config.limits.rekey_time_limit, SSH_REKEY_TIME);
     }
 
     #[test]

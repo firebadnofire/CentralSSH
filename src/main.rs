@@ -3,6 +3,7 @@ mod app;
 mod audit;
 mod auth;
 mod config;
+mod crypto_policy;
 mod error;
 mod keys;
 mod reload;

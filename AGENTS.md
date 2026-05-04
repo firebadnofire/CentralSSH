@@ -13,6 +13,10 @@ This project is **not** a shell server, **not** a toy TUI, and **not** a limited
 
 The previous implementation and its guiding document incorrectly constrained the system into a shell-only broker. This rewrite replaces that design entirely.
 
+## Documentation Sync Requirement
+
+When the program changes, update the documentation in the same change. Keep `README.md`, `op-guide.md`, and `disection.md` synchronized with the current implementation, and update this `AGENTS.md` too whenever repository instructions, design rules, or maintenance expectations change.
+
 ---
 
 ## Critical Design Rule

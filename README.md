@@ -12,8 +12,8 @@ CentralSSH is strictly an SSH server.
 - OpenSSH client compatible.
 - No custom SSH protocol extensions.
 - Accepts only standard SSH mechanisms needed for gateway flow.
-- Denies non-goal requests: `exec`, `subsystem`, forwarding, and agent forwarding.
-- Never grants local shell, local command execution, SFTP, or filesystem access on the gateway host.
+- Proxies standard SSH behavior after target selection, including shell, `exec`, subsystem/SFTP, and forwarding requests.
+- Denies gateway-local shell, gateway-local command execution, gateway filesystem access, and agent forwarding.
 - Gateway login auth is internal only (`username/password/TOTP`), not SSH public-key auth.
 
 ## What You Get
@@ -27,6 +27,7 @@ CentralSSH is strictly an SSH server.
 - Structured JSONL audit logging.
 - Startup reconciliation for missing per-user outbound keys.
 - Hot config reload on `SIGHUP`.
+- Centralized SSH crypto policy; see `SECURITY-SNDL.md` for Store Now, Decrypt Later limitations and migration work.
 
 ## Install Targets and Paths
 
@@ -125,13 +126,13 @@ Example with two users:
 ```toml
 [[users]]
 name = "alice"
-password = "TemporaryPassword123!"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
 must_change_password = true
 allowed_servers = ["git", "httpd"]
 
 [[users]]
 name = "bob"
-password = "AnotherTempPass123!"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
 must_change_password = true
 allowed_servers = ["dns"]
 
@@ -191,6 +192,7 @@ Notes:
 
 - Outbound target SSH username is always the authenticated CentralSSH username.
 - If bootstrap plaintext passwords are present, CentralSSH hashes them with Argon2id at startup and atomically rewrites config.
+- The documented placeholder password is rejected at config validation time. Replace it before starting the service.
 
 ## Built-In Abuse Protection
 
@@ -289,8 +291,8 @@ Accepted expected-key formats:
 
 - `<base64-key-blob>`
 - `<algorithm> <base64-key-blob>`
-- `SHA256:<fingerprint>` or `MD5:<fingerprint>`
-- `<algorithm> SHA256:<fingerprint>` or `<algorithm> MD5:<fingerprint>`
+- `SHA256:<fingerprint>`
+- `<algorithm> SHA256:<fingerprint>`
 
 Security behavior:
 
@@ -298,6 +300,7 @@ Security behavior:
 - New host with expected key: requires at least one scanned key to match; TOFU prompt skipped.
 - New host with key overlap: TOFU output shows overlapping hostnames.
 - Existing host with any newly presented key: hard fail; no file modification.
+- MD5 fingerprints are not accepted.
 
 ## File Ownership and Modes (Production)
 

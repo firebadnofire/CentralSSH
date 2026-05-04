@@ -10,8 +10,8 @@ usage() {
 	echo "Optional expected key formats (at least one scanned key must match):" >&2
 	echo "  <base64-key-blob>" >&2
 	echo "  <algorithm> <base64-key-blob>" >&2
-	echo "  SHA256:<fingerprint> or MD5:<fingerprint>" >&2
-	echo "  <algorithm> SHA256:<fingerprint> or <algorithm> MD5:<fingerprint>" >&2
+	echo "  SHA256:<fingerprint>" >&2
+	echo "  <algorithm> SHA256:<fingerprint>" >&2
 }
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
@@ -84,9 +84,8 @@ while IFS= read -r key_line; do
 	key_type="$(printf '%s\n' "${key_line}" | awk '{print $2}')"
 	key_blob="$(printf '%s\n' "${key_line}" | awk '{print $3}')"
 	fingerprint_sha256="$(printf '%s\n' "${key_line}" | ssh-keygen -l -E sha256 -f - 2>/dev/null | awk '{print $2}' || true)"
-	fingerprint_md5="$(printf '%s\n' "${key_line}" | ssh-keygen -l -E md5 -f - 2>/dev/null | awk '{print $2}' || true)"
 
-	printf '%s\t%s\t%s\t%s\t%s\n' "${key_type}" "${key_blob}" "${fingerprint_sha256}" "${fingerprint_md5}" "${key_line}" >> "${scan_meta_file}"
+	printf '%s\t%s\t%s\t%s\n' "${key_type}" "${key_blob}" "${fingerprint_sha256}" "${key_line}" >> "${scan_meta_file}"
 done < "${scan_file}"
 
 if [ ! -s "${scan_meta_file}" ]; then
@@ -110,7 +109,7 @@ function is_type(x) {
 	return x == "ssh-ed25519" || x == "ssh-rsa" || x == "ecdsa-sha2-nistp256"
 }
 function is_fingerprint(x) {
-	return x ~ /^(SHA256:[A-Za-z0-9+\/=]+|MD5:[0-9A-Fa-f:]+)$/
+	return x ~ /^SHA256:[A-Za-z0-9+\/=]+$/
 }
 function is_blob(x) {
 	return x ~ /^[A-Za-z0-9+\/=]+$/
@@ -205,17 +204,17 @@ function is_match() {
 		return $2 == expected_value
 	}
 	if (mode == "fingerprint") {
-		return $3 == expected_value || $4 == expected_value
+		return $3 == expected_value
 	}
 	if (mode == "typed_blob") {
 		return $1 == expected_type && $2 == expected_value
 	}
 	if (mode == "typed_fingerprint") {
-		return $1 == expected_type && ($3 == expected_value || $4 == expected_value)
+		return $1 == expected_type && $3 == expected_value
 	}
 	return 0
 }
-is_match() { print $5 }
+is_match() { print $4 }
 ' "${scan_meta_file}" > "${expected_matches_file}"
 
 	if [ ! -s "${expected_matches_file}" ]; then
@@ -246,7 +245,7 @@ if [ "${auto_accept}" -eq 0 ]; then
 	echo "Observed host keys:"
 
 	idx=0
-	while IFS="$(printf '\t')" read -r key_type key_blob fingerprint_sha256 fingerprint_md5 key_line; do
+	while IFS="$(printf '\t')" read -r key_type key_blob fingerprint_sha256 key_line; do
 		[ -n "${key_line}" ] || continue
 		idx=$((idx + 1))
 

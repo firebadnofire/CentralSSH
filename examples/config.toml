@@ -1,12 +1,12 @@
 [[users]]
 name = "alice"
-password = "TemporaryPassword123!"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
 must_change_password = true
 allowed_servers = ["git", "httpd"]
 
 [[users]]
 name = "bob"
-password = "AnotherTempPass123!"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
 must_change_password = true
 allowed_servers = ["dns"]
 

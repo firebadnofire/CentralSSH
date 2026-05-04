@@ -293,13 +293,11 @@ fn update_user_record_in_document(
     new_totp_secret: Option<String>,
     must_change_password: Option<bool>,
 ) -> Result<()> {
-    let users = document["users"]
-        .as_array_of_tables_mut()
-        .ok_or_else(|| {
-            CentralSshError::InvalidConfig(
-                "config.toml is missing [[users]] for credential update".to_string(),
-            )
-        })?;
+    let users = document["users"].as_array_of_tables_mut().ok_or_else(|| {
+        CentralSshError::InvalidConfig(
+            "config.toml is missing [[users]] for credential update".to_string(),
+        )
+    })?;
 
     let Some(user_table) = users.iter_mut().find(|table| {
         table
@@ -428,6 +426,13 @@ fn validate_password_field(user: &UserRecord) -> Result<()> {
         )));
     }
 
+    if is_rejected_bootstrap_placeholder(&user.password) {
+        return Err(CentralSshError::InvalidConfig(format!(
+            "bootstrap password for '{}' is a documented placeholder and must be replaced",
+            user.name
+        )));
+    }
+
     if user.password.len() > 256 {
         return Err(CentralSshError::InvalidConfig(format!(
             "bootstrap password for '{}' exceeds 256 characters",
@@ -443,6 +448,16 @@ fn validate_password_field(user: &UserRecord) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_rejected_bootstrap_placeholder(password: &str) -> bool {
+    matches!(
+        password,
+        "TemporaryPassword123!"
+            | "AnotherTempPass123!"
+            | "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
+            | "CHANGE_ME_BEFORE_STARTING"
+    )
 }
 
 fn validate_totp_secret(secret: &str) -> Result<()> {
@@ -693,6 +708,8 @@ pub fn fsync_parent(parent: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
 
@@ -719,7 +736,25 @@ mod tests {
     fn write_temp_file(tempdir: &TempDir, name: &str, contents: &str) -> PathBuf {
         let path = tempdir.path().join(name);
         fs::write(&path, contents).expect("write temp file");
+        normalize_test_file_owner(&path);
         path
+    }
+
+    fn normalize_test_file_owner(path: &Path) {
+        let euid = unsafe { libc::geteuid() };
+        let egid = unsafe { libc::getegid() };
+        let c_path = CString::new(path.as_os_str().as_bytes()).expect("test path cstring");
+        let result = unsafe { libc::chown(c_path.as_ptr(), euid, egid) };
+
+        if result != 0 {
+            let metadata = fs::metadata(path).expect("metadata after failed chown");
+            if metadata.uid() != euid || metadata.gid() != egid {
+                panic!(
+                    "failed to normalize test file owner to {euid}:{egid}: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
     }
 
     #[test]
@@ -758,6 +793,18 @@ mod tests {
 
         let result = validate_semantics(&config, &valid_servers());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_semantics_rejects_documented_bootstrap_placeholders() {
+        let mut config = valid_config();
+        config.users[0].password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD".to_string();
+
+        let result = validate_semantics(&config, &valid_servers());
+
+        assert!(
+            matches!(result, Err(CentralSshError::InvalidConfig(message)) if message.contains("documented placeholder"))
+        );
     }
 
     #[test]
@@ -842,7 +889,7 @@ allowed_servers = ["git", "httpd"]
 
 [[users]]
 name = "bob"
-password = "AnotherTempPass123!"
+password = "TestOnlyBootstrapPass456!"
 must_change_password = true
 allowed_servers = ["git"]
 
@@ -1013,7 +1060,10 @@ allowed_servers = ["git"]
         update_user_record_in_document(
             &mut document,
             "alice",
-            Some("$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$abcdefghijklmnopqrstuv".to_string()),
+            Some(
+                "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$abcdefghijklmnopqrstuv"
+                    .to_string(),
+            ),
             Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
             Some(false),
         )
