@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: rust:1.89-bookworm
-      options: --network ci-network -v /test/cargo:/test/cargo-home -v /test/sccache:/test/sccache -v /test/target/centralssh/linux:/test/target
+      options: --network ci-network --user 0:0 -v /build-cache/cargo:/build-cache/cargo-home:Z -v /build-cache/sccache:/build-cache/sccache:Z -v /build-cache/target/centralssh/linux:/build-cache/target:Z
     env:
       CI_PACKAGE_NAME: centralssh
       CI_PACKAGE_VERSION: 0.0.0
@@ -101,11 +101,30 @@ jobs:
             echo "CI_RELEASE_TAG=${tag_name}"
           } >> "$GITHUB_ENV"
 
+      - name: Prepare Linux cache root
+        shell: sh
+        run: |
+          set -eu
+          install -d /build-cache /build-cache/cargo /build-cache/cargo-home /build-cache/sccache /build-cache/target /build-cache/target/centralssh /build-cache/target/centralssh/linux
+          id
+          ls -ld /build-cache /build-cache/*
+          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
+          if [ "$CACHE_ROOT" != "/build-cache" ]; then
+            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
+            exit 1
+          fi
+
       - name: Install pinned sccache
         shell: sh
         run: |
           set -eu
-          CACHE_ROOT="$(./ci/select-cache-root.sh /test "$PWD/.ci-cache/linux")"
+          id
+          ls -ld /build-cache /build-cache/*
+          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
+          if [ "$CACHE_ROOT" != "/build-cache" ]; then
+            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
+            exit 1
+          fi
           export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
           eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
@@ -124,7 +143,13 @@ jobs:
           CI_PACKAGE_DESC: ${{ env.CI_PACKAGE_DESC }}
         run: |
           set -eu
-          CACHE_ROOT="$(./ci/select-cache-root.sh /test "$PWD/.ci-cache/linux")"
+          id
+          ls -ld /build-cache /build-cache/*
+          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
+          if [ "$CACHE_ROOT" != "/build-cache" ]; then
+            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
+            exit 1
+          fi
           export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
           eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"
@@ -198,7 +223,13 @@ jobs:
         shell: sh
         run: |
           set -eu
-          CACHE_ROOT="$(./ci/select-cache-root.sh /test "$PWD/.ci-cache/linux")"
+          id
+          ls -ld /build-cache /build-cache/* 2>/dev/null || true
+          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
+          if [ "$CACHE_ROOT" != "/build-cache" ]; then
+            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
+            exit 1
+          fi
           export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
           eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
           export PATH="$CARGO_HOME/bin:$PATH"

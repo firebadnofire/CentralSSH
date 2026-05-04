@@ -61,7 +61,7 @@ init_paths() {
   SSH_USER=${FREEBSD_VM_USER:-ci}
   SSH_HOST=127.0.0.1
 
-  SHARED_CACHE_TOP=$(./ci/select-cache-root.sh /test "$REPO_ROOT/.ci-host-cache")
+  SHARED_CACHE_TOP=$(./ci/select-cache-root.sh /build-cache "$REPO_ROOT/.ci-host-cache")
   CACHE_FINGERPRINT=$(cat "$REPO_ROOT/Cargo.lock" "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Makefile" 2>/dev/null | sha256sum | cut -c1-16)
   FREEBSD_CACHE_ROOT="${SHARED_CACHE_TOP}/freebsd/centralssh/${CACHE_FINGERPRINT}"
   IMAGE_ROOT="${SHARED_CACHE_TOP}/freebsd/images"

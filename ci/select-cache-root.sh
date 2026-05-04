@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-preferred_root=${1:-/test}
+preferred_root=${1:-/build-cache}
 fallback_root=${2:-$PWD/.ci-host-cache}
 
 probe_write() {
