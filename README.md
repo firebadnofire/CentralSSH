@@ -21,6 +21,8 @@ CentralSSH is strictly an SSH server.
 - SSH transport compatible with standard `ssh` clients.
 - Internal auth flow: `username -> password -> TOTP`.
 - Argon2id password hashing with automatic bootstrap migration.
+- Startup cryptographic readiness checks before bootstrap migration or key creation.
+- Encrypted-at-rest config secrets and outbound private keys when a KEK provider is configured.
 - Forced first-login password change and TOTP enrollment.
 - Per-user allowed-server authorization.
 - Strict outbound host-key verification against known_hosts.
@@ -38,6 +40,7 @@ Default runtime paths:
 - Known hosts: `/etc/centralssh/known_hosts`
 - User key root: `/var/lib/centralssh/keys`
 - Audit log: `/var/log/centralssh/audit.jsonl`
+- Master keyset: `/etc/centralssh/master.key`
 - Binary: `/usr/local/sbin/centralssh`
 - Helper tool: `/usr/local/bin/cssh-keyscan`
 - Gateway server host key: `/etc/centralssh/host_ed25519`
@@ -52,13 +55,17 @@ make
 sudo make install
 ```
 
-2. Enable and start service:
+2. Provision the `[security]` provider and `master.key` for strict production, then enable and start service:
 
 ```bash
 sudo sysrc centralssh_enable=YES
 sudo service centralssh start
 sudo service centralssh status
 ```
+
+Production strict mode requires a configured `[security]` provider, a valid
+`master.key`, encrypted config secret fields, and encrypted outbound private-key
+files before startup bootstrap is allowed to mutate config or create keys.
 
 3. Populate host keys for each target server:
 
@@ -92,6 +99,7 @@ centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
+centralssh_master_key="/etc/centralssh/master.key"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
 ```
 
@@ -112,6 +120,7 @@ sudo make install
 - Installs example `config.toml` and `servers.toml` if missing.
 - Creates `/etc/centralssh/known_hosts` if missing.
 - Creates `/var/log/centralssh/audit.jsonl` if missing.
+- Does not generate `master.key`; provision it with the chosen KEK provider before strict production startup.
 - Installs FreeBSD rc script on FreeBSD.
 - Installs systemd unit on non-FreeBSD hosts.
 
@@ -145,6 +154,17 @@ whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = true
 min_password_policy = 12
 
+# Production strict mode requires a real provider and encrypted secret values.
+# [security]
+# master_key_path = "/etc/centralssh/master.key"
+# encrypted_config = true
+# encrypted_keys = true
+#
+# [security.kek_provider]
+# kind = "tpm2-command"
+# command_path = "/usr/local/sbin/centralssh-tpm-unseal"
+# expected_sha256 = "<64 hex chars>"
+
 [fail2ban]
 enabled = true
 max_failures = 5
@@ -176,6 +196,15 @@ Fields:
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.
 - `settings.enforce_password_policy`: optional bool, default `true`.
 - `settings.min_password_policy`: optional integer minimum password length, default `12`.
+- `security.master_key_path`: optional path to the structured keyset file, default `/etc/centralssh/master.key`.
+- `security.encrypted_config`: encrypt `users[].password` and `users[].totp_secret` values on writes.
+- `security.encrypted_keys`: encrypt outbound private-key file contents on creation.
+- `security.allow_insecure_boot`: explicit emergency escape hatch; logs a critical warning every startup.
+- `security.kek_provider.kind`: `tpm2-command`, `external-command`, `passphrase-env`, or non-strict-only `raw-file`.
+- `security.kek_provider.command_path`: absolute provider binary path for command providers; no shell is used.
+- `security.kek_provider.command_args`: optional command args; rejected unless exactly repeated in `allowed_command_args`.
+- `security.kek_provider.expected_sha256`: optional SHA256 attestation hash for the provider binary.
+- `security.kek_provider.env`: passphrase environment variable for `passphrase-env`.
 - `fail2ban.enabled`: optional bool, default `true`.
 - `fail2ban.max_failures`: optional integer threshold inside the sliding window, default `5`.
 - `fail2ban.find_time`: optional duration string, default `60s`.
@@ -191,7 +220,7 @@ Fields:
 Notes:
 
 - Outbound target SSH username is always the authenticated CentralSSH username.
-- If bootstrap plaintext passwords are present, CentralSSH hashes them with Argon2id at startup and atomically rewrites config.
+- If bootstrap plaintext passwords are present, CentralSSH hashes them with Argon2id at startup and atomically rewrites config only after cryptographic readiness succeeds.
 - The documented placeholder password is rejected at config validation time. Replace it before starting the service.
 
 ## Built-In Abuse Protection
@@ -213,6 +242,38 @@ Operational notes:
 - Keep the whitelist as narrow as practical; prefer a management subnet over broad RFC1918 ranges.
 - `settings.whitelist_path` expects one exact IP address per line and accepts both IPv4 and IPv6.
 - The persisted state file contains timestamps, IPs, usernames, target names, and ban metadata only. It does not contain passwords or TOTP material.
+
+## Secret Storage and `master.key`
+
+Strict mode performs KEK/provider readiness before bootstrap. If the provider or
+`master.key` fails, CentralSSH does not migrate passwords, generate outbound keys,
+or rewrite config.
+
+`master.key` is TOML with this schema:
+
+```toml
+version = 1
+active_key_id = "key-2026-05"
+mac = "hmac-sha256:<hex>"
+
+[[keys]]
+key_id = "key-2026-05"
+wrapped_key = "<hex provider-wrapped 32-byte master key>"
+provider = "tpm2-command"
+created_at = "2026-05-05T00:00:00Z"
+```
+
+Rules:
+
+- `key_id` values must be unique.
+- `active_key_id` must match exactly one key entry.
+- The file MAC is verified with the active unwrapped key before secrets are used.
+- Encrypted blobs include their `key_id`; startup rejects orphaned config key IDs.
+- Command providers receive the wrapped blob on stdin and must write exactly 32 unwrapped bytes to stdout.
+
+Encryption uses AES-256-GCM with HKDF context separation: `config/password`,
+`config/totp`, and `ssh/private_key`. Rotation must keep the previous key entry
+until all blobs have been rewrapped and validated.
 
 ### `/etc/centralssh/servers.toml`
 
@@ -244,7 +305,7 @@ Rules:
 ## Password and TOTP Lifecycle
 
 - Password hashing algorithm: Argon2id.
-- Bootstrap plaintext is migrated to Argon2id on startup.
+- Bootstrap plaintext is migrated to Argon2id on startup after KEK/provider readiness succeeds.
 - First-login password change enforced via `must_change_password`.
 - TOTP uses RFC6238 semantics with 30s step and drift tolerance.
 - TOTP secrets are base32 and never logged.
@@ -268,6 +329,7 @@ Behavior:
 - On startup, CentralSSH reconciles configured users and allowed servers.
 - Missing user directories, server directories when enabled, and `id_ed25519` files are created automatically.
 - Existing keys are not overwritten.
+- With `security.encrypted_keys=true`, private-key file contents are encrypted envelopes and are decrypted only for in-memory parsing at connection time.
 - Keys are for outbound proxy auth only, not gateway login.
 
 ## Host Key Management (`cssh-keyscan`)
@@ -309,6 +371,7 @@ Required for strict mode (`--enforce-strict-security true`, default):
 - `/etc/centralssh/config.toml`: owner `root`, mode `0600`
 - `/etc/centralssh/servers.toml`: owner `root`, mode `0600`
 - `/etc/centralssh/known_hosts`: owner `root`, mode `0600`
+- `/etc/centralssh/master.key`: owner `root`, mode `0600`
 - `/var/lib/centralssh/keys`: owner `root`, mode `0700`
 - `/var/log/centralssh/audit.jsonl`: owner `root`, mode `0600`
 
@@ -318,7 +381,7 @@ Run these checks after installation:
 
 ```bash
 sudo ls -ld /etc/centralssh /var/lib/centralssh/keys /var/log/centralssh
-sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
+sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /etc/centralssh/master.key /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
 sudo service centralssh status || sudo systemctl status centralssh
 ```
 
@@ -345,7 +408,8 @@ Run manually:
   --servers /etc/centralssh/servers.toml \
   --known-hosts /etc/centralssh/known_hosts \
   --user-key-root /var/lib/centralssh/keys \
-  --audit-log /var/log/centralssh/audit.jsonl
+  --audit-log /var/log/centralssh/audit.jsonl \
+  --master-key /etc/centralssh/master.key
 ```
 
 Flags:
@@ -357,6 +421,7 @@ Flags:
 - `--user-key-root`
 - `--per-user-per-server`
 - `--audit-log`
+- `--master-key`
 - `--enforce-strict-security` (default `true`)
 
 Environment variables:
@@ -368,6 +433,7 @@ Environment variables:
 - `CENTRALSSH_USER_KEY_ROOT`
 - `PER_USER_PER_SERVER`
 - `CENTRALSSH_AUDIT_LOG`
+- `CENTRALSSH_MASTER_KEY`
 - `CENTRALSSH_ENFORCE_STRICT_SECURITY`
 
 ## Reload and Operations
@@ -457,6 +523,7 @@ Check:
 - `/etc/centralssh/config.toml`
 - `/etc/centralssh/servers.toml`
 - `/etc/centralssh/known_hosts`
+- `/etc/centralssh/master.key`
 - `/var/log/centralssh/audit.jsonl`
 
 Fix:
@@ -550,6 +617,16 @@ CENTRALSSH_ENFORCE_STRICT_SECURITY=false cargo run -- \
 ```
 
 Do not use this mode in production.
+
+When non-strict mode is used without an explicit `--listen` or
+`CENTRALSSH_LISTEN`, CentralSSH binds `127.0.0.1:7788` instead of exposing a
+remote listener by default.
+
+## Security Limits
+
+This hardening protects at-rest config and outbound key files. It does not stop
+RAM extraction, live process compromise, malicious provider binaries, or future
+quantum attacks against today’s classical SSH transport.
 
 ## Connect from Clients
 

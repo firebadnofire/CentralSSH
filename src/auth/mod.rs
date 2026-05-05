@@ -216,9 +216,9 @@ impl AuthEngine {
         let min_length = min_length.min(256);
 
         if new_password.len() < min_length {
-            return Err(CentralSshError::InvalidConfig(
-                format!("password must be at least {min_length} characters"),
-            ));
+            return Err(CentralSshError::InvalidConfig(format!(
+                "password must be at least {min_length} characters"
+            )));
         }
 
         if new_password.len() > 256 {
@@ -447,7 +447,9 @@ mod tests {
         let old_hash = auth.hash_password("current-password").expect("hash");
 
         let result = auth.enforce_password_policy("short", &old_hash, DEFAULT_MIN_PASSWORD_POLICY);
-        assert!(matches!(result, Err(CentralSshError::InvalidConfig(message)) if message == "password must be at least 12 characters"));
+        assert!(
+            matches!(result, Err(CentralSshError::InvalidConfig(message)) if message == "password must be at least 12 characters")
+        );
 
         auth.enforce_password_policy("long enough for policy", &old_hash, 20)
             .expect("policy should pass");

@@ -11,10 +11,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use toml_edit::{DocumentMut, Item, value};
+use zeroize::Zeroizing;
 
 use crate::abuse::Fail2banConfig;
 use crate::auth::{AuthEngine, build_totp_from_secret};
 use crate::error::{CentralSshError, Result};
+use crate::secrets::{SecretManager, SecurityConfig, is_encrypted_value};
 
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:7788";
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/centralssh/config.toml";
@@ -22,6 +24,7 @@ pub const DEFAULT_SERVERS_PATH: &str = "/etc/centralssh/servers.toml";
 pub const DEFAULT_KNOWN_HOSTS_PATH: &str = "/etc/centralssh/known_hosts";
 pub const DEFAULT_USER_KEY_ROOT: &str = "/var/lib/centralssh/keys";
 pub const DEFAULT_AUDIT_LOG_PATH: &str = "/var/log/centralssh/audit.jsonl";
+pub const DEFAULT_MASTER_KEY_PATH: &str = "/etc/centralssh/master.key";
 pub const DEFAULT_MIN_PASSWORD_POLICY: usize = 12;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -51,6 +54,8 @@ pub struct ConfigFile {
     pub users: Vec<UserRecord>,
     #[serde(default)]
     pub settings: SettingsConfig,
+    #[serde(default, skip_serializing_if = "SecurityConfig::is_empty")]
+    pub security: SecurityConfig,
     #[serde(default)]
     pub fail2ban: Option<Fail2banConfig>,
 }
@@ -67,6 +72,7 @@ pub struct EffectivePaths {
     pub known_hosts_path: PathBuf,
     pub user_key_root: PathBuf,
     pub audit_log_path: PathBuf,
+    pub master_key_path: PathBuf,
     pub whitelist_path: Option<PathBuf>,
     pub per_user_per_server: bool,
 }
@@ -81,11 +87,16 @@ pub struct RuntimeState {
 #[derive(Clone)]
 pub struct ConfigStore {
     pub paths: EffectivePaths,
+    secrets: Option<SecretManager>,
     state: Arc<RwLock<RuntimeState>>,
 }
 
 impl ConfigStore {
-    pub async fn load(paths: EffectivePaths, enforce_strict_security: bool) -> Result<Self> {
+    pub async fn load(
+        paths: EffectivePaths,
+        enforce_strict_security: bool,
+        secrets: Option<SecretManager>,
+    ) -> Result<Self> {
         let mut config = load_config_file(&paths.config_path)?;
         let servers = load_servers_file(&paths.servers_path)?;
         apply_runtime_overrides(&mut config, &paths);
@@ -95,19 +106,28 @@ impl ConfigStore {
             validate_file_security(&paths.servers_path, 0o600, true)?;
             validate_file_security(&paths.known_hosts_path, 0o600, true)?;
             validate_directory_security(&paths.user_key_root, 0o700, true)?;
+            if secrets.is_some() {
+                validate_file_security(&paths.master_key_path, 0o600, true)?;
+            }
             validate_optional_file_security(paths.whitelist_path.as_deref(), 0o600)?;
         } else {
             validate_path_has_no_symlinks(&paths.config_path)?;
             validate_path_has_no_symlinks(&paths.servers_path)?;
             validate_path_has_no_symlinks(&paths.known_hosts_path)?;
             validate_path_has_no_symlinks(&paths.user_key_root)?;
+            if secrets.is_some() {
+                validate_path_has_no_symlinks(&paths.master_key_path)?;
+            }
             validate_optional_path_has_no_symlinks(paths.whitelist_path.as_deref())?;
         }
 
-        validate_semantics(&config, &servers)?;
+        validate_secret_storage_policy(&config, secrets.as_ref())?;
+        let runtime_config = decrypt_config_for_runtime(&config, secrets.as_ref())?;
+        validate_semantics(&runtime_config, &servers)?;
 
         Ok(Self {
             paths,
+            secrets,
             state: Arc::new(RwLock::new(RuntimeState {
                 config,
                 servers,
@@ -116,8 +136,13 @@ impl ConfigStore {
         })
     }
 
-    pub async fn snapshot(&self) -> RuntimeState {
-        self.state.read().await.clone()
+    pub async fn snapshot(&self) -> Result<RuntimeState> {
+        let raw = self.state.read().await.clone();
+        Ok(RuntimeState {
+            config: decrypt_config_for_runtime(&raw.config, self.secrets.as_ref())?,
+            servers: raw.servers,
+            loaded_at: raw.loaded_at,
+        })
     }
 
     pub async fn reload(&self, enforce_strict_security: bool) -> Result<()> {
@@ -130,16 +155,24 @@ impl ConfigStore {
             validate_file_security(&self.paths.servers_path, 0o600, true)?;
             validate_file_security(&self.paths.known_hosts_path, 0o600, true)?;
             validate_directory_security(&self.paths.user_key_root, 0o700, true)?;
+            if self.secrets.is_some() {
+                validate_file_security(&self.paths.master_key_path, 0o600, true)?;
+            }
             validate_optional_file_security(self.paths.whitelist_path.as_deref(), 0o600)?;
         } else {
             validate_path_has_no_symlinks(&self.paths.config_path)?;
             validate_path_has_no_symlinks(&self.paths.servers_path)?;
             validate_path_has_no_symlinks(&self.paths.known_hosts_path)?;
             validate_path_has_no_symlinks(&self.paths.user_key_root)?;
+            if self.secrets.is_some() {
+                validate_path_has_no_symlinks(&self.paths.master_key_path)?;
+            }
             validate_optional_path_has_no_symlinks(self.paths.whitelist_path.as_deref())?;
         }
 
-        validate_semantics(&config, &servers)?;
+        validate_secret_storage_policy(&config, self.secrets.as_ref())?;
+        let runtime_config = decrypt_config_for_runtime(&config, self.secrets.as_ref())?;
+        validate_semantics(&runtime_config, &servers)?;
 
         let mut guard = self.state.write().await;
         guard.config = config;
@@ -154,16 +187,28 @@ impl ConfigStore {
         let mut changed = 0usize;
 
         for user in &mut guard.config.users {
-            if !auth.is_hash_format(&user.password) {
-                let new_password_hash = auth.hash_password(&user.password)?;
+            let current_password = decrypt_secret_for_runtime(
+                "config/password",
+                &user.name,
+                &user.password,
+                self.secrets.as_ref(),
+            )?;
+            if !auth.is_hash_format(current_password.as_str()) {
+                let new_password_hash = auth.hash_password(current_password.as_str())?;
+                let stored_password_hash = prepare_secret_for_storage(
+                    "config/password",
+                    &user.name,
+                    &new_password_hash,
+                    self.secrets.as_ref(),
+                )?;
                 update_user_record_in_document(
                     &mut document,
                     &user.name,
-                    Some(new_password_hash.clone()),
+                    Some(stored_password_hash.clone()),
                     None,
                     Some(true),
                 )?;
-                user.password = new_password_hash;
+                user.password = stored_password_hash;
                 user.must_change_password = true;
                 changed += 1;
             }
@@ -184,8 +229,23 @@ impl ConfigStore {
         must_change_password: Option<bool>,
     ) -> Result<()> {
         let mut guard = self.state.write().await;
-        let password_hash_for_doc = new_password_hash.clone();
-        let totp_secret_for_doc = new_totp_secret.clone();
+        let password_hash_for_doc = new_password_hash
+            .as_deref()
+            .map(|value| {
+                prepare_secret_for_storage(
+                    "config/password",
+                    username,
+                    value,
+                    self.secrets.as_ref(),
+                )
+            })
+            .transpose()?;
+        let totp_secret_for_doc = new_totp_secret
+            .as_deref()
+            .map(|value| {
+                prepare_secret_for_storage("config/totp", username, value, self.secrets.as_ref())
+            })
+            .transpose()?;
         let user = guard
             .config
             .users
@@ -194,10 +254,10 @@ impl ConfigStore {
             .ok_or_else(|| CentralSshError::InvalidConfig(format!("user not found: {username}")))?;
 
         if let Some(password_hash) = new_password_hash {
-            user.password = password_hash;
+            user.password = password_hash_for_doc.clone().unwrap_or(password_hash);
         }
         if let Some(totp_secret) = new_totp_secret {
-            user.totp_secret = Some(totp_secret);
+            user.totp_secret = Some(totp_secret_for_doc.clone().unwrap_or(totp_secret));
         }
         if let Some(flag) = must_change_password {
             user.must_change_password = flag;
@@ -222,9 +282,11 @@ pub fn resolve_paths(
     known_hosts_path: Option<PathBuf>,
     user_key_root: Option<PathBuf>,
     audit_log_path: Option<PathBuf>,
+    master_key_path: Option<PathBuf>,
     whitelist_path: Option<PathBuf>,
     per_user_per_server: Option<bool>,
     settings: Option<&SettingsConfig>,
+    security: Option<&SecurityConfig>,
 ) -> EffectivePaths {
     EffectivePaths {
         config_path: config_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)),
@@ -238,6 +300,9 @@ pub fn resolve_paths(
         audit_log_path: audit_log_path
             .or_else(|| settings.and_then(|config| config.audit_log_path.clone()))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_AUDIT_LOG_PATH)),
+        master_key_path: master_key_path
+            .or_else(|| security.and_then(|config| config.master_key_path.clone()))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_MASTER_KEY_PATH)),
         whitelist_path: whitelist_path
             .or_else(|| settings.and_then(|config| config.whitelist_path.clone())),
         per_user_per_server: per_user_per_server
@@ -261,6 +326,97 @@ pub fn load_servers_file(path: &Path) -> Result<ServersFile> {
     let bytes = fs::read(path)?;
     let servers = toml::from_slice(&bytes)?;
     Ok(servers)
+}
+
+fn validate_secret_storage_policy(
+    config: &ConfigFile,
+    secrets: Option<&SecretManager>,
+) -> Result<()> {
+    let Some(secrets) = secrets else {
+        return Ok(());
+    };
+
+    let config_must_be_encrypted = (secrets.encrypted_config_enabled()
+        || secrets.encrypted_config_required())
+        && !secrets.allow_insecure_boot();
+
+    for user in &config.users {
+        if config_must_be_encrypted && !is_encrypted_value(&user.password) {
+            return Err(CentralSshError::InvalidConfig(format!(
+                "user '{}' password must be encrypted in strict/encrypted config mode",
+                user.name
+            )));
+        }
+        secrets.validate_envelope_key_is_known(&user.password)?;
+
+        if let Some(secret) = &user.totp_secret {
+            if config_must_be_encrypted && !is_encrypted_value(secret) {
+                return Err(CentralSshError::InvalidConfig(format!(
+                    "user '{}' totp_secret must be encrypted in strict/encrypted config mode",
+                    user.name
+                )));
+            }
+            secrets.validate_envelope_key_is_known(secret)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn decrypt_config_for_runtime(
+    config: &ConfigFile,
+    secrets: Option<&SecretManager>,
+) -> Result<ConfigFile> {
+    let Some(secrets) = secrets else {
+        return Ok(config.clone());
+    };
+
+    let mut runtime = config.clone();
+    for user in &mut runtime.users {
+        user.password = decrypt_secret_for_runtime(
+            "config/password",
+            &user.name,
+            &user.password,
+            Some(secrets),
+        )?
+        .to_string();
+
+        if let Some(stored_totp) = &user.totp_secret {
+            user.totp_secret = Some(
+                decrypt_secret_for_runtime("config/totp", &user.name, stored_totp, Some(secrets))?
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(runtime)
+}
+
+fn decrypt_secret_for_runtime(
+    context: &str,
+    subject: &str,
+    value: &str,
+    secrets: Option<&SecretManager>,
+) -> Result<Zeroizing<String>> {
+    if let Some(secrets) = secrets {
+        secrets.decrypt_string(context, subject, value)
+    } else {
+        Ok(Zeroizing::new(value.to_string()))
+    }
+}
+
+fn prepare_secret_for_storage(
+    context: &str,
+    subject: &str,
+    value: &str,
+    secrets: Option<&SecretManager>,
+) -> Result<String> {
+    if let Some(secrets) = secrets {
+        if secrets.encrypted_config_enabled() {
+            return secrets.encrypt_string(context, subject, value);
+        }
+    }
+    Ok(value.to_string())
 }
 
 fn validate_optional_file_security(path: Option<&Path>, mode: u32) -> Result<()> {
@@ -710,7 +866,7 @@ mod tests {
     use super::*;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::TempDir;
 
     fn valid_config() -> ConfigFile {
@@ -723,6 +879,7 @@ mod tests {
                 allowed_servers: vec!["git".to_string()],
             }],
             settings: SettingsConfig::default(),
+            security: SecurityConfig::default(),
             fail2ban: None,
         }
     }
@@ -734,7 +891,9 @@ mod tests {
     }
 
     fn write_temp_file(tempdir: &TempDir, name: &str, contents: &str) -> PathBuf {
-        let path = tempdir.path().join(name);
+        let path = fs::canonicalize(tempdir.path())
+            .expect("canonical tempdir")
+            .join(name);
         fs::write(&path, contents).expect("write temp file");
         normalize_test_file_owner(&path);
         path
@@ -1029,6 +1188,7 @@ servers = ["git"]
                 allowed_servers: vec!["git".to_string()],
             }],
             settings: SettingsConfig::default(),
+            security: SecurityConfig::default(),
             fail2ban: None,
         };
 
@@ -1098,5 +1258,38 @@ allowed_servers = ["git"]
 
         let result = validate_path_has_no_symlinks(&link_dir.join("child"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_config_policy_rejects_plaintext_secret_fields_when_enabled() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let base = fs::canonicalize(tempdir.path()).expect("canonical tempdir");
+        let raw_key_path = base.join("raw.key");
+        fs::write(&raw_key_path, [1u8; 32]).expect("write raw key");
+        fs::set_permissions(&raw_key_path, fs::Permissions::from_mode(0o600))
+            .expect("chmod raw key");
+        let secrets = SecretManager::new(
+            &SecurityConfig {
+                master_key_path: Some(base.join("master.key")),
+                encrypted_config: Some(true),
+                encrypted_keys: Some(false),
+                allow_insecure_boot: Some(false),
+                kek_provider: Some(crate::secrets::KekProviderConfig {
+                    kind: "raw-file".to_string(),
+                    path: Some(raw_key_path),
+                    ..crate::secrets::KekProviderConfig::default()
+                }),
+            },
+            base.join("unused-master.key"),
+            false,
+        )
+        .expect("manager")
+        .expect("some manager");
+
+        let result = validate_secret_storage_policy(&valid_config(), Some(&secrets));
+
+        assert!(
+            matches!(result, Err(CentralSshError::InvalidConfig(message)) if message.contains("password must be encrypted"))
+        );
     }
 }

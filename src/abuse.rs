@@ -769,9 +769,9 @@ fn write_state_file(path: &Path, value: &PersistedState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ConfigFile, SettingsConfig};
     use std::str::FromStr;
     use std::sync::Arc;
-    use crate::config::{ConfigFile, SettingsConfig};
     use tempfile::TempDir;
     use tokio::task::JoinSet;
 
@@ -788,6 +788,10 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-05-02T20:00:00Z")
             .expect("timestamp")
             .with_timezone(&Utc)
+    }
+
+    fn test_root(tempdir: &TempDir) -> PathBuf {
+        fs::canonicalize(tempdir.path()).expect("canonical tempdir")
     }
 
     #[test]
@@ -997,8 +1001,12 @@ mod tests {
 
         let loaded = read_whitelist_file(&whitelist_path).expect("load whitelist");
 
-        assert!(loaded.contains(&single_host_net(IpAddr::from_str("203.0.113.10").expect("ipv4"))));
-        assert!(loaded.contains(&single_host_net(IpAddr::from_str("2001:db8::10").expect("ipv6"))));
+        assert!(loaded.contains(&single_host_net(
+            IpAddr::from_str("203.0.113.10").expect("ipv4")
+        )));
+        assert!(loaded.contains(&single_host_net(
+            IpAddr::from_str("2001:db8::10").expect("ipv6")
+        )));
     }
 
     #[test]
@@ -1040,9 +1048,10 @@ mod tests {
     #[tokio::test]
     async fn corrupted_or_missing_state_file_does_not_crash() {
         let tempdir = TempDir::new().expect("tempdir");
-        let path = tempdir.path().join("state.json");
+        let root = test_root(&tempdir);
+        let path = root.join("state.json");
         fs::write(&path, b"{not valid json").expect("write");
-        let logger = AuditLogger::new(tempdir.path().join("audit.jsonl"), false).expect("logger");
+        let logger = AuditLogger::new(root.join("audit.jsonl"), false).expect("logger");
         let tracker = AbuseTracker {
             settings: Arc::new(RwLock::new(Fail2banSettings {
                 persist_state: true,
@@ -1071,11 +1080,12 @@ mod tests {
     #[tokio::test]
     async fn concurrent_failure_recording_is_safe() {
         let tempdir = TempDir::new().expect("tempdir");
-        let logger = AuditLogger::new(tempdir.path().join("audit.jsonl"), false).expect("logger");
+        let root = test_root(&tempdir);
+        let logger = AuditLogger::new(root.join("audit.jsonl"), false).expect("logger");
         let tracker = Arc::new(AbuseTracker {
             settings: Arc::new(RwLock::new(Fail2banSettings {
                 persist_state: false,
-                state_path: tempdir.path().join("state.json"),
+                state_path: root.join("state.json"),
                 whitelist: Vec::new(),
                 ..Fail2banSettings::default()
             })),
@@ -1101,15 +1111,17 @@ mod tests {
     #[tokio::test]
     async fn abuse_tracker_honors_whitelist_path_from_config_settings() {
         let tempdir = TempDir::new().expect("tempdir");
-        let whitelist_path = tempdir.path().join("whitelist.txt");
+        let root = test_root(&tempdir);
+        let whitelist_path = root.join("whitelist.txt");
         fs::write(&whitelist_path, "203.0.113.10\n").expect("write whitelist");
-        let logger = AuditLogger::new(tempdir.path().join("audit.jsonl"), false).expect("logger");
+        let logger = AuditLogger::new(root.join("audit.jsonl"), false).expect("logger");
         let config = ConfigFile {
             users: Vec::new(),
             settings: SettingsConfig {
                 whitelist_path: Some(whitelist_path),
                 ..SettingsConfig::default()
             },
+            security: crate::secrets::SecurityConfig::default(),
             fail2ban: Some(Fail2banConfig::default()),
         };
 

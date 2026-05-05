@@ -7,6 +7,7 @@ mod crypto_policy;
 mod error;
 mod keys;
 mod reload;
+mod secrets;
 mod ssh;
 
 use std::path::PathBuf;
@@ -21,7 +22,8 @@ use config::{ConfigStore, DEFAULT_LISTEN, load_config_file, resolve_paths};
 use error::Result;
 use keys::ensure_user_key_root_directory;
 use reload::install_sighup_reload_notifier;
-use tracing::info;
+use secrets::SecretManager;
+use tracing::{info, warn};
 
 #[derive(Debug, Parser, Clone)]
 #[command(
@@ -37,6 +39,7 @@ use tracing::info;
       --servers     /etc/centralssh/servers.toml
       --known-hosts /etc/centralssh/known_hosts
       --user-key-root /var/lib/centralssh/keys
+      --master-key /etc/centralssh/master.key
       --per-user-per-server true
       --audit-log   /var/log/centralssh/audit.jsonl
       --whitelist   disabled unless configured
@@ -48,6 +51,8 @@ use tracing::info;
 
   Production mode requirements:
     - root-owned config, known_hosts, host key, and audit files
+    - configured security.kek_provider and master.key
+    - encrypted config secrets and encrypted outbound private keys
     - mode 600 for files
     - mode 700 for key directories
 
@@ -57,8 +62,8 @@ use tracing::info;
     - set false only for controlled/testing environments"
 )]
 struct Cli {
-    #[arg(long, env = "CENTRALSSH_LISTEN", default_value = DEFAULT_LISTEN)]
-    listen: String,
+    #[arg(long, env = "CENTRALSSH_LISTEN")]
+    listen: Option<String>,
 
     #[arg(long, env = "CENTRALSSH_CONFIG")]
     config: Option<PathBuf>,
@@ -74,6 +79,9 @@ struct Cli {
 
     #[arg(long, env = "CENTRALSSH_AUDIT_LOG")]
     audit_log: Option<PathBuf>,
+
+    #[arg(long, env = "CENTRALSSH_MASTER_KEY")]
+    master_key: Option<PathBuf>,
 
     #[arg(long, env = "CENTRALSSH_WHITELIST")]
     whitelist: Option<PathBuf>,
@@ -119,17 +127,47 @@ async fn run() -> Result<()> {
         cli.known_hosts.clone(),
         cli.user_key_root.clone(),
         cli.audit_log.clone(),
+        cli.master_key.clone(),
         cli.whitelist.clone(),
         cli.per_user_per_server,
         Some(&seed_config.settings),
+        Some(&seed_config.security),
     );
+
+    let secrets = SecretManager::new(
+        &seed_config.security,
+        paths.master_key_path.clone(),
+        cli.enforce_strict_security,
+    )?;
+    if seed_config.security.allow_insecure_boot.unwrap_or(false) {
+        warn!(
+            "CRITICAL SECURITY WARNING: allow_insecure_boot=true; startup may permit plaintext bootstrap state"
+        );
+    }
+    if let Some(secrets) = &secrets {
+        secrets.readiness_check()?;
+    } else if !cli.enforce_strict_security {
+        warn!(
+            "non-strict security mode without KEK provider; bootstrap may create plaintext local development state"
+        );
+    }
+
+    let listen = resolve_listen(cli.listen.clone(), cli.enforce_strict_security);
+    if !cli.enforce_strict_security && cli.listen.is_none() {
+        warn!(
+            listen = %listen,
+            "non-strict security mode defaulted listen address to localhost"
+        );
+    }
+
     ensure_user_key_root_directory(&paths.user_key_root)?;
 
-    let config_store = ConfigStore::load(paths.clone(), cli.enforce_strict_security).await?;
+    let config_store =
+        ConfigStore::load(paths.clone(), cli.enforce_strict_security, secrets.clone()).await?;
     let auth = AuthEngine::new()?;
     let audit = AuditLogger::new(paths.audit_log_path.clone(), cli.enforce_strict_security)?;
     let abuse =
-        AbuseTracker::from_config(&config_store.snapshot().await.config, audit.clone()).await?;
+        AbuseTracker::from_config(&config_store.snapshot().await?.config, audit.clone()).await?;
     info!(audit_log = %audit.path().display(), "audit logger initialized");
     let reload_notify = Arc::new(tokio::sync::Notify::new());
 
@@ -138,6 +176,7 @@ async fn run() -> Result<()> {
         auth,
         audit,
         abuse,
+        secrets,
         strict_security: cli.enforce_strict_security,
         reload_notify: reload_notify.clone(),
     });
@@ -162,19 +201,23 @@ async fn run() -> Result<()> {
 
     let host_key_path = host_key_path_from_config_dir(&paths.config_path);
     info!(
-        listen = %cli.listen,
+        listen = %listen,
         host_key = %host_key_path.display(),
         "starting gateway server"
     );
 
-    let probe_listener = std::net::TcpListener::bind(&cli.listen)?;
+    let probe_listener = std::net::TcpListener::bind(&listen)?;
     drop(probe_listener);
 
-    ssh::run_gateway_server(
-        &cli.listen,
-        &host_key_path,
-        app,
-        cli.enforce_strict_security,
-    )
-    .await
+    ssh::run_gateway_server(&listen, &host_key_path, app, cli.enforce_strict_security).await
+}
+
+fn resolve_listen(explicit_listen: Option<String>, strict_security: bool) -> String {
+    explicit_listen.unwrap_or_else(|| {
+        if strict_security {
+            DEFAULT_LISTEN.to_string()
+        } else {
+            "127.0.0.1:7788".to_string()
+        }
+    })
 }

@@ -10,7 +10,7 @@ use crate::audit::{AuditEvent, AuditLogger, AuditResult};
 use crate::auth::AuthEngine;
 use crate::config::ConfigStore;
 use crate::error::Result;
-use crate::keys::ensure_private_keys_for_config_users;
+use crate::secrets::SecretManager;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -18,6 +18,7 @@ pub struct AppState {
     pub auth: AuthEngine,
     pub audit: AuditLogger,
     pub abuse: AbuseTracker,
+    pub secrets: Option<SecretManager>,
     pub strict_security: bool,
     pub reload_notify: Arc<Notify>,
 }
@@ -37,11 +38,15 @@ impl AppState {
             .config_store
             .migrate_bootstrap_passwords(&self.auth)
             .await?;
-        let snapshot = self.config_store.snapshot().await;
-        let key_report = ensure_private_keys_for_config_users(
+        let snapshot = self.config_store.snapshot().await?;
+        let key_report = crate::keys::ensure_private_keys_for_config_users_with_secrets(
             &self.config_store.paths.user_key_root,
             &snapshot.config,
             self.config_store.paths.per_user_per_server,
+            self.secrets.as_ref(),
+            self.secrets
+                .as_ref()
+                .is_some_and(SecretManager::encrypted_keys_required),
         )?;
 
         Ok(BootstrapReport {
@@ -58,9 +63,15 @@ impl AppState {
             self.reload_notify.notified().await;
             let result = self.config_store.reload(self.strict_security).await;
             if result.is_ok() {
-                let snapshot = self.config_store.snapshot().await;
-                if let Err(error) = self.abuse.reload_from_config(&snapshot.config).await {
-                    error!(error = %error, "fail2ban reload failed");
+                match self.config_store.snapshot().await {
+                    Ok(snapshot) => {
+                        if let Err(error) = self.abuse.reload_from_config(&snapshot.config).await {
+                            error!(error = %error, "fail2ban reload failed");
+                        }
+                    }
+                    Err(error) => {
+                        error!(error = %error, "config snapshot decrypt failed after reload");
+                    }
                 }
             }
             if let Err(error) = &result {

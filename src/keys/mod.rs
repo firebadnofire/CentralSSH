@@ -4,11 +4,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use ssh_key::{LineEnding, PrivateKey};
+use zeroize::Zeroizing;
 
 use crate::config::{
     ConfigFile, validate_directory_security, validate_file_security, validate_path_has_no_symlinks,
 };
 use crate::error::{CentralSshError, Result};
+use crate::secrets::{SecretManager, is_encrypted_value};
 
 const PRIVATE_KEY_FILENAME: &str = "id_ed25519";
 const PUBLIC_KEY_FILENAME: &str = "id_ed25519.pub";
@@ -67,6 +69,22 @@ pub fn ensure_private_keys_for_config_users(
     config: &ConfigFile,
     per_user_per_server: bool,
 ) -> Result<KeyBootstrapReport> {
+    ensure_private_keys_for_config_users_with_secrets(
+        user_key_root,
+        config,
+        per_user_per_server,
+        None,
+        false,
+    )
+}
+
+pub fn ensure_private_keys_for_config_users_with_secrets(
+    user_key_root: &Path,
+    config: &ConfigFile,
+    per_user_per_server: bool,
+    secrets: Option<&SecretManager>,
+    require_encrypted_keys: bool,
+) -> Result<KeyBootstrapReport> {
     let mut report = KeyBootstrapReport::default();
 
     ensure_real_directory(user_key_root)?;
@@ -90,7 +108,9 @@ pub fn ensure_private_keys_for_config_users(
                 user_dir.clone()
             };
 
-            let key_report = ensure_keypair_files(&key_dir)?;
+            let subject = private_key_subject(&user.name, server_name, per_user_per_server);
+            let key_report =
+                ensure_keypair_files(&key_dir, &subject, secrets, require_encrypted_keys)?;
             if key_report.created_private_key {
                 report.created_private_keys += 1;
             }
@@ -105,6 +125,43 @@ pub fn ensure_private_keys_for_config_users(
     }
 
     Ok(report)
+}
+
+pub fn read_private_key_text_for_runtime(
+    private_key_path: &Path,
+    subject: &str,
+    secrets: Option<&SecretManager>,
+    require_encrypted_key: bool,
+) -> Result<Zeroizing<String>> {
+    validate_existing_regular_file(private_key_path)?;
+    let stored = Zeroizing::new(fs::read_to_string(private_key_path)?);
+    let stored_trimmed = stored.trim();
+    if is_encrypted_value(stored_trimmed) {
+        let secrets = secrets.ok_or_else(|| {
+            CentralSshError::InvalidConfig(format!(
+                "encrypted private key '{}' requires a configured KEK provider",
+                private_key_path.display()
+            ))
+        })?;
+        return secrets.decrypt_string("ssh/private_key", subject, stored_trimmed);
+    }
+
+    if require_encrypted_key {
+        return Err(CentralSshError::InvalidConfig(format!(
+            "private key '{}' must be encrypted in strict/encrypted key mode",
+            private_key_path.display()
+        )));
+    }
+
+    Ok(stored)
+}
+
+pub fn private_key_subject(username: &str, server_name: &str, per_user_per_server: bool) -> String {
+    if per_user_per_server {
+        format!("{username}/{server_name}")
+    } else {
+        username.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -156,7 +213,12 @@ fn ensure_real_directory(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn ensure_keypair_files(user_dir: &Path) -> Result<KeypairFileReport> {
+fn ensure_keypair_files(
+    user_dir: &Path,
+    subject: &str,
+    secrets: Option<&SecretManager>,
+    require_encrypted_key: bool,
+) -> Result<KeypairFileReport> {
     let private_key_path = user_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = user_dir.join(PUBLIC_KEY_FILENAME);
     let mut private_key_created = false;
@@ -165,8 +227,13 @@ fn ensure_keypair_files(user_dir: &Path) -> Result<KeypairFileReport> {
     validate_path_has_no_symlinks(&public_key_path)?;
 
     let private_key = if private_key_path.exists() {
-        validate_existing_regular_file(&private_key_path)?;
-        ssh_key::private::PrivateKey::read_openssh_file(&private_key_path).map_err(|error| {
+        let private_key_text = read_private_key_text_for_runtime(
+            &private_key_path,
+            subject,
+            secrets,
+            require_encrypted_key,
+        )?;
+        ssh_key::private::PrivateKey::from_openssh(&*private_key_text).map_err(|error| {
             CentralSshError::InvalidConfig(format!(
                 "failed to load existing user private key '{}': {error}",
                 private_key_path.display()
@@ -174,23 +241,33 @@ fn ensure_keypair_files(user_dir: &Path) -> Result<KeypairFileReport> {
         })?
     } else {
         private_key_created = true;
-        let private_key = PrivateKey::random(
-            &mut ssh_key::rand_core::OsRng,
-            ssh_key::Algorithm::Ed25519,
-        )
-        .map_err(|error| {
-            CentralSshError::InvalidConfig(format!("failed to create user private key: {error}"))
-        })?;
+        let private_key =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+                .map_err(|error| {
+                    CentralSshError::InvalidConfig(format!(
+                        "failed to create user private key: {error}"
+                    ))
+                })?;
         let encoded = private_key.to_openssh(LineEnding::LF).map_err(|error| {
             CentralSshError::InvalidConfig(format!("failed to encode user private key: {error}"))
         })?;
+        let stored_private_key = if let Some(secrets) = secrets {
+            if secrets.encrypted_keys_enabled() {
+                secrets.encrypt_string("ssh/private_key", subject, &encoded)?
+            } else {
+                encoded.to_string()
+            }
+        } else {
+            encoded.to_string()
+        };
 
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o600)
             .open(&private_key_path)?;
-        file.write_all(encoded.as_bytes())?;
+        file.write_all(stored_private_key.as_bytes())?;
+        file.write_all(b"\n")?;
         file.sync_all()?;
         fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))?;
         private_key
@@ -200,14 +277,9 @@ fn ensure_keypair_files(user_dir: &Path) -> Result<KeypairFileReport> {
         validate_existing_regular_file(&public_key_path)?;
         false
     } else {
-        let encoded = private_key
-            .public_key()
-            .to_openssh()
-            .map_err(|error| {
-                CentralSshError::InvalidConfig(format!(
-                    "failed to encode user public key: {error}"
-                ))
-            })?;
+        let encoded = private_key.public_key().to_openssh().map_err(|error| {
+            CentralSshError::InvalidConfig(format!("failed to encode user public key: {error}"))
+        })?;
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -268,8 +340,13 @@ mod tests {
                 allowed_servers: vec!["git".to_string(), "httpd".to_string()],
             }],
             settings: SettingsConfig::default(),
+            security: crate::secrets::SecurityConfig::default(),
             fail2ban: None,
         }
+    }
+
+    fn test_root(tempdir: &TempDir) -> PathBuf {
+        fs::canonicalize(tempdir.path()).expect("canonical tempdir")
     }
 
     #[test]
@@ -282,8 +359,7 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("chmod root");
         fs::set_permissions(root.join("alice"), fs::Permissions::from_mode(0o700))
             .expect("chmod user");
-        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700))
-            .expect("chmod server");
+        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700)).expect("chmod server");
         let key = server_dir.join("id_ed25519");
         fs::write(&key, b"key").expect("write key");
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("chmod key");
@@ -346,7 +422,7 @@ mod tests {
     #[test]
     fn ensure_private_keys_for_config_users_creates_missing_tree() {
         let tempdir = TempDir::new().expect("tempdir");
-        let root = tempdir.path().join("keys");
+        let root = test_root(&tempdir).join("keys");
 
         let report =
             ensure_private_keys_for_config_users(&root, &valid_config(), true).expect("ensure");
@@ -369,7 +445,7 @@ mod tests {
     #[test]
     fn ensure_private_keys_for_config_users_creates_single_key_in_user_only_mode() {
         let tempdir = TempDir::new().expect("tempdir");
-        let root = tempdir.path().join("keys");
+        let root = test_root(&tempdir).join("keys");
 
         let report =
             ensure_private_keys_for_config_users(&root, &valid_config(), false).expect("ensure");
@@ -390,20 +466,17 @@ mod tests {
     #[test]
     fn ensure_private_keys_for_config_users_preserves_existing_keys() {
         let tempdir = TempDir::new().expect("tempdir");
-        let root = tempdir.path().join("keys");
+        let root = test_root(&tempdir).join("keys");
         let user_dir = root.join("alice");
         let server_dir = user_dir.join("git");
         fs::create_dir_all(&server_dir).expect("mkdir");
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("chmod root");
         fs::set_permissions(&user_dir, fs::Permissions::from_mode(0o700)).expect("chmod user");
-        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700))
-            .expect("chmod server");
+        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700)).expect("chmod server");
 
-        let private_key = PrivateKey::random(
-            &mut ssh_key::rand_core::OsRng,
-            ssh_key::Algorithm::Ed25519,
-        )
-        .expect("private key");
+        let private_key =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+                .expect("private key");
         let existing_key = server_dir.join("id_ed25519");
         fs::write(
             &existing_key,
@@ -426,5 +499,32 @@ mod tests {
         assert_eq!(report.created_public_keys, 1);
         assert_eq!(contents, encoded_private_key.as_bytes());
         assert!(server_dir.join("id_ed25519.pub").is_file());
+    }
+
+    #[test]
+    fn ensure_private_keys_for_config_users_writes_encrypted_private_key_when_enabled() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let base = test_root(&tempdir);
+        let root = base.join("keys");
+        let secrets = crate::secrets::test_raw_file_manager(&base.join("secrets"), false, true);
+
+        let report = ensure_private_keys_for_config_users_with_secrets(
+            &root,
+            &valid_config(),
+            true,
+            Some(&secrets),
+            true,
+        )
+        .expect("ensure");
+
+        let private_key_path = root.join("alice/git/id_ed25519");
+        let stored = fs::read_to_string(&private_key_path).expect("read encrypted key");
+        assert!(crate::secrets::is_encrypted_value(stored.trim()));
+        let subject = private_key_subject("alice", "git", true);
+        let plaintext =
+            read_private_key_text_for_runtime(&private_key_path, &subject, Some(&secrets), true)
+                .expect("decrypt private key");
+        assert!(plaintext.contains("BEGIN OPENSSH PRIVATE KEY"));
+        assert_eq!(report.created_private_keys, 2);
     }
 }

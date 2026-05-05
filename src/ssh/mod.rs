@@ -273,7 +273,7 @@ Use the plaintext secret or URI above.\n\n"
     }
 
     async fn allowed_server_entries(&self, username: &str) -> Result<Vec<(String, String)>> {
-        let snapshot = self.state.config_store.snapshot().await;
+        let snapshot = self.state.config_store.snapshot().await?;
         let user = snapshot
             .config
             .users
@@ -473,7 +473,12 @@ Use the plaintext secret or URI above.\n\n"
         username: String,
         password: String,
     ) -> std::result::Result<Auth, russh::Error> {
-        let snapshot = self.state.config_store.snapshot().await;
+        let snapshot = self
+            .state
+            .config_store
+            .snapshot()
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
         let matched_user = snapshot
             .config
             .users
@@ -685,7 +690,12 @@ Use the plaintext secret or URI above.\n\n"
             return Ok(Self::reject_to_keyboard_interactive());
         }
 
-        let snapshot = self.state.config_store.snapshot().await;
+        let snapshot = self
+            .state
+            .config_store
+            .snapshot()
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
         let user_exists = snapshot
             .config
             .users
@@ -1030,8 +1040,14 @@ Use the plaintext secret or URI above.\n\n"
                 return Ok(Self::reject_to_keyboard_interactive());
             }
 
+            let snapshot = self
+                .state
+                .config_store
+                .snapshot()
+                .await
+                .map_err(|inner| russh::Error::IO(std::io::Error::other(inner.to_string())))?;
             if let Err(error) = self.state.auth.verify_password_constant_time(
-                &self.state.config_store.snapshot().await.config.users,
+                &snapshot.config.users,
                 &username,
                 login_password.as_str(),
             ) {

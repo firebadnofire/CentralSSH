@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use russh::client::{self, Handle as ClientHandle};
-use russh::keys::{PrivateKeyWithHashAlg, check_known_hosts_path, load_secret_key};
+use russh::keys::{PrivateKeyWithHashAlg, check_known_hosts_path, decode_secret_key};
 use russh::server;
 use russh::{
     Channel, ChannelId, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, CryptoVec, Disconnect, Sig,
@@ -15,7 +15,9 @@ use tokio::sync::Mutex;
 use crate::app::AppState;
 use crate::audit::{AuditEvent, AuditLogger, AuditResult};
 use crate::error::{CentralSshError, Result};
-use crate::keys::resolve_user_server_private_key_path;
+use crate::keys::{
+    private_key_subject, read_private_key_text_for_runtime, resolve_user_server_private_key_path,
+};
 use crate::ssh::apply_client_transport_config;
 
 #[derive(Debug, Clone)]
@@ -276,8 +278,23 @@ impl ProxySession {
             .await
             .map_err(|error| CentralSshError::Ssh(error.to_string()))?;
 
-        let private_key = load_secret_key(&private_key_path, None).map_err(|error| {
-            CentralSshError::Ssh(format!("failed to load private key: {error}"))
+        let private_key_subject = private_key_subject(
+            &username,
+            &target.name,
+            app_state.config_store.paths.per_user_per_server,
+        );
+        let private_key_text = read_private_key_text_for_runtime(
+            &private_key_path,
+            &private_key_subject,
+            app_state.secrets.as_ref(),
+            app_state
+                .secrets
+                .as_ref()
+                .is_some_and(crate::secrets::SecretManager::encrypted_keys_required),
+        )
+        .map_err(|error| CentralSshError::Ssh(format!("failed to read private key: {error}")))?;
+        let private_key = decode_secret_key(&private_key_text, None).map_err(|error| {
+            CentralSshError::Ssh(format!("failed to parse private key: {error}"))
         })?;
 
         let best_rsa_hash = target_handle

@@ -35,6 +35,7 @@ CentralSSH uses a small set of files and directories:
 - Main config: `/etc/centralssh/config.toml`
 - Server map: `/etc/centralssh/servers.toml`
 - Target host trust store: `/etc/centralssh/known_hosts`
+- Master keyset: `/etc/centralssh/master.key`
 - Gateway host key: `/etc/centralssh/host_ed25519`
 - Audit log: `/var/log/centralssh/audit.jsonl`
 - Binary: `/usr/local/sbin/centralssh`
@@ -78,6 +79,7 @@ Supported CLI flags:
 - `--user-key-root`
 - `--per-user-per-server`
 - `--audit-log`
+- `--master-key`
 - `--enforce-strict-security`
 
 Matching environment variables:
@@ -89,11 +91,16 @@ Matching environment variables:
 - `CENTRALSSH_USER_KEY_ROOT`
 - `PER_USER_PER_SERVER`
 - `CENTRALSSH_AUDIT_LOG`
+- `CENTRALSSH_MASTER_KEY`
 - `CENTRALSSH_ENFORCE_STRICT_SECURITY`
 
-Default listen address:
+Default listen address in strict mode:
 
 - `0.0.0.0:7788`
+
+Default listen address in non-strict mode when no listen override is provided:
+
+- `127.0.0.1:7788`
 
 ## 6. `config.toml`
 
@@ -115,6 +122,17 @@ known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
 min_password_policy = 12
+
+# Production strict mode requires encrypted values and a real provider.
+# [security]
+# master_key_path = "/etc/centralssh/master.key"
+# encrypted_config = true
+# encrypted_keys = true
+#
+# [security.kek_provider]
+# kind = "tpm2-command"
+# command_path = "/usr/local/sbin/centralssh-tpm-unseal"
+# expected_sha256 = "<64 hex chars>"
 
 [fail2ban]
 enabled = true
@@ -149,6 +167,18 @@ ips = ["127.0.0.1/32", "::1/128", "192.168.0.0/16"]
 - `enforce_password_policy`: optional boolean; defaults to `true`
 - `min_password_policy`: optional integer minimum password length; defaults to `12`
 
+### Security fields
+
+- `master_key_path`: optional override for the keyset file; defaults to `/etc/centralssh/master.key`
+- `encrypted_config`: encrypts password and TOTP config fields on writes
+- `encrypted_keys`: encrypts outbound private-key file contents on creation
+- `allow_insecure_boot`: explicit emergency escape hatch; logs a critical warning every startup
+- `kek_provider.kind`: `tpm2-command`, `external-command`, `passphrase-env`, or non-strict-only `raw-file`
+- command providers require absolute `command_path`; no shell is used
+- command provider output must be exactly 32 bytes
+- non-empty `command_args` are rejected unless they exactly match `allowed_command_args`
+- `expected_sha256` optionally pins the provider binary hash
+
 ### Fail2ban fields
 
 - `enabled`: master switch for internal abuse tracking
@@ -176,6 +206,8 @@ CentralSSH rejects config at load or reload time if:
 - a bootstrap plaintext password is used without `must_change_password=true`
 - a bootstrap plaintext password is one of the documented placeholder values
 - a TOTP secret cannot be parsed into a valid runtime TOTP config
+- strict mode is enabled without a KEK provider and no explicit insecure boot escape hatch
+- strict mode uses plaintext config secrets while encrypted config is required
 
 ## 7. `servers.toml`
 
@@ -229,7 +261,7 @@ Current parameters:
 Bootstrap behavior:
 
 - If `users[].password` is not an Argon2id string, CentralSSH treats it as a bootstrap plaintext password.
-- On startup, it hashes that password and atomically rewrites `config.toml`.
+- On startup, it hashes that password and atomically rewrites `config.toml`, but only after KEK/provider readiness succeeds.
 - It also forces `must_change_password=true`.
 
 Operational meaning:
@@ -238,6 +270,10 @@ Operational meaning:
 - After the first process start, those passwords are replaced on disk by Argon2id hashes.
 - Operators should still treat any plaintext bootstrap secret as high risk until the service has started and rewritten config.
 - The packaged example uses a rejected placeholder. Replace it with a unique temporary password before first start.
+
+Strict production mode should use encrypted config values. In that mode,
+CentralSSH stores encrypted envelopes in `config.toml`, decrypts a runtime
+snapshot only when needed, and keeps the stored `ConfigStore` state encrypted.
 
 Password policy when enabled:
 
@@ -325,6 +361,7 @@ Validation rules:
 - strict mode requires real directories and files with exact permissions
 - startup creates missing user directories, server directories when enabled, and `id_ed25519` files
 - existing private keys are left untouched and are not overwritten
+- with `security.encrypted_keys=true`, `id_ed25519` contains an encrypted envelope, not plaintext OpenSSH private-key text
 
 Recommended production layout:
 
@@ -453,6 +490,10 @@ Fields currently written:
 - `ban_duration_seconds`
 - `ban_until`
 
+Audit data is classified operationally as public, sensitive, or secret. Secret
+values must never be logged. Key IDs are not logged in user-scoped audit events,
+and decrypted secret lengths are not logged.
+
 Result values:
 
 - `success`
@@ -501,9 +542,13 @@ Operational meaning:
 
 In strict mode, CentralSSH requires:
 
+- configured KEK provider unless `allow_insecure_boot=true`
+- encrypted config secret fields unless `allow_insecure_boot=true`
+- encrypted outbound private-key files unless `allow_insecure_boot=true`
 - config file: regular file, mode `0600`, root-owned
 - servers file: regular file, mode `0600`, root-owned
 - known_hosts file: regular file, mode `0600`, root-owned
+- master.key file: regular file, mode `0600`, root-owned when a provider is configured
 - user key root: directory, mode `0700`, root-owned
 - outbound key paths under that root to also satisfy strict checks
 - audit log: regular file, mode `0600`, root-owned
@@ -516,6 +561,24 @@ Even outside strict mode:
 - key paths still have to be real files and directories
 
 Non-strict mode is useful for local development, not for production deployment.
+
+`master.key` must be a regular root-owned `0600` file in strict mode when a
+provider is configured. The keyset schema is:
+
+```toml
+version = 1
+active_key_id = "key-2026-05"
+mac = "hmac-sha256:<hex>"
+
+[[keys]]
+key_id = "key-2026-05"
+wrapped_key = "<hex provider-wrapped 32-byte master key>"
+provider = "tpm2-command"
+created_at = "2026-05-05T00:00:00Z"
+```
+
+The active key must be unique. The MAC covers the canonical keyset body and is
+verified with the active unwrapped key before secrets are decrypted.
 
 ## 20. Safe writes and config mutation
 
@@ -533,6 +596,10 @@ This rewrite path is used for:
 - bootstrap password migration
 - password changes
 - TOTP enrollment persistence
+
+When `security.encrypted_config=true`, rewritten password and TOTP values are
+stored as AES-256-GCM encrypted envelopes using HKDF-separated contexts:
+`config/password` and `config/totp`.
 
 Operational consequence:
 
@@ -564,6 +631,7 @@ centralssh_servers="/etc/centralssh/servers.toml"
 centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
+centralssh_master_key="/etc/centralssh/master.key"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
 ```
 
@@ -571,6 +639,8 @@ Important note:
 
 - The rc script now defaults `centralssh_user_key_root` to `/var/lib/centralssh/keys`.
 - Set `PER_USER_PER_SERVER=false` in the service environment only if you intentionally want one outbound key per user.
+- Provider commands used by rc.d must work without an interactive environment.
+- If the provider depends on TPM, Vault, KMS, or network identity, order the service after that dependency is ready; the shipped rc.d script is intentionally conservative and does not invent provider-specific dependencies.
 
 ### Linux
 
@@ -597,6 +667,7 @@ Important note:
 - creates the log directory
 - installs example `config.toml` and `servers.toml` only if missing
 - creates empty `known_hosts` and `audit.jsonl` only if missing
+- does not generate `master.key`; operators must provision it with their chosen KEK provider
 - installs either the FreeBSD rc.d script or the systemd unit
 
 It does not fully provision per-user per-server outbound keys for you.
@@ -605,17 +676,20 @@ It does not fully provision per-user per-server outbound keys for you.
 
 1. Build and install CentralSSH.
 2. Decide and standardize your outbound key root.
-3. Create or verify:
+3. Choose KEK provider priority:
+   TPM first when available, then Vault/KMS via machine identity, then `passphrase-env` only as explicit opt-in.
+4. Create and verify `master.key`; do not start strict mode until provider readiness succeeds.
+5. Create or verify:
    `/etc/centralssh/config.toml`
    `/etc/centralssh/servers.toml`
    `/etc/centralssh/known_hosts`
    `/var/log/centralssh/audit.jsonl`
-4. Create outbound private key directories for each user/server pair.
-5. Install the correct target public keys on the target systems.
-6. Populate `known_hosts` with `cssh-keyscan`.
-7. Start the service.
-8. Verify a full login for one real user.
-9. Verify target access and audit log output.
+6. Create outbound private key directories for each user/server pair.
+7. Install the correct target public keys on the target systems.
+8. Populate `known_hosts` with `cssh-keyscan`.
+9. Start the service.
+10. Verify a full login for one real user.
+11. Verify target access and audit log output.
 
 ## 24. What to standardize before rollout
 
@@ -637,7 +711,7 @@ Useful checks after install:
 
 ```bash
 sudo ls -ld /etc/centralssh /var/log/centralssh
-sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
+sudo ls -l /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /etc/centralssh/master.key /etc/centralssh/host_ed25519 /var/log/centralssh/audit.jsonl
 sudo find /var/lib/centralssh/keys -type d -exec ls -ld {} \;
 sudo find /var/lib/centralssh/keys -type f -exec ls -l {} \;
 ```
@@ -685,6 +759,7 @@ Operator caution:
 - The SSH transport policy is centralized in `src/crypto_policy.rs`.
 - Current SSH transport still depends on classical Curve25519 key exchange because `russh 0.53.0` does not provide a hybrid/PQC KEX.
 - See `SECURITY-SNDL.md` before using this gateway for data that must remain confidential for years.
+- At-rest encryption does not defeat RAM extraction, live process compromise, malicious provider binaries, or future quantum attacks against captured classical SSH sessions.
 
 ## 28. Troubleshooting
 
@@ -696,6 +771,8 @@ Check:
 - ownership
 - modes
 - symlink-free paths
+- KEK provider readiness
+- valid `master.key` MAC and active key
 - TOML validity
 - server names referenced by users
 
@@ -766,6 +843,7 @@ For a clean operator runbook, use this layout:
 - `/etc/centralssh/config.toml`
 - `/etc/centralssh/servers.toml`
 - `/etc/centralssh/known_hosts`
+- `/etc/centralssh/master.key`
 - `/etc/centralssh/host_ed25519`
 - `/var/lib/centralssh/keys/<user>/<server>/id_ed25519`
 - `/var/log/centralssh/audit.jsonl`
@@ -777,6 +855,7 @@ Then update service configuration so the process is launched with:
 - `--known-hosts /etc/centralssh/known_hosts`
 - `--user-key-root /var/lib/centralssh/keys`
 - `--audit-log /var/log/centralssh/audit.jsonl`
+- `--master-key /etc/centralssh/master.key`
 
 Leave `PER_USER_PER_SERVER=true` unless you are deliberately sharing one outbound key across all allowed targets for each user.
 

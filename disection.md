@@ -14,6 +14,7 @@ Main runtime modules:
 - `src/auth/mod.rs`: Argon2id password handling, TOTP handling, and in-memory token-bucket rate limiting.
 - `src/abuse.rs`: fail2ban-style IP abuse tracking, tarpitting, ban persistence, and whitelist loading.
 - `src/audit/mod.rs`: JSONL audit logging with file security enforcement.
+- `src/secrets.rs`: KEK provider readiness, structured `master.key`, encrypted envelope handling, and context-separated secret encryption.
 - `src/keys/mod.rs`: outbound per-user key path resolution and idempotent startup key generation.
 - `src/ssh/mod.rs`: SSH server, keyboard-interactive auth state machine, target selection flow, and server host key management.
 - `src/ssh/proxy.rs`: outbound SSH client connection and transparent channel/request bridging to the selected target.
@@ -43,17 +44,19 @@ Entry path in `src/main.rs`:
 2. Parse CLI flags and env-backed overrides with `clap`.
 3. Load the seed config first so `settings` can influence downstream path resolution.
 4. Resolve effective runtime paths with `config::resolve_paths`.
-5. Ensure the outbound key root directory exists.
-6. Load validated config state into `ConfigStore`.
-7. Construct `AuthEngine`, `AuditLogger`, and `AbuseTracker`.
-8. Build shared `AppState`.
-9. Install a `SIGHUP` notifier and spawn the reload loop.
-10. Run bootstrap:
+5. Construct the optional `SecretManager` from `[security]`.
+6. In strict mode, prove KEK/provider and `master.key` readiness before any bootstrap mutation.
+7. Ensure the outbound key root directory exists.
+8. Load validated config state into `ConfigStore`; encrypted config secrets are decrypted only for runtime snapshots.
+9. Construct `AuthEngine`, `AuditLogger`, and `AbuseTracker`.
+10. Build shared `AppState`.
+11. Install a `SIGHUP` notifier and spawn the reload loop.
+12. Run bootstrap:
    - migrate plaintext bootstrap passwords to Argon2id
    - create any missing outbound user key directories and keypairs
-11. Derive the gateway host key path from the config directory as `<config_dir>/host_ed25519`.
-12. Probe-bind the requested listen address once before starting the SSH server.
-13. Start the russh server with keyboard-interactive auth only.
+13. Derive the gateway host key path from the config directory as `<config_dir>/host_ed25519`.
+14. Probe-bind the requested listen address once before starting the SSH server.
+15. Start the russh server with keyboard-interactive auth only.
 
 The CLI currently exposes:
 
@@ -63,11 +66,14 @@ The CLI currently exposes:
 - `--known-hosts`
 - `--user-key-root`
 - `--audit-log`
+- `--master-key`
 - `--whitelist`
 - `--per-user-per-server`
 - `--enforce-strict-security`
 
 Matching environment variables are the `CENTRALSSH_*` names declared on the CLI flags, except key layout uses `PER_USER_PER_SERVER`.
+
+Non-strict mode defaults to `127.0.0.1:7788` if no explicit listen override is supplied. Strict mode keeps the compiled default `0.0.0.0:7788`.
 
 ## 3. Shared runtime state
 
@@ -77,15 +83,19 @@ Matching environment variables are the `CENTRALSSH_*` names declared on the CLI 
 - `auth: AuthEngine`
 - `audit: AuditLogger`
 - `abuse: AbuseTracker`
+- `secrets: Option<SecretManager>`
 - `strict_security: bool`
 - `reload_notify: Arc<Notify>`
 
 `AppState::bootstrap()` does only two things:
 
 1. `ConfigStore::migrate_bootstrap_passwords()`
-2. `keys::ensure_private_keys_for_config_users()`
+2. `keys::ensure_private_keys_for_config_users_with_secrets()`
 
-That means bootstrap is intentionally idempotent and bounded to credential migration plus key material creation.
+Bootstrap is intentionally idempotent and bounded to credential migration plus
+key material creation. In strict mode this function is reached only after
+`SecretManager::readiness_check()` succeeds, so provider failure cannot cause
+plaintext password migration, key creation, or config writes.
 
 ## 4. Configuration system
 
@@ -95,6 +105,7 @@ Primary structs in `src/config/mod.rs`:
 
 - `ConfigFile`
 - `SettingsConfig`
+- `SecurityConfig`
 - `UserRecord`
 - `ServersFile`
 - `EffectivePaths`
@@ -114,6 +125,7 @@ Important exception:
 - `config.toml` itself must be found before settings can be read, so its path cannot depend on settings inside the file.
 - `servers.toml` has no `settings` override inside `config.toml`; it is controlled by CLI/env or the compiled default.
 - the gateway host key is not separately configurable; it is derived from the config directory as `<config_dir>/host_ed25519`.
+- `master.key` defaults to `/etc/centralssh/master.key`, can be overridden by `--master-key` / `CENTRALSSH_MASTER_KEY`, or by `security.master_key_path`.
 
 ### 4.2 Load and reload
 
@@ -123,10 +135,12 @@ Important exception:
 2. read `servers.toml`
 3. apply runtime overrides back into the in-memory config
 4. validate filesystem security rules
-5. validate config semantics
-6. install the result as a new immutable snapshot
+5. validate encrypted-secret policy
+6. decrypt config secrets into a temporary runtime copy
+7. validate config semantics
+8. install the raw stored config as a new immutable snapshot
 
-Reload is all-or-nothing. Invalid reload input does not replace the previous active state.
+Reload is all-or-nothing. Invalid reload input does not replace the previous active state. `ConfigStore` stores encrypted config values when encryption is enabled; `snapshot()` decrypts a runtime copy for callers and can now fail if the provider or keyset is unavailable.
 
 ### 4.3 Config validation
 
@@ -155,6 +169,55 @@ Bootstrap password fields are allowed only when:
 Otherwise the password must already be an Argon2id string.
 
 The packaged example intentionally uses a rejected placeholder so operators must replace it before startup. Previously documented sample values such as `TemporaryPassword123!` and `AnotherTempPass123!` are also rejected.
+
+Strict mode now also rejects startup unless either:
+
+- `[security]` configures a KEK provider, `encrypted_config=true`, and `encrypted_keys=true`
+- or `security.allow_insecure_boot=true` is explicitly set, which logs a critical warning
+
+When encrypted config is required, `users[].password` and `users[].totp_secret`
+must be encrypted envelopes. Config rewrites encrypt new password/TOTP values
+with HKDF-separated contexts `config/password` and `config/totp`.
+
+## 4.5 Secret storage
+
+`src/secrets.rs` implements the at-rest secret layer.
+
+`master.key` schema:
+
+```toml
+version = 1
+active_key_id = "key-2026-05"
+mac = "hmac-sha256:<hex>"
+
+[[keys]]
+key_id = "key-2026-05"
+wrapped_key = "<hex provider-wrapped 32-byte master key>"
+provider = "tpm2-command"
+created_at = "2026-05-05T00:00:00Z"
+```
+
+Validation rules:
+
+- no duplicate `key_id`
+- `active_key_id` must match exactly one key entry
+- the keyset MAC is verified with the active unwrapped key
+- encrypted envelopes reference a `key_id`; config startup checks for orphaned config key IDs
+
+Supported providers:
+
+- `tpm2-command`
+- `external-command`
+- `passphrase-env`
+- `raw-file`, non-strict only
+
+Command providers use an unwrap contract: CentralSSH writes the wrapped blob to
+stdin and requires exactly 32 unwrapped bytes on stdout. The command path must
+be absolute, no shell is used, non-empty arguments must exactly match
+`allowed_command_args`, and `expected_sha256` can pin the provider binary.
+
+Secret envelopes use AES-256-GCM. HKDF derives context-specific keys for
+`config/password`, `config/totp`, `ssh/private_key`, and the `master.key` MAC.
 
 ### 4.4 Atomic mutation
 
@@ -192,10 +255,14 @@ Strict mode currently expects:
 
 - config files: regular files, mode `0600`, owner uid `0`
 - known_hosts: regular file, mode `0600`, owner uid `0`
+- master.key: regular file, mode `0600`, owner uid `0` when a provider is configured
 - audit log: regular file, mode `0600`, owner uid `0`
 - key directories: directories, mode `0700`, owner uid `0`
 - outbound private keys: regular files, mode `0600`, owner uid `0`
 - gateway host key: regular file, mode `0600`, owner uid `0`
+
+Strict mode also requires encrypted config secrets, encrypted outbound private
+keys, and a non-`raw-file` KEK provider unless `allow_insecure_boot=true`.
 
 Non-strict mode still rejects symlinked paths but does not require root ownership.
 
@@ -340,6 +407,12 @@ The project does not commit or ship long-term private keys. Deployment-specific 
 4. creates an Ed25519 keypair only when the private key is missing
 5. leaves existing keys untouched
 
+`ensure_private_keys_for_config_users_with_secrets()` is the live startup path.
+When `security.encrypted_keys=true`, new private-key file contents are encrypted
+with the `ssh/private_key` context. Existing encrypted keys are decrypted only
+long enough to parse and derive a missing public key. Existing plaintext keys
+are rejected when encrypted keys are required.
+
 This is idempotent by design. Existing private keys are treated as authoritative.
 
 ### 9.3 Runtime resolution
@@ -434,7 +507,7 @@ After a valid choice, the handler stops acting like a menu flow and switches to 
 2. constructs a russh client with the hardened client transport policy
 3. connects to `<target-host>:22`
 4. verifies the target host key with `check_known_hosts_path()` against the configured known_hosts file
-5. loads the stored private key
+5. reads the stored private key, decrypting an encrypted envelope in memory when needed
 6. authenticates to the target with SSH public key auth using the same username as the authenticated gateway user
 
 If target auth fails, the proxy session is not created.
@@ -528,6 +601,9 @@ Current algorithm choices:
 Legacy SSH choices such as SHA-1 `ssh-rsa`, CBC ciphers, and classic DH groups are intentionally absent.
 
 This is a classical SSH policy with forward secrecy and reduced legacy exposure, not a post-quantum transport. Captured Curve25519 SSH handshakes remain vulnerable to a future cryptographically relevant quantum computer. `russh 0.53.0` does not currently provide a production hybrid ML-KEM/Kyber SSH key exchange, so the repository documents this blocker in `SECURITY-SNDL.md` and keeps algorithm selection centralized for migration.
+
+At-rest encryption does not defeat RAM extraction, live system compromise,
+malicious provider binaries, or operator mis-provisioning of wrapped keys.
 
 ## 14. Error model
 
