@@ -116,6 +116,7 @@ sudo make install
 `make install`:
 
 - Installs `centralssh` and `cssh-keyscan`.
+- Uses `$(CARGO_TARGET_DIR)/$(PROFILE)/centralssh` for the staged binary path, so cached CI builds do not need Cargo outputs copied back into `target/release`.
 - Creates `/etc/centralssh` layout.
 - Installs example `config.toml` and `servers.toml` if missing.
 - Creates `/etc/centralssh/known_hosts` if missing.

@@ -1144,6 +1144,63 @@ Use the plaintext secret or URI above.\n\n"
         self.keyboard_auth_state = None;
         Ok(Auth::Accept)
     }
+
+    async fn ensure_proxy_session(
+        &mut self,
+        session_handle: server::Handle,
+    ) -> std::result::Result<bool, russh::Error> {
+        if self.proxy_session.is_some() {
+            return Ok(true);
+        }
+
+        let Some(username) = self.authenticated_username.clone() else {
+            return Ok(false);
+        };
+        let Some(target) = self.pending_target.clone() else {
+            return Ok(false);
+        };
+
+        match proxy::ProxySession::connect(
+            self.state.clone(),
+            self.session_id.clone(),
+            self.peer_ip,
+            username.clone(),
+            target.clone(),
+            session_handle,
+        )
+        .await
+        {
+            Ok(proxy_session) => {
+                self.log_event(
+                    "proxy_start",
+                    Some(&username),
+                    Some(&target.name),
+                    None,
+                    AuditResult::Success,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                self.proxy_session = Some(proxy_session);
+                Ok(true)
+            }
+            Err(error) => {
+                self.log_event(
+                    "proxy_start",
+                    Some(&username),
+                    Some(&target.name),
+                    None,
+                    AuditResult::Failure,
+                    Some(error.to_string()),
+                    None,
+                    None,
+                )
+                .await;
+                Err(russh::Error::IO(std::io::Error::other(error.to_string())))
+            }
+        }
+    }
 }
 
 fn terminal_dimensions_from_env() -> Option<(usize, usize)> {
@@ -1426,6 +1483,10 @@ impl server::Handler for GatewayHandler {
         &mut self,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        if self.ensure_proxy_session(session.handle()).await? {
+            return Ok(());
+        }
+
         let Some(username) = self.authenticated_username.clone() else {
             session.disconnect(
                 russh::Disconnect::ByApplication,
@@ -1503,8 +1564,13 @@ impl server::Handler for GatewayHandler {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
+        if let Err(error) = self.ensure_proxy_session(session.handle()).await {
+            warn!(error = %error, "failed to initialize proxy session before opening session channel");
+            return Ok(false);
+        }
+
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };
@@ -1525,8 +1591,13 @@ impl server::Handler for GatewayHandler {
         port_to_connect: u32,
         originator_address: &str,
         originator_port: u32,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
+        if let Err(error) = self.ensure_proxy_session(session.handle()).await {
+            warn!(error = %error, "failed to initialize proxy session before opening direct-tcpip channel");
+            return Ok(false);
+        }
+
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };
@@ -1552,15 +1623,28 @@ impl server::Handler for GatewayHandler {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
-        _col_width: u32,
-        _row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        _modes: &[(russh::Pty, u32)],
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        if proxy_session
+            .request_pty(
+                channel, term, col_width, row_height, pix_width, pix_height, modes,
+            )
+            .await
+            .unwrap_or(false)
+        {
+            let _ = session.channel_success(channel);
+        } else {
             let _ = session.channel_failure(channel);
         }
 
@@ -1576,7 +1660,24 @@ impl server::Handler for GatewayHandler {
         _x11_screen_number: u32,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        if proxy_session
+            .request_x11(
+                channel,
+                _single_connection,
+                _x11_auth_protocol,
+                _x11_auth_cookie,
+                _x11_screen_number,
+            )
+            .await
+            .unwrap_or(false)
+        {
+            let _ = session.channel_success(channel);
+        } else {
             let _ = session.channel_failure(channel);
         }
 
@@ -1588,7 +1689,14 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        if proxy_session.request_shell(channel).await.unwrap_or(false) {
+            let _ = session.channel_success(channel);
+        } else {
             let _ = session.channel_failure(channel);
         }
 
@@ -1598,11 +1706,26 @@ impl server::Handler for GatewayHandler {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _data: &[u8],
+        data: &[u8],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
             let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        match proxy_session.request_exec(channel, data).await {
+            Ok(true) => {
+                let _ = session.channel_success(channel);
+            }
+            Ok(false) => {
+                warn!(?channel, "target rejected exec request");
+                let _ = session.channel_failure(channel);
+            }
+            Err(error) => {
+                warn!(?channel, %error, "failed to proxy exec request");
+                let _ = session.channel_failure(channel);
+            }
         }
 
         Ok(())
@@ -1611,10 +1734,21 @@ impl server::Handler for GatewayHandler {
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
-        _name: &str,
+        name: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        if proxy_session
+            .request_subsystem(channel, name)
+            .await
+            .unwrap_or(false)
+        {
+            let _ = session.channel_success(channel);
+        } else {
             let _ = session.channel_failure(channel);
         }
 
@@ -1624,11 +1758,22 @@ impl server::Handler for GatewayHandler {
     async fn env_request(
         &mut self,
         channel: ChannelId,
-        _variable_name: &str,
-        _variable_value: &str,
+        variable_name: &str,
+        variable_value: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        if proxy_session
+            .set_env(channel, variable_name, variable_value)
+            .await
+            .unwrap_or(false)
+        {
+            let _ = session.channel_success(channel);
+        } else {
             let _ = session.channel_failure(channel);
         }
 
@@ -1637,22 +1782,30 @@ impl server::Handler for GatewayHandler {
 
     async fn window_change_request(
         &mut self,
-        _channel: ChannelId,
-        _col_width: u32,
-        _row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
+        channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        if let Some(proxy_session) = &self.proxy_session {
+            let _ = proxy_session
+                .window_change(channel, col_width, row_height, pix_width, pix_height)
+                .await;
+        }
         Ok(())
     }
 
     async fn signal(
         &mut self,
-        _channel: ChannelId,
-        _signal: Sig,
+        channel: ChannelId,
+        signal: Sig,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        if let Some(proxy_session) = &self.proxy_session {
+            let _ = proxy_session.signal(channel, signal).await;
+        }
         Ok(())
     }
 
@@ -1703,8 +1856,13 @@ impl server::Handler for GatewayHandler {
         &mut self,
         address: &str,
         port: &mut u32,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
+        if let Err(error) = self.ensure_proxy_session(session.handle()).await {
+            warn!(error = %error, "failed to initialize proxy session before remote forward request");
+            return Ok(false);
+        }
+
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };
@@ -1725,8 +1883,13 @@ impl server::Handler for GatewayHandler {
         &mut self,
         address: &str,
         port: u32,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
+        if let Err(error) = self.ensure_proxy_session(session.handle()).await {
+            warn!(error = %error, "failed to initialize proxy session before remote forward cancel");
+            return Ok(false);
+        }
+
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };

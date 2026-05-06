@@ -79,7 +79,6 @@ init_paths() {
   SSH_PORT_FILE="${WORKDIR}/ssh-port"
   QEMU_PID_FILE="${WORKDIR}/qemu.pid"
   QEMU_LOG="${WORKDIR}/qemu.log"
-  BUILD_SCRIPT="${WORKDIR}/build-freebsd.sh"
   IMAGE_LOCKDIR="${IMAGE_ROOT}/.lock"
   REPO_ARCHIVE="${WORKDIR}/repo.tar.gz"
   CACHE_ARCHIVE="${WORKDIR}/cache.tar.gz"
@@ -88,7 +87,7 @@ init_paths() {
 
   export REPO_ROOT SHARED_CACHE_TOP CACHE_FINGERPRINT FREEBSD_CACHE_ROOT IMAGE_ROOT WORKDIR
   export CACHE_STAGE CACHE_EXPORT_STAGE DIST_DIR IMAGE_XZ BASE_QCOW2 OVERLAY_QCOW2 SEED_DIR
-  export SEED_ISO SSH_KEY SSH_PORT_FILE QEMU_PID_FILE QEMU_LOG BUILD_SCRIPT IMAGE_LOCKDIR
+  export SEED_ISO SSH_KEY SSH_PORT_FILE QEMU_PID_FILE QEMU_LOG IMAGE_LOCKDIR
   export REPO_ARCHIVE CACHE_ARCHIVE SSH_HOST SSH_PORT SSH_USER REMOTE_HOME
   export FREEBSD_VERSION FREEBSD_ARCH FREEBSD_IMAGE_URL FREEBSD_CHECKSUM_URL
   export FREEBSD_IMAGE_SOURCE_FILENAME FREEBSD_QEMU_MEM FREEBSD_QEMU_CPUS
@@ -361,107 +360,6 @@ cleanup() {
   exit "$exit_code"
 }
 
-create_guest_build_script() {
-  repo_path=${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-centralssh/centralssh}}
-  server_url=${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-https://github.com}}
-  repo_url="${server_url%/}/${repo_path}"
-
-  cat > "$BUILD_SCRIPT" <<EOF
-#!/bin/sh
-set -eu
-
-cd "\$HOME/work"
-
-export CARGO_HOME="\$HOME/cache/cargo"
-export RUSTUP_HOME="\$HOME/cache/rustup"
-export CARGO_TARGET_DIR="\$HOME/cache/target"
-export SCCACHE_DIR="\$HOME/cache/sccache"
-export PKG_CACHEDIR="\$HOME/cache/pkg"
-mkdir -p "\$CARGO_HOME" "\$RUSTUP_HOME" "\$CARGO_TARGET_DIR" "\$SCCACHE_DIR" "\$PKG_CACHEDIR"
-
-test -f "${CLOUDINIT_READY_FILE}"
-test ! -f "${CLOUDINIT_FAILED_FILE}"
-sudo mkdir -p "\$PKG_CACHEDIR"
-sudo pkg -o PKG_CACHEDIR="\$PKG_CACHEDIR" update -f
-sudo pkg -o PKG_CACHEDIR="\$PKG_CACHEDIR" install -y curl git gmake jq pkg xz zstd ca_root_nss sudo
-
-if [ ! -x "\$CARGO_HOME/bin/rustc" ]; then
-  fetch -q -o /tmp/rustup.sh https://sh.rustup.rs
-  sh /tmp/rustup.sh -y --no-modify-path --default-toolchain stable
-fi
-
-. "\$CARGO_HOME/env"
-export PATH="\$CARGO_HOME/bin:\$PATH"
-
-if [ ! -x "\$CARGO_HOME/bin/sccache" ]; then
-  cargo install --locked sccache || echo "warning: failed to install sccache; continuing without compiler cache" >&2
-fi
-
-if [ -x "\$CARGO_HOME/bin/sccache" ]; then
-  export RUSTC_WRAPPER="\$CARGO_HOME/bin/sccache"
-fi
-
-cargo fetch --locked
-sccache --show-stats || true
-cargo build --locked --release
-sccache --show-stats || true
-
-CI_PACKAGE_NAME="\$(sed -n 's/^name = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
-CI_PACKAGE_VERSION="\$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
-CI_PACKAGE_COMMENT="\$(sed -n 's/^description = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
-CI_PACKAGE_DESC="\${CI_PACKAGE_COMMENT}"
-CI_PACKAGE_ORIGIN="security/\${CI_PACKAGE_NAME}"
-CI_PACKAGE_MAINTAINER="root@localhost"
-CI_PACKAGE_WWW="${repo_url}"
-CI_PACKAGE_ARCH="\$(pkg config ABI)"
-CI_PACKAGE_SUFFIX="${FREEBSD_PACKAGE_SUFFIX}"
-
-rm -rf stage dist
-mkdir -p stage dist
-
-gmake install DESTDIR="\$PWD/stage" PREFIX=/usr/local
-
-mkdir -p "\$PWD/stage/etc/centralssh/users"
-mkdir -p "\$PWD/stage/var/log/centralssh"
-
-cp examples/config.toml "\$PWD/stage/etc/centralssh/config.toml"
-cp examples/servers.toml "\$PWD/stage/etc/centralssh/servers.toml"
-touch "\$PWD/stage/etc/centralssh/known_hosts"
-touch "\$PWD/stage/var/log/centralssh/audit.jsonl"
-
-chmod 0700 "\$PWD/stage/etc/centralssh/users"
-chmod 0700 "\$PWD/stage/var/log/centralssh"
-
-find "stage" -type f | sed 's|^stage/||' | LC_ALL=C sort > stage/pkg-plist
-find "stage" -type d -empty | sed 's|^stage/||' | LC_ALL=C sort -r | sed 's|^|@dir |' >> stage/pkg-plist
-
-cat > stage/+MANIFEST <<MANIFEST
-name: \${CI_PACKAGE_NAME}
-version: "\${CI_PACKAGE_VERSION}"
-origin: \${CI_PACKAGE_ORIGIN}
-comment: "\${CI_PACKAGE_COMMENT}"
-maintainer: \${CI_PACKAGE_MAINTAINER}
-www: \${CI_PACKAGE_WWW}
-prefix: /
-arch: \${CI_PACKAGE_ARCH}
-desc: |
-  \${CI_PACKAGE_DESC}
-MANIFEST
-
-if ! pkg create -M stage/+MANIFEST -p stage/pkg-plist -r stage -o dist; then
-  echo "pkg create failed" >&2
-  exit 1
-fi
-
-PKG_FILE="\$(find dist -type f -name '*.pkg' | head -n1)"
-cp "\$PKG_FILE" "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
-test -f "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
-pkg info -F "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg" >/dev/null
-EOF
-
-  chmod +x "$BUILD_SCRIPT"
-}
-
 boot_vm_amd64() {
   if [ -e /dev/kvm ]; then
     accel_args="-enable-kvm -cpu host"
@@ -550,10 +448,8 @@ transfer_cache_in() {
 }
 
 run_build() {
-  set_step "uploading guest build script"
-  cat "$BUILD_SCRIPT" | run_ssh "cat > ${REMOTE_HOME}/build-freebsd.sh && chmod +x ${REMOTE_HOME}/build-freebsd.sh"
   set_step "executing guest build script"
-  if run_ssh "sh ${REMOTE_HOME}/build-freebsd.sh"; then
+  if run_ssh "cd ${REMOTE_HOME}/work && FORGEJO_REPOSITORY='${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}' FORGEJO_SERVER_URL='${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}' FORGEJO_REF_NAME='${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}' FREEBSD_PACKAGE_SUFFIX='${FREEBSD_PACKAGE_SUFFIX}' sh ./ci/freebsd-guest-build.sh"; then
     return 0
   else
     build_exit_code=$?
@@ -611,8 +507,6 @@ case "$command_name" in
     boot_vm
     set_step "waiting for cloud-init readiness"
     wait_for_ssh
-    set_step "generating guest build script"
-    create_guest_build_script
     set_step "transferring repository"
     transfer_repo
     set_step "transferring cache into guest"

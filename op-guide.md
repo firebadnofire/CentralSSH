@@ -663,6 +663,7 @@ Important note:
 
 - installs `centralssh` to `/usr/local/sbin`
 - installs `cssh-keyscan` to `/usr/local/bin`
+- resolves the built binary from `$(CARGO_TARGET_DIR)/$(PROFILE)/centralssh`, which is required for cached CI packaging runs
 - creates config layout under `/etc/centralssh`
 - creates the log directory
 - installs example `config.toml` and `servers.toml` only if missing

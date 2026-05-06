@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use russh::{
     Channel, ChannelId, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, CryptoVec, Disconnect, Sig,
 };
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
 use crate::app::AppState;
 use crate::audit::{AuditEvent, AuditLogger, AuditResult};
@@ -75,6 +76,13 @@ pub struct ProxySession {
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
     last_error: Arc<Mutex<Option<String>>>,
     audit_context: ProxyAuditContext,
+    session_channels: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
+}
+
+#[derive(Clone)]
+struct SessionChannelState {
+    backend: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
+    pending_replies: Arc<Mutex<VecDeque<oneshot::Sender<bool>>>>,
 }
 
 #[derive(Debug)]
@@ -329,6 +337,7 @@ impl ProxySession {
                 username,
                 target_server: target.name,
             },
+            session_channels: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -344,19 +353,192 @@ impl ProxySession {
         };
         let (target_read, target_write) = target_channel.split();
         let backend = Arc::new(Mutex::new(target_write));
+        let pending_replies = Arc::new(Mutex::new(VecDeque::new()));
+        self.session_channels.lock().await.insert(
+            frontend_id,
+            SessionChannelState {
+                backend: backend.clone(),
+                pending_replies: pending_replies.clone(),
+            },
+        );
 
         spawn_session_bridge(
             frontend_id,
             frontend_read,
             target_read,
             backend,
+            pending_replies,
             self.server_handle.clone(),
             self.target_handle.clone(),
             self.last_error.clone(),
             self.audit_context.clone(),
+            self.session_channels.clone(),
         );
 
         Ok(())
+    }
+
+    pub async fn request_pty(
+        &self,
+        frontend_id: ChannelId,
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        terminal_modes: &[(russh::Pty, u32)],
+    ) -> Result<bool> {
+        self.forward_session_request(
+            frontend_id,
+            FrontendSessionAction::RequestPty {
+                want_reply: true,
+                term: term.to_string(),
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+                terminal_modes: terminal_modes.to_vec(),
+            },
+        )
+        .await
+    }
+
+    pub async fn request_x11(
+        &self,
+        frontend_id: ChannelId,
+        single_connection: bool,
+        x11_authentication_protocol: &str,
+        x11_authentication_cookie: &str,
+        x11_screen_number: u32,
+    ) -> Result<bool> {
+        self.forward_session_request(
+            frontend_id,
+            FrontendSessionAction::RequestX11 {
+                want_reply: true,
+                single_connection,
+                x11_authentication_protocol: x11_authentication_protocol.to_string(),
+                x11_authentication_cookie: x11_authentication_cookie.to_string(),
+                x11_screen_number,
+            },
+        )
+        .await
+    }
+
+    pub async fn request_shell(&self, frontend_id: ChannelId) -> Result<bool> {
+        self.forward_session_request(
+            frontend_id,
+            FrontendSessionAction::RequestShell { want_reply: true },
+        )
+        .await
+    }
+
+    pub async fn request_exec(&self, frontend_id: ChannelId, command: &[u8]) -> Result<bool> {
+        self.forward_session_request(
+            frontend_id,
+            FrontendSessionAction::Exec {
+                want_reply: true,
+                command: command.to_vec(),
+            },
+        )
+        .await
+    }
+
+    pub async fn request_subsystem(&self, frontend_id: ChannelId, name: &str) -> Result<bool> {
+        self.forward_session_request(
+            frontend_id,
+            FrontendSessionAction::RequestSubsystem {
+                want_reply: true,
+                name: name.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn set_env(
+        &self,
+        frontend_id: ChannelId,
+        variable_name: &str,
+        variable_value: &str,
+    ) -> Result<bool> {
+        self.forward_session_request(
+            frontend_id,
+            FrontendSessionAction::SetEnv {
+                want_reply: true,
+                variable_name: variable_name.to_string(),
+                variable_value: variable_value.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn window_change(
+        &self,
+        frontend_id: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+    ) -> Result<()> {
+        self.forward_session_action(
+            frontend_id,
+            FrontendSessionAction::WindowChange {
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+            },
+        )
+        .await
+    }
+
+    pub async fn signal(&self, frontend_id: ChannelId, signal: Sig) -> Result<()> {
+        self.forward_session_action(frontend_id, FrontendSessionAction::Signal { signal })
+            .await
+    }
+
+    async fn forward_session_request(
+        &self,
+        frontend_id: ChannelId,
+        action: FrontendSessionAction,
+    ) -> Result<bool> {
+        let state = self.lookup_session_channel(frontend_id).await?;
+        let (sender, receiver) = oneshot::channel();
+        state.pending_replies.lock().await.push_back(sender);
+
+        if let Err(error) =
+            apply_frontend_session_action(action, state.backend, &self.audit_context).await
+        {
+            let _ = state.pending_replies.lock().await.pop_back();
+            return Err(CentralSshError::Ssh(error));
+        }
+
+        receiver
+            .await
+            .map_err(|_| CentralSshError::Ssh("backend request reply channel closed".to_string()))
+    }
+
+    async fn forward_session_action(
+        &self,
+        frontend_id: ChannelId,
+        action: FrontendSessionAction,
+    ) -> Result<()> {
+        let state = self.lookup_session_channel(frontend_id).await?;
+        apply_frontend_session_action(action, state.backend, &self.audit_context)
+            .await
+            .map_err(CentralSshError::Ssh)
+    }
+
+    async fn lookup_session_channel(&self, frontend_id: ChannelId) -> Result<SessionChannelState> {
+        self.session_channels
+            .lock()
+            .await
+            .get(&frontend_id)
+            .cloned()
+            .ok_or_else(|| {
+                CentralSshError::Ssh(format!(
+                    "frontend session channel {frontend_id:?} is not open"
+                ))
+            })
     }
 
     pub async fn open_direct_tcpip_channel(
@@ -436,10 +618,12 @@ fn spawn_session_bridge(
     frontend_read: ChannelReadHalf,
     target_read: ChannelReadHalf,
     backend: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
+    pending_replies: Arc<Mutex<VecDeque<oneshot::Sender<bool>>>>,
     server_handle: server::Handle,
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
     last_error: Arc<Mutex<Option<String>>>,
     audit_context: ProxyAuditContext,
+    session_channels: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
 ) {
     tokio::spawn(async move {
         let front_to_back = relay_frontend_session(
@@ -454,12 +638,14 @@ fn spawn_session_bridge(
             frontend_id,
             target_read,
             server_handle.clone(),
+            pending_replies.clone(),
             target_handle.clone(),
             last_error.clone(),
         );
 
         let _ = tokio::join!(front_to_back, back_to_front);
 
+        session_channels.lock().await.remove(&frontend_id);
         let _ = server_handle.close(frontend_id).await;
     });
 }
@@ -524,6 +710,7 @@ async fn relay_backend_session(
     frontend_id: ChannelId,
     mut target_read: ChannelReadHalf,
     server_handle: server::Handle,
+    pending_replies: Arc<Mutex<VecDeque<oneshot::Sender<bool>>>>,
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
     last_error: Arc<Mutex<Option<String>>>,
 ) {
@@ -540,8 +727,13 @@ async fn relay_backend_session(
                 };
 
                 let should_break = matches!(action, BackendSessionAction::Close);
-                if let Err(error) =
-                    apply_backend_session_action(action, frontend_id, &server_handle).await
+                if let Err(error) = apply_backend_session_action(
+                    action,
+                    frontend_id,
+                    &server_handle,
+                    &pending_replies,
+                )
+                .await
                 {
                     abort_proxy_session(&server_handle, &target_handle, &last_error, error).await;
                     break;
@@ -887,6 +1079,7 @@ async fn apply_backend_session_action(
     action: BackendSessionAction,
     frontend_id: ChannelId,
     server_handle: &server::Handle,
+    pending_replies: &Arc<Mutex<VecDeque<oneshot::Sender<bool>>>>,
 ) -> std::result::Result<(), String> {
     match action {
         BackendSessionAction::ForwardData {
@@ -913,14 +1106,28 @@ async fn apply_backend_session_action(
             .close(frontend_id)
             .await
             .map_err(|_| format!("failed to close frontend channel {frontend_id:?}")),
-        BackendSessionAction::Success => server_handle
-            .channel_success(frontend_id)
-            .await
-            .map_err(|_| format!("failed to send success to frontend channel {frontend_id:?}")),
-        BackendSessionAction::Failure => server_handle
-            .channel_failure(frontend_id)
-            .await
-            .map_err(|_| format!("failed to send failure to frontend channel {frontend_id:?}")),
+        BackendSessionAction::Success => {
+            if let Some(sender) = pending_replies.lock().await.pop_front() {
+                sender
+                    .send(true)
+                    .map_err(|_| "failed to deliver backend success reply".to_string())
+            } else {
+                server_handle.channel_success(frontend_id).await.map_err(|_| {
+                    format!("failed to send success to frontend channel {frontend_id:?}")
+                })
+            }
+        }
+        BackendSessionAction::Failure => {
+            if let Some(sender) = pending_replies.lock().await.pop_front() {
+                sender
+                    .send(false)
+                    .map_err(|_| "failed to deliver backend failure reply".to_string())
+            } else {
+                server_handle.channel_failure(frontend_id).await.map_err(|_| {
+                    format!("failed to send failure to frontend channel {frontend_id:?}")
+                })
+            }
+        }
         BackendSessionAction::XonXoff { client_can_do } => server_handle
             .xon_xoff_request(frontend_id, client_can_do)
             .await

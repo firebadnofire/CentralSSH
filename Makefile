@@ -14,6 +14,17 @@ SYSTEMD_UNIT_DIR?=/etc/systemd/system
 
 CARGO?=cargo
 INSTALL?=install
+PROFILE?=release
+CARGO_TARGET_DIR?=target
+BINARY:=$(CARGO_TARGET_DIR)/$(PROFILE)/$(APP)
+
+ifeq ($(PROFILE),release)
+CARGO_BUILD_ARGS:=--release
+else ifeq ($(PROFILE),debug)
+CARGO_BUILD_ARGS:=
+else
+CARGO_BUILD_ARGS:=--profile $(PROFILE)
+endif
 
 .PHONY: all build clean install uninstall \
 	install-bin install-tools install-layout install-config install-service \
@@ -22,7 +33,7 @@ INSTALL?=install
 all: build
 
 build:
-	$(CARGO) build --release
+	$(CARGO) build $(CARGO_BUILD_ARGS)
 
 clean:
 	$(CARGO) clean
@@ -33,14 +44,14 @@ install: check-build install-bin install-tools install-layout install-config ins
 	@echo "systemd start: systemctl start centralssh"
 
 check-build:
-	@if [ ! -x target/release/$(APP) ]; then \
-		echo "Missing target/release/$(APP). Run 'make' first."; \
+	@if [ ! -x "$(BINARY)" ]; then \
+		echo "Missing $(BINARY). Run 'make' first."; \
 		exit 1; \
 	fi
 
 install-bin:
 	$(INSTALL) -d $(DESTDIR)$(SBINDIR)
-	$(INSTALL) -m 0755 target/release/$(APP) $(DESTDIR)$(SBINDIR)/$(APP)
+	$(INSTALL) -m 0755 "$(BINARY)" $(DESTDIR)$(SBINDIR)/$(APP)
 
 install-tools:
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)

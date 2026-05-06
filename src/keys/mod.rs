@@ -233,7 +233,7 @@ fn ensure_keypair_files(
             secrets,
             require_encrypted_key,
         )?;
-        ssh_key::private::PrivateKey::from_openssh(&*private_key_text).map_err(|error| {
+        ssh_key::private::PrivateKey::from_openssh(private_key_text.trim()).map_err(|error| {
             CentralSshError::InvalidConfig(format!(
                 "failed to load existing user private key '{}': {error}",
                 private_key_path.display()
@@ -498,6 +498,40 @@ mod tests {
         assert_eq!(report.created_private_keys, 0);
         assert_eq!(report.created_public_keys, 1);
         assert_eq!(contents, encoded_private_key.as_bytes());
+        assert!(server_dir.join("id_ed25519.pub").is_file());
+    }
+
+    #[test]
+    fn ensure_private_keys_for_config_users_accepts_existing_key_with_trailing_newline() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = test_root(&tempdir).join("keys");
+        let user_dir = root.join("alice");
+        let server_dir = user_dir.join("git");
+        fs::create_dir_all(&server_dir).expect("mkdir");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("chmod root");
+        fs::set_permissions(&user_dir, fs::Permissions::from_mode(0o700)).expect("chmod user");
+        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700)).expect("chmod server");
+
+        let private_key =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+                .expect("private key");
+        let existing_key = server_dir.join("id_ed25519");
+        let mut encoded_private_key = private_key
+            .to_openssh(LineEnding::LF)
+            .expect("encode key")
+            .to_string();
+        encoded_private_key.push('\n');
+        fs::write(&existing_key, encoded_private_key).expect("write key");
+        fs::set_permissions(&existing_key, fs::Permissions::from_mode(0o600)).expect("chmod key");
+
+        let mut config = valid_config();
+        config.users[0].allowed_servers = vec!["git".to_string()];
+
+        let report = ensure_private_keys_for_config_users(&root, &config, true).expect("ensure");
+
+        assert_eq!(report.created_server_dirs, 0);
+        assert_eq!(report.created_private_keys, 0);
+        assert_eq!(report.created_public_keys, 1);
         assert!(server_dir.join("id_ed25519.pub").is_file());
     }
 

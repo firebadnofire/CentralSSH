@@ -280,6 +280,10 @@ You must update:
 * `disection.md`
 * this file
 
+When CI or packaging behavior changes, keep the documented source of truth in
+sync with the tracked helper scripts under `ci/` and the live workflow in
+`.forgejo/workflows/build.yml`.
+
 Documentation must reflect reality.
 
 ---

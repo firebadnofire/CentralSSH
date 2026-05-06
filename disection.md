@@ -32,9 +32,22 @@ Support files:
 - `Makefile`: build/install entrypoints and packaging install behavior.
 - `examples/*.toml`: sample runtime configuration.
 - `tools/cssh-keyscan`: helper for building target host trust entries.
-- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI and FreeBSD QEMU build helpers.
+- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI, Linux packaging, release upload, and FreeBSD QEMU build helpers.
 - `packaging/`: FreeBSD rc and systemd service packaging.
 - `ACCESS.md`: intentionally redacted placeholder for external access notes; live inventory must stay outside source control.
+
+Current CI helper entrypoints:
+
+- `ci/package-env.sh`: package metadata derivation shared by Linux and FreeBSD packaging flows.
+- `ci/package-linux.sh`: Linux build plus `.deb`, `.rpm`, `tar.gz`, and SHA256 artifact generation.
+- `ci/validate-linux-packages.sh`: Linux package content validation for `.deb`, `.rpm`, and `tar.gz`.
+- `ci/upload-release-assets.sh`: release asset upload shared by Linux and FreeBSD jobs.
+- `ci/freebsd-qemu-build.sh`: host-side FreeBSD VM orchestration, cache transfer, and artifact retrieval.
+- `ci/freebsd-guest-build.sh`: in-guest FreeBSD build, package creation, install validation, and rc.d lifecycle checks.
+
+Workflow-level CI deduplication:
+
+- `.forgejo/workflows/build.yml` keeps the Forgejo-aware checkout logic in a YAML anchor because no repository-local script is available before the initial fetch.
 
 ## 2. Process startup flow
 

@@ -31,7 +31,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl git jq make dpkg-dev rpm xz-utils file pkg-config clang lld python3 python3-pip
 
-      - name: Check out repository
+      - &checkout_step
+        name: Check out repository
         shell: sh
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
@@ -82,24 +83,7 @@ jobs:
         shell: sh
         run: |
           set -eu
-          package_name="$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          package_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          package_comment="$(sed -n 's/^description = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          repo_path="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
-          repo_url="${server_url%/}/${repo_path}"
-          tag_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
-
-          {
-            echo "CI_PACKAGE_NAME=${package_name}"
-            echo "CI_PACKAGE_VERSION=${package_version}"
-            echo "CI_PACKAGE_COMMENT=${package_comment}"
-            echo "CI_PACKAGE_ORIGIN=security/${package_name}"
-            echo "CI_PACKAGE_WWW=${repo_url}"
-            echo "CI_PACKAGE_MAINTAINER=root@localhost"
-            echo "CI_PACKAGE_DESC=${package_comment}"
-            echo "CI_RELEASE_TAG=${tag_name}"
-          } >> "$GITHUB_ENV"
+          ./ci/package-env.sh env >> "$GITHUB_ENV"
 
       - name: Prepare Linux cache root
         shell: sh
@@ -135,14 +119,6 @@ jobs:
 
       - name: Build Linux packages
         shell: sh
-        env:
-          CI_PACKAGE_NAME: ${{ env.CI_PACKAGE_NAME }}
-          CI_PACKAGE_VERSION: ${{ env.CI_PACKAGE_VERSION }}
-          CI_PACKAGE_COMMENT: ${{ env.CI_PACKAGE_COMMENT }}
-          CI_PACKAGE_ORIGIN: ${{ env.CI_PACKAGE_ORIGIN }}
-          CI_PACKAGE_WWW: ${{ env.CI_PACKAGE_WWW }}
-          CI_PACKAGE_MAINTAINER: ${{ env.CI_PACKAGE_MAINTAINER }}
-          CI_PACKAGE_DESC: ${{ env.CI_PACKAGE_DESC }}
         run: |
           set -eu
           id
@@ -159,67 +135,7 @@ jobs:
           if command -v sccache >/dev/null 2>&1; then
             export RUSTC_WRAPPER=sccache
           fi
-
-          mkdir -p dist
-          mkdir -p stage/linux stage/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-
-          ./ci/time-command.sh cargo build --locked --release
-          make install DESTDIR="$PWD/stage/linux" PREFIX=/usr
-
-          # --- .deb ---
-          mkdir -p stage/linux/DEBIAN
-          cat > stage/linux/DEBIAN/control <<EOF
-          Package: ${CI_PACKAGE_NAME}
-          Version: ${CI_PACKAGE_VERSION}
-          Section: admin
-          Priority: optional
-          Architecture: amd64
-          Maintainer: ${CI_PACKAGE_MAINTAINER}
-          Description: ${CI_PACKAGE_DESC}
-          EOF
-          dpkg-deb --build stage/linux "dist/${CI_PACKAGE_NAME}_${CI_PACKAGE_VERSION}_amd64.deb"
-          rm -rf stage/linux/DEBIAN
-
-          # --- .rpm ---
-          install -d "stage/rpmbuild/SOURCES"
-          tar -C stage/linux -czf "stage/rpmbuild/SOURCES/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-linux-root.tar.gz" .
-          install -d "stage/rpmbuild/SPECS"
-          cat > "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec" <<EOF
-          Name: ${CI_PACKAGE_NAME}
-          Version: ${CI_PACKAGE_VERSION}
-          Release: 1%{?dist}
-          Summary: ${CI_PACKAGE_COMMENT}
-          License: GPL-3.0-only
-          URL: ${CI_PACKAGE_WWW}
-          BuildArch: x86_64
-          Source0: ${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-linux-root.tar.gz
-
-          %description
-          ${CI_PACKAGE_DESC}
-
-          %prep
-
-          %build
-
-          %install
-          mkdir -p %{buildroot}
-          tar -C %{buildroot} -xzf %{SOURCE0}
-
-          %files
-          /usr/sbin/${CI_PACKAGE_NAME}
-          /usr/bin/cssh-keyscan
-          /etc/systemd/system/${CI_PACKAGE_NAME}.service
-          %dir /etc/centralssh
-          %dir /etc/centralssh/users
-          /etc/centralssh/config.toml
-          /etc/centralssh/servers.toml
-          /etc/centralssh/known_hosts
-          %dir /var/log/centralssh
-          /var/log/centralssh/audit.jsonl
-          EOF
-          rpmbuild --define "_topdir $PWD/stage/rpmbuild" -bb "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec"
-          cp "stage/rpmbuild/RPMS/x86_64/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm" \
-             "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
+          ./ci/package-linux.sh
 
       - name: Log Linux cache stats
         if: always()
@@ -241,13 +157,9 @@ jobs:
 
       - name: Validate Linux packages
         shell: sh
-        env:
-          CI_PACKAGE_NAME: ${{ env.CI_PACKAGE_NAME }}
-          CI_PACKAGE_VERSION: ${{ env.CI_PACKAGE_VERSION }}
         run: |
           set -eu
-          test -f "dist/${CI_PACKAGE_NAME}_${CI_PACKAGE_VERSION}_amd64.deb"
-          test -f "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
+          ./ci/validate-linux-packages.sh
 
       - name: Publish Linux packages
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -257,58 +169,7 @@ jobs:
           CI_RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -eu
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:-https://api.github.com}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          release_tag="${CI_RELEASE_TAG:-${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}}"
-
-          if [ -z "$api_url" ] || [ -z "$repository" ] || [ -z "$token" ]; then
-            echo "Missing release API context." >&2
-            exit 1
-          fi
-
-          auth_header="Authorization: token ${token}"
-
-          # Check if release already exists
-          release_json="$(curl -fsS -H "$auth_header" \
-            "${api_url%/}/repos/${repository}/releases/tags/${release_tag}" 2>/dev/null || true)"
-
-          if [ -z "$release_json" ]; then
-            # Create release
-            create_payload="$(jq -n --arg tag "$release_tag" --arg name "$release_tag" \
-              '{tag_name:$tag,name:$name,draft:false,prerelease:false}')"
-            release_json="$(curl -fsS -X POST -H "$auth_header" -H 'Content-Type: application/json' \
-              -d "$create_payload" "${api_url%/}/repos/${repository}/releases")"
-          fi
-
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "Failed to resolve release id." >&2
-            exit 1
-          fi
-
-          # Upload all dist assets
-          for asset_path in dist/*; do
-            [ -f "$asset_path" ] || continue
-            asset_name="$(basename "$asset_path")"
-
-            # Delete existing asset if present
-            existing_id="$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
-              '.assets[]? | select(.name == $n) | .id' 2>/dev/null | head -n1)"
-            if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
-              curl -fsS -X DELETE -H "$auth_header" \
-                "${api_url%/}/repos/${repository}/releases/${release_id}/assets/${existing_id}" >/dev/null
-            fi
-
-            # Upload
-            curl -fsS -X POST \
-              -H "$auth_header" \
-              -H 'Content-Type: application/octet-stream' \
-              --data-binary @"$asset_path" \
-              "${api_url%/}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}" \
-              || echo "Failed to upload ${asset_name}" >&2
-          done
+          ./ci/upload-release-assets.sh dist
 
   freebsd:
     runs-on: ubuntu-22.04
@@ -347,52 +208,7 @@ jobs:
             echo "/dev/kvm is not available; FreeBSD VM will use software emulation"
           fi
 
-      - name: Check out repository
-        shell: sh
-        env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
-        run: |
-          set -eu
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
-          sha="${FORGEJO_SHA:-${GITHUB_SHA:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          remote_url="${server_url%/}/${repository}.git"
-
-          if [ -z "$server_url" ] || [ -z "$repository" ]; then
-            echo "Missing server context for checkout." >&2
-            exit 1
-          fi
-
-          git init .
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$remote_url"
-
-          if [ -n "$token" ]; then
-            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-            git_fetch() {
-              git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
-            }
-          else
-            git_fetch() {
-              git "$@"
-            }
-          fi
-
-          if [ -n "$ref" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "+${ref}:${ref}"
-            git checkout --force --detach "$ref"
-          elif [ -n "$sha" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "$sha"
-            git checkout --force --detach "$sha"
-          else
-            echo "Missing both ref and sha for checkout." >&2
-            exit 1
-          fi
-
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth=1
+      - *checkout_step
 
       - name: Prepare FreeBSD QEMU image
         shell: sh
@@ -411,6 +227,8 @@ jobs:
         run: |
           set -eu
           test -n "$(find dist -maxdepth 1 -type f -name '*-freebsd-amd64.pkg' -print -quit)"
+          test -n "$(find dist -maxdepth 1 -type f -name '*-freebsd-amd64.tar.gz' -print -quit)"
+          test -f dist/SHA256SUMS-freebsd.txt
 
       - name: Publish FreeBSD package on tag
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -420,51 +238,7 @@ jobs:
           CI_RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -eu
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:-https://api.github.com}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          release_tag="${CI_RELEASE_TAG:-${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}}"
-
-          if [ -z "$api_url" ] || [ -z "$repository" ] || [ -z "$token" ]; then
-            echo "Missing release API context." >&2
-            exit 1
-          fi
-
-          auth_header="Authorization: token ${token}"
-          release_json="$(curl -fsS -H "$auth_header" \
-            "${api_url%/}/repos/${repository}/releases/tags/${release_tag}" 2>/dev/null || true)"
-
-          if [ -z "$release_json" ]; then
-            create_payload="$(jq -n --arg tag "$release_tag" --arg name "$release_tag" \
-              '{tag_name:$tag,name:$name,draft:false,prerelease:false}')"
-            release_json="$(curl -fsS -X POST -H "$auth_header" -H 'Content-Type: application/json' \
-              -d "$create_payload" "${api_url%/}/repos/${repository}/releases")"
-          fi
-
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "Failed to resolve release id." >&2
-            exit 1
-          fi
-
-          for asset_path in dist/*; do
-            [ -f "$asset_path" ] || continue
-            asset_name="$(basename "$asset_path")"
-            existing_id="$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
-              '.assets[]? | select(.name == $n) | .id' 2>/dev/null | head -n1)"
-            if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
-              curl -fsS -X DELETE -H "$auth_header" \
-                "${api_url%/}/repos/${repository}/releases/${release_id}/assets/${existing_id}" >/dev/null
-            fi
-
-            curl -fsS -X POST \
-              -H "$auth_header" \
-              -H 'Content-Type: application/octet-stream' \
-              --data-binary @"$asset_path" \
-              "${api_url%/}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}" \
-              || echo "Failed to upload ${asset_name}" >&2
-          done
+          ./ci/upload-release-assets.sh dist
 
   merge:
     runs-on: ubuntu-22.04

@@ -17,23 +17,21 @@ Cold builds still run `cargo build --locked --release` directly. Release artifac
 
 Linux container job:
 
-- Host-mounted `/data/cache/cargo` -> container `/cache/cargo-home`
-- Host-mounted `/data/cache/sccache` -> container `/cache/sccache`
-- Host-mounted `/data/cache/target/centralssh/linux` -> container `/cache/target`
+- Host-mounted `/build-cache/cargo` -> container `/build-cache/cargo-home`
+- Host-mounted `/build-cache/sccache` -> container `/build-cache/sccache`
+- Host-mounted `/build-cache/target/centralssh/linux` -> container `/build-cache/target`
 
 FreeBSD job:
 
-- Preferred host root: `/data/cache`
-- Fallback host root when `/data/cache` is unavailable: `.ci-host-cache/`
-- Cached base images: `/data/cache/freebsd/images`
-- Host-side cache bucket: `/data/cache/freebsd/centralssh/<fingerprint>`
+- Preferred host root: `/build-cache`
+- Fallback host root when `/build-cache` is unavailable: `.ci-host-cache/`
+- Cached base images: `/build-cache/freebsd/images`
+- Host-side cache bucket: `/build-cache/freebsd/centralssh/<fingerprint>`
 - QEMU workspace: `.ci-qemu/freebsd/`
 - Extracted guest cache snapshot: `.ci-cache/freebsd-out/`
 - Guest cache subdirectories under `~/cache`:
   - `cargo`
-  - `rustup`
   - `target`
-  - `sccache`
   - `pkg`
 
 ## Cache Keys
@@ -61,7 +59,7 @@ The FreeBSD QEMU cache bucket is separated by a hash of `Cargo.lock`, `Cargo.tom
 
 Delete only what you need:
 
-- Full reset: remove `/data/cache/cargo`, `/data/cache/sccache`, and `/data/cache/target/centralssh`
+- Full reset: remove `/build-cache/cargo`, `/build-cache/sccache`, and `/build-cache/target/centralssh`
 - FreeBSD fallback reset: remove `.ci-host-cache/freebsd/`, `.ci-qemu/freebsd/`, and `.ci-cache/freebsd-out/`
 - Single build state reset: remove the specific keyed directory printed as `CI_CACHE_KEY` in workflow logs
 
