@@ -23,10 +23,12 @@ use crate::audit::{AuditEvent, AuditResult};
 use crate::config::validate_path_has_no_symlinks;
 use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
 use crate::crypto_policy::{
-    SSH_REKEY_BYTES, SSH_REKEY_TIME, apply_client_transport_crypto_policy,
-    apply_server_transport_crypto_policy,
+    apply_client_transport_crypto_policy, apply_server_transport_crypto_policy,
 };
 use crate::error::{CentralSshError, Result};
+
+#[cfg(test)]
+use crate::crypto_policy::{SSH_REKEY_BYTES, SSH_REKEY_TIME};
 
 pub mod proxy;
 

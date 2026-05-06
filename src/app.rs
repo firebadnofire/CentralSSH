@@ -39,15 +39,21 @@ impl AppState {
             .migrate_bootstrap_passwords(&self.auth)
             .await?;
         let snapshot = self.config_store.snapshot().await?;
-        let key_report = crate::keys::ensure_private_keys_for_config_users_with_secrets(
-            &self.config_store.paths.user_key_root,
-            &snapshot.config,
-            self.config_store.paths.per_user_per_server,
-            self.secrets.as_ref(),
-            self.secrets
-                .as_ref()
-                .is_some_and(SecretManager::encrypted_keys_required),
-        )?;
+        let key_report = if let Some(secrets) = self.secrets.as_ref() {
+            crate::keys::ensure_private_keys_for_config_users_with_secrets(
+                &self.config_store.paths.user_key_root,
+                &snapshot.config,
+                self.config_store.paths.per_user_per_server,
+                Some(secrets),
+                secrets.encrypted_keys_required(),
+            )?
+        } else {
+            crate::keys::ensure_private_keys_for_config_users(
+                &self.config_store.paths.user_key_root,
+                &snapshot.config,
+                self.config_store.paths.per_user_per_server,
+            )?
+        };
 
         Ok(BootstrapReport {
             migrated_passwords,
