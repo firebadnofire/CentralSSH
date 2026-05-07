@@ -1,0 +1,411 @@
+#!/usr/bin/expect -f
+set timeout [expr {[info exists env(CENTRALSSH_EXPECT_TIMEOUT)] ? $env(CENTRALSSH_EXPECT_TIMEOUT) : 90}]
+log_user 0
+exp_internal 0
+
+proc fail {message} {
+    puts stderr $message
+    exit 1
+}
+
+proc totp_code {secret} {
+    return [exec python3 -c {
+import base64
+import hashlib
+import hmac
+import struct
+import sys
+import time
+
+secret = sys.argv[1]
+padding = "=" * ((8 - len(secret) % 8) % 8)
+key = base64.b32decode(secret + padding, casefold=True)
+counter = int(time.time()) // 30
+msg = struct.pack(">Q", counter)
+digest = hmac.new(key, msg, hashlib.sha1).digest()
+offset = digest[-1] & 0x0F
+code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1000000
+print(f"{code:06d}")
+} $secret]
+}
+
+proc spawn_gateway {user mode} {
+    set proxy $::env(CENTRALSSH_PROXY_COMMAND)
+    set port $::env(CENTRALSSH_GATEWAY_PORT)
+    set gateway $::env(CENTRALSSH_GATEWAY)
+    if {$mode eq "shell"} {
+        spawn ssh -tt \
+            -o "ProxyCommand=$proxy" \
+            -o PreferredAuthentications=keyboard-interactive \
+            -o PubkeyAuthentication=no \
+            -o PasswordAuthentication=no \
+            -o KbdInteractiveAuthentication=yes \
+            -p $port \
+            "$user@$gateway"
+        return
+    }
+
+    if {$mode eq "exec"} {
+        spawn ssh \
+            -o "ProxyCommand=$proxy" \
+            -o PreferredAuthentications=keyboard-interactive \
+            -o PubkeyAuthentication=no \
+            -o PasswordAuthentication=no \
+            -o KbdInteractiveAuthentication=yes \
+            -p $port \
+            "$user@$gateway" \
+            $::env(CENTRALSSH_REMOTE_COMMAND)
+        return
+    }
+
+    fail "unsupported mode $mode"
+}
+
+proc expect_password_and_send {password} {
+    expect {
+        -re {Password:\s*$} { send -- "$password\r" }
+        timeout { fail "timed out waiting for password prompt" }
+        eof { fail "connection closed before password prompt" }
+    }
+}
+
+proc expect_totp_and_send {secret} {
+    expect {
+        -re {TOTP Code:\s*$} { send -- "[totp_code $secret]\r" }
+        timeout { fail "timed out waiting for TOTP prompt" }
+        eof { fail "connection closed before TOTP prompt" }
+    }
+}
+
+proc expect_selection {selection expected_present expected_absent} {
+    expect {
+        -re {Select a server:} {}
+        timeout { fail "timed out waiting for server selection menu" }
+        eof { fail "connection closed before server selection menu" }
+    }
+
+    foreach item $expected_present {
+        expect {
+            -re [string map {[ \\[ \\\[ ] \\] \\\] ( \\( ) \\)} $item] {}
+            timeout { fail "selection menu missing expected entry: $item" }
+            eof { fail "selection menu ended before expected entry: $item" }
+        }
+    }
+
+    expect {
+        -re {(.*)Enter selection:\s*$} {
+            set full_menu $expect_out(0,string)
+            foreach item $expected_absent {
+                if {[string first $item $full_menu] >= 0} {
+                    fail "selection menu unexpectedly included: $item"
+                }
+            }
+            send -- "$selection\r"
+        }
+        timeout { fail "timed out waiting for selection prompt" }
+        eof { fail "connection closed before selection prompt" }
+    }
+}
+
+proc expect_shell_ready {} {
+    expect {
+        -re {[$#>] $} {}
+        timeout {}
+    }
+    send -- "echo __CENTRALSSH_READY__\r"
+    expect {
+        -re {__CENTRALSSH_READY__} {}
+        timeout { fail "shell did not become ready" }
+        eof { fail "shell closed before ready marker" }
+    }
+}
+
+proc parse_enrollment_secret {} {
+    expect {
+        -re {Secret:\s+([A-Z2-7]+)} { return $expect_out(1,string) }
+        timeout { fail "timed out waiting for enrollment secret" }
+        eof { fail "connection closed before enrollment secret" }
+    }
+}
+
+set scenario [lindex $argv 0]
+if {$scenario eq ""} {
+    fail "scenario argument is required"
+}
+
+set artifact_file [expr {[info exists env(CENTRALSSH_EXPECT_OUTPUT)] ? $env(CENTRALSSH_EXPECT_OUTPUT) : ""}]
+if {$artifact_file ne ""} {
+    log_file -noappend $artifact_file
+}
+
+switch -- $scenario {
+    invalid-password {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect {
+            -re {Permission denied|Access denied|auth_failure} {}
+            eof {}
+            timeout { fail "invalid password did not terminate promptly" }
+        }
+        exit 0
+    }
+    invalid-totp {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect {
+            -re {TOTP Code:\s*$} { send -- "000000\r" }
+            timeout { fail "timed out waiting for TOTP prompt" }
+            eof { fail "connection closed before TOTP prompt" }
+        }
+        expect {
+            -re {Permission denied|Access denied} {}
+            eof {}
+            timeout { fail "invalid TOTP did not fail promptly" }
+        }
+        exit 0
+    }
+    unknown-user {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect {
+            -re {TOTP Code:\s*$} { send -- "000000\r" }
+            timeout { fail "unknown user flow did not mask with TOTP prompt" }
+            eof { fail "unknown user flow closed before masked TOTP prompt" }
+        }
+        expect {
+            -re {Permission denied|Access denied} {}
+            eof {}
+            timeout { fail "unknown user did not fail promptly" }
+        }
+        exit 0
+    }
+    invalid-selection {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect_totp_and_send $env(CENTRALSSH_TOTP_SECRET)
+        expect_selection "999" {"host (192.168.122.141)" "jail (192.168.122.151)"} {}
+        expect {
+            -re {Invalid selection\.} {}
+            timeout { fail "invalid selection was not reported" }
+            eof { fail "connection closed after invalid selection" }
+        }
+        expect_selection $env(CENTRALSSH_SELECTION) {} {}
+        expect_shell_ready
+        send -- "exit\r"
+        expect eof
+        exit 0
+    }
+    limited-selection {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect_totp_and_send $env(CENTRALSSH_TOTP_SECRET)
+        expect_selection $env(CENTRALSSH_SELECTION) {"jail (192.168.122.151)"} {"host (192.168.122.141)"}
+        expect_shell_ready
+        send -- "exit\r"
+        expect eof
+        exit 0
+    }
+    expanded-selection {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect_totp_and_send $env(CENTRALSSH_TOTP_SECRET)
+        expect_selection $env(CENTRALSSH_SELECTION) {"host (192.168.122.141)" "jail (192.168.122.151)"} {}
+        expect_shell_ready
+        send -- "exit\r"
+        expect eof
+        exit 0
+    }
+    must-change-and-enroll {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect {
+            -re {New password:\s*$} { send -- "short\r" }
+            timeout { fail "timed out waiting for new password prompt" }
+            eof { fail "connection closed before new password prompt" }
+        }
+        expect {
+            -re {Confirm password:\s*$} { send -- "short\r" }
+            timeout { fail "timed out waiting for password confirmation prompt" }
+            eof { fail "connection closed before password confirmation prompt" }
+        }
+        expect {
+            -re {at least 12 characters|must be at least 12 characters} {}
+            timeout { fail "weak password was not rejected" }
+            eof { fail "connection closed after weak password attempt" }
+        }
+        expect {
+            -re {New password:\s*$} { send -- "$env(CENTRALSSH_NEW_PASSWORD)\r" }
+            timeout { fail "new password prompt did not repeat" }
+            eof { fail "connection closed before retry password prompt" }
+        }
+        expect {
+            -re {Confirm password:\s*$} { send -- "$env(CENTRALSSH_PASSWORD)\r" }
+            timeout { fail "timed out waiting for confirmation after retry" }
+            eof { fail "connection closed before confirmation after retry" }
+        }
+        expect {
+            -re {Password must differ from the current password|do not match} {}
+            timeout { fail "same-as-old or mismatched password was not rejected" }
+            eof { fail "connection closed after same-as-old or mismatch rejection" }
+        }
+        expect {
+            -re {New password:\s*$} { send -- "$env(CENTRALSSH_NEW_PASSWORD)\r" }
+            timeout { fail "new password prompt missing for final attempt" }
+            eof { fail "connection closed before final password attempt" }
+        }
+        expect {
+            -re {Confirm password:\s*$} { send -- "$env(CENTRALSSH_NEW_PASSWORD)\r" }
+            timeout { fail "timed out waiting for final confirmation prompt" }
+            eof { fail "connection closed before final confirmation prompt" }
+        }
+        set secret [parse_enrollment_secret]
+        expect {
+            -re {Verification code:\s*$} { send -- "[totp_code $secret]\r" }
+            timeout { fail "verification code prompt missing after enrollment secret" }
+            eof { fail "connection closed before verification code prompt" }
+        }
+        expect_selection $env(CENTRALSSH_SELECTION) {} {}
+        expect_shell_ready
+        send -- "whoami\r"
+        expect {
+            -re {qa_change} {}
+            timeout { fail "post-change shell did not reach target account" }
+            eof { fail "connection closed before whoami completed" }
+        }
+        send -- "exit\r"
+        expect eof
+        puts $secret
+        exit 0
+    }
+    enroll-only {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        set secret [parse_enrollment_secret]
+        expect {
+            -re {Verification code:\s*$} { send -- "[totp_code $secret]\r" }
+            timeout { fail "verification code prompt missing for unenrolled user" }
+            eof { fail "connection closed before verification code prompt" }
+        }
+        expect_selection $env(CENTRALSSH_SELECTION) {} {}
+        expect_shell_ready
+        send -- "whoami\r"
+        expect {
+            -re {qa_enroll} {}
+            timeout { fail "post-enrollment shell did not reach target account" }
+            eof { fail "connection closed before whoami completed" }
+        }
+        send -- "exit\r"
+        expect eof
+        puts $secret
+        exit 0
+    }
+    interactive-basics {
+        spawn_gateway $env(CENTRALSSH_USER) "shell"
+        expect_password_and_send $env(CENTRALSSH_PASSWORD)
+        expect_totp_and_send $env(CENTRALSSH_TOTP_SECRET)
+        expect_selection $env(CENTRALSSH_SELECTION) {"host (192.168.122.141)" "jail (192.168.122.151)"} {}
+        expect_shell_ready
+        send -- "whoami\r"
+        expect {
+            -re {qa_proxy} {}
+            timeout { fail "whoami did not return target username" }
+            eof { fail "shell closed during whoami" }
+        }
+        send -- "stty size\r"
+        expect {
+            -re {[0-9]+ [0-9]+} {}
+            timeout { fail "PTY size was not reported" }
+            eof { fail "shell closed during PTY size check" }
+        }
+        stty rows 45 columns 132
+        send -- "stty size\r"
+        expect {
+            -re {45 132} {}
+            timeout { fail "PTY resize did not propagate" }
+            eof { fail "shell closed during PTY resize check" }
+        }
+        send -- "sleep 10\r"
+        after 1000
+        send -- "\003"
+        expect {
+            -re {[$#>] $} {}
+            timeout { fail "Ctrl-C did not return control to the shell" }
+            eof { fail "shell closed after Ctrl-C" }
+        }
+        send -- "printf 'one\\ntwo\\nthree\\n' | less\r"
+        after 1000
+        send -- "q"
+        expect {
+            -re {[$#>] $} {}
+            timeout { fail "less did not return control cleanly" }
+            eof { fail "shell closed while using less" }
+        }
+        send -- "printf 'seed\\n' >/tmp/centralssh-e2e-vi.txt\r"
+        expect {
+            -re {[$#>] $} {}
+            timeout { fail "failed to seed vi test file" }
+            eof { fail "shell closed while seeding vi file" }
+        }
+        send -- "vi /tmp/centralssh-e2e-vi.txt\r"
+        after 1500
+        send -- "Goadded via centralssh"
+        send -- "\033:wq\r"
+        expect {
+            -re {[$#>] $} {}
+            timeout { fail "vi save-and-quit did not complete" }
+            eof { fail "shell closed while saving vi file" }
+        }
+        send -- "tail -n 1 /tmp/centralssh-e2e-vi.txt\r"
+        expect {
+            -re {added via centralssh} {}
+            timeout { fail "vi edit was not persisted" }
+            eof { fail "shell closed before vi verification" }
+        }
+        send -- "vi /tmp/centralssh-e2e-vi.txt\r"
+        after 1500
+        send -- "GoNOT_SAVED"
+        send -- "\033:q!\r"
+        expect {
+            -re {[$#>] $} {}
+            timeout { fail "vi quit-without-save did not complete" }
+            eof { fail "shell closed while quitting vi without save" }
+        }
+        send -- "tail -n 1 /tmp/centralssh-e2e-vi.txt\r"
+        expect {
+            -re {added via centralssh} {}
+            timeout { fail "vi quit-without-save changed file unexpectedly" }
+            eof { fail "shell closed during final vi verification" }
+        }
+        send -- "if command -v sudo >/dev/null 2>&1; then sudo -k id -u; else echo __NO_SUDO__; fi\r"
+        expect {
+            -re {Password:\s*$} { send -- "$env(CENTRALSSH_QA_PROXY_PASSWORD)\r" }
+            -re {__NO_SUDO__} {}
+            timeout { fail "sudo check neither prompted nor skipped cleanly" }
+            eof { fail "shell closed during sudo prompt test" }
+        }
+        expect {
+            -re {\r\n0\r\n} {}
+            -re {__NO_SUDO__} {}
+            -re {not in the sudoers file} { fail "qa_proxy lacks sudo rights for prompt test" }
+            timeout { fail "sudo prompt did not complete cleanly" }
+            eof { fail "shell closed during sudo completion" }
+        }
+        send -- "su qa_other -c 'whoami'\r"
+        expect {
+            -re {Password:\s*$} { send -- "$env(CENTRALSSH_QA_OTHER_PASSWORD)\r" }
+            timeout { fail "su did not prompt for password" }
+            eof { fail "shell closed during su prompt" }
+        }
+        expect {
+            -re {\r\nqa_other\r\n} {}
+            timeout { fail "su did not switch to qa_other" }
+            eof { fail "shell closed during su verification" }
+        }
+        send -- "exit\r"
+        expect eof
+        exit 0
+    }
+    default {
+        fail "unsupported scenario: $scenario"
+    }
+}

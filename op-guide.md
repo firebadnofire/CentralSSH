@@ -270,6 +270,8 @@ Operational meaning:
 - After the first process start, those passwords are replaced on disk by Argon2id hashes.
 - Operators should still treat any plaintext bootstrap secret as high risk until the service has started and rewritten config.
 - The packaged example uses a rejected placeholder. Replace it with a unique temporary password before first start.
+- Bootstrap migration is a config rewrite. If the running service cannot preserve ownership and mode during that rewrite, startup fails instead of silently changing file custody.
+- In strict mode, bootstrap migration is blocked until KEK/provider readiness and `master.key` integrity succeed. If readiness fails, the plaintext bootstrap password remains on disk and startup stops.
 
 Strict production mode should use encrypted config values. In that mode,
 CentralSSH stores encrypted envelopes in `config.toml`, decrypts a runtime
@@ -562,6 +564,43 @@ Even outside strict mode:
 
 Non-strict mode is useful for local development, not for production deployment.
 
+## 19A. TPM and KEK provider semantics
+
+If you use `security.kek_provider.kind = "tpm2-command"`, the TPM is part of
+the key-encryption-key custody path for `master.key`.
+
+What the TPM does:
+
+- The TPM or TPM-backed command unwraps the active master key entry from `master.key`.
+- That unwrapped master key is then used to decrypt stored config secrets and encrypted outbound private keys.
+- PCR policy can make unseal succeed only when firmware, boot state, or other bound measurements match the expected values.
+
+What the TPM does not do:
+
+- It does not encrypt SSH transport traffic between client, gateway, and target.
+- It does not keep secrets encrypted in process memory after startup.
+- It does not protect operators from every local-root compromise after unseal.
+
+Operational consequences:
+
+- If PCR bindings change, startup can fail even when the disk files are intact.
+- If the motherboard, TPM, firmware policy, or sealing policy changes, recovery may require a previously exported recovery path outside the TPM.
+- If the provider cannot unwrap the active key, CentralSSH does not migrate bootstrap passwords, does not generate outbound private keys, and does not rewrite config in strict mode.
+- `allow_insecure_boot=true` changes this behavior only by explicitly allowing a weaker startup path and logging a critical warning. It does not make TPM failure safe.
+
+Files and creation rules:
+
+- Auto-created if missing during install: `/etc/centralssh/known_hosts` and the audit log file.
+- Auto-created if missing at runtime: the gateway host key and missing outbound user private keys, subject to the active security mode and path permissions.
+- Never auto-created: `/etc/centralssh/master.key`.
+- Never auto-created for you: target account public-key installation on downstream servers.
+
+Operator requirements:
+
+- Decide before rollout whether TPM PCR binding is strict enough for your security model and loose enough for your maintenance workflow.
+- Document exactly how to recover if TPM unseal fails after firmware updates, board replacement, or policy changes.
+- Do not enable strict production startup until `master.key` can be unwrapped non-interactively under the same service conditions the daemon will actually use.
+
 `master.key` must be a regular root-owned `0600` file in strict mode when a
 provider is configured. The keyset schema is:
 
@@ -605,6 +644,7 @@ Operational consequence:
 
 - If the service cannot preserve ownership during a rewrite, the write fails
 - Running the service as root is the expected production model
+- A non-root launch that reaches a rewrite path can fail partway through startup or first-login persistence even when initial read-only validation succeeded.
 
 ## 21. Service management
 
@@ -673,6 +713,13 @@ Important note:
 
 It does not fully provision per-user per-server outbound keys for you.
 
+It also does not:
+
+- create `master.key`
+- enroll TOTP for users
+- install downstream public keys on target systems
+- decide PCR policy or TPM recovery policy for you
+
 ## 23. Recommended production setup
 
 1. Build and install CentralSSH.
@@ -691,6 +738,12 @@ It does not fully provision per-user per-server outbound keys for you.
 9. Start the service.
 10. Verify a full login for one real user.
 11. Verify target access and audit log output.
+
+TPM-specific warning:
+
+- If TPM unseal is required for startup, test the exact service path after reboot before rollout.
+- Test at least one recovery drill where the TPM unseal path is unavailable.
+- Keep a documented migration or recovery procedure before changing firmware, PCR policy, motherboard, or TPM hardware.
 
 ## 24. What to standardize before rollout
 

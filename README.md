@@ -87,6 +87,24 @@ sudo systemctl enable --now centralssh
 sudo systemctl status centralssh
 ```
 
+## End-to-End Tests
+
+The repository includes a profile-driven FreeBSD E2E harness under [tests/e2e/README.md](/Users/william/git/CentralSSH/tests/e2e/README.md). Use it for real gateway validation with OpenSSH clients, keyboard-interactive auth, PTY exercise, forwarding, `scp`/`sftp`, reload, and audit/resource capture.
+
+Typical entry points:
+
+```sh
+CENTRALSSH_PROFILE=access-md-home-195-hostonly \
+CENTRALSSH_JUMP_KEY=/Users/william/.ssh/cgpt/cgpt \
+tests/e2e/run_freebsd_lab.sh smoke
+
+CENTRALSSH_PROFILE_FILE=/absolute/path/profile.env \
+CENTRALSSH_JUMP_KEY=/Users/william/.ssh/cgpt/cgpt \
+tests/e2e/run_freebsd_lab.sh full
+```
+
+The detailed harness contract, reset modes, artifact layout, and profile guidance are documented in [tests/e2e/README.md](/Users/william/git/CentralSSH/tests/e2e/README.md).
+
 ## FreeBSD rc.conf Overrides
 
 Optional rc.conf keys:
@@ -222,6 +240,7 @@ Notes:
 
 - Outbound target SSH username is always the authenticated CentralSSH username.
 - If bootstrap plaintext passwords are present, CentralSSH hashes them with Argon2id at startup and atomically rewrites config only after cryptographic readiness succeeds.
+- If the service cannot preserve file ownership during that rewrite, startup fails instead of silently rewriting with different custody.
 - The documented placeholder password is rejected at config validation time. Replace it before starting the service.
 
 ## Built-In Abuse Protection
@@ -249,6 +268,10 @@ Operational notes:
 Strict mode performs KEK/provider readiness before bootstrap. If the provider or
 `master.key` fails, CentralSSH does not migrate passwords, generate outbound keys,
 or rewrite config.
+
+For `tpm2-command`, the TPM participates only in KEK custody and unseal policy.
+It is not SSH transport encryption, and decrypted material still exists in
+process memory after unseal.
 
 `master.key` is TOML with this schema:
 

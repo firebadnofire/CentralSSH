@@ -1,6 +1,18 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "${CENTRALSSH_PROFILE_FILE:-}" ]; then
+  # shellcheck disable=SC1090
+  . "$CENTRALSSH_PROFILE_FILE"
+elif [ -n "${CENTRALSSH_E2E_ENV_FILE:-}" ]; then
+  # shellcheck disable=SC1090
+  . "$CENTRALSSH_E2E_ENV_FILE"
+elif [ -f "$SCRIPT_DIR/profiles/freebsd-host-jail-141-151.env" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/profiles/freebsd-host-jail-141-151.env"
+fi
+
 : "${CENTRALSSH_JUMP_HOST:=192.168.86.89}"
 : "${CENTRALSSH_HOST:=192.168.122.141}"
 : "${CENTRALSSH_GATEWAY:=192.168.122.151}"
@@ -71,7 +83,7 @@ DISPLAY=:0 \
 SSH_ASKPASS_REQUIRE=force \
 SSH_ASKPASS="$askpass_script" \
 ssh \
-  -o "ProxyCommand=ssh -i $CENTRALSSH_JUMP_KEY -o IdentitiesOnly=yes -J $CENTRALSSH_JUMP_HOST $CENTRALSSH_JUMP_USER@$CENTRALSSH_HOST -W %h:%p" \
+  -o "ProxyCommand=ssh -i $CENTRALSSH_JUMP_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -J $CENTRALSSH_JUMP_HOST $CENTRALSSH_JUMP_USER@$CENTRALSSH_HOST -W %h:%p" \
   -o UserKnownHostsFile=/dev/null \
   -o StrictHostKeyChecking=no \
   -o PreferredAuthentications=keyboard-interactive \

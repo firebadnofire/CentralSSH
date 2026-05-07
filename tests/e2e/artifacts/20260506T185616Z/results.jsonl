@@ -1,0 +1,2 @@
+{"timestamp":"2026-05-06T18:56:19Z","stage":"01-environment","case":"reachability","status":"pass","detail":"host and jail reachable over documented path"}
+{"timestamp":"2026-05-06T18:56:21Z","stage":"02-build-bootstrap","case":"sync_repo","status":"pass","detail":"local checkout copied to jail build path"}

@@ -110,6 +110,10 @@ key material creation. In strict mode this function is reached only after
 `SecretManager::readiness_check()` succeeds, so provider failure cannot cause
 plaintext password migration, key creation, or config writes.
 
+If bootstrap reaches a config rewrite path and the running process cannot
+preserve ownership and permissions during the atomic replace, the operation
+fails rather than silently changing file custody.
+
 ## 4. Configuration system
 
 Current config format is TOML, not the JSON structure described by the long-form design spec.

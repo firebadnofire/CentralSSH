@@ -1,0 +1,52 @@
+[[users]]
+name = "qa_proxy"
+password = "$argon2id$v=19$m=65536,t=3,p=1$Y2VudHJhbHNzaFFBUHJ4eTE$TSgIqW02BkyR6m9WGL9NGUTcfILgQlc7O8MbQp7I0w4"
+totp_secret = "PZSJHXVDRGAKYNLFCZQQSMW6NTCT6QX7"
+must_change_password = false
+allowed_servers = ["host", "jail"]
+
+[[users]]
+name = "qa_change"
+password = "iLPElcKh1wKC5sb1Jo"
+must_change_password = true
+allowed_servers = ["host", "jail"]
+
+[[users]]
+name = "qa_enroll"
+password = "$argon2id$v=19$m=65536,t=3,p=1$Y2VudHJhbHNzaFFBRW5ybDE$jgksUKIoiECW5q3VltTHsaFr68TqprAJZjLB2hKH6kg"
+must_change_password = false
+allowed_servers = ["host", "jail"]
+
+[[users]]
+name = "qa_limited"
+password = "$argon2id$v=19$m=65536,t=3,p=1$Y2VudHJhbHNzaFFBTGltdDE$9fUrw3+M6Nc7h9O4XH+szQ82lhYTKbYD/HsMcBKc8aQ"
+totp_secret = "VJQOLJOG5K43I5P4BYGUTWTCUJUHZK3T"
+must_change_password = false
+allowed_servers = ["jail"]
+
+[[users]]
+name = "qa_multi"
+password = "$argon2id$v=19$m=65536,t=3,p=1$Y2VudHJhbHNzaFFBTXVsdDE$vVlhhuM3n0vOUdsD8gT7wJyvIQSPEcCt8kh/xz4U1Mo"
+totp_secret = "RAYWVVISOM4EWH3L6A4WGYM5RM2O3F4E"
+must_change_password = false
+allowed_servers = ["host", "jail"]
+
+[settings]
+user_key_root = "/tmp/centralssh-qa/keys"
+per_user_per_server = true
+known_hosts_path = "/tmp/centralssh-qa/known_hosts"
+audit_log_path = "/tmp/centralssh-qa/audit.jsonl"
+enforce_password_policy = true
+min_password_policy = 12
+
+[fail2ban]
+enabled = true
+max_failures = 3
+find_time = "60s"
+ban_time = "20s"
+max_ban_time = "2m"
+backoff_multiplier = 2.0
+delay_before_ban = true
+delay_time = "1s"
+persist_state = true
+state_path = "/tmp/centralssh-qa/fail2ban_state.json"

@@ -1,0 +1,3 @@
+centralssh error: security policy violation for /tmp/centralssh-qa/config.toml: cannot preserve owner 1001:0 as unprivileged uid 1001:1001
+[2m2026-05-06T18:59:25.372200Z[0m [33m WARN[0m main ThreadId(01) non-strict security mode without KEK provider; bootstrap may create plaintext local development state
+[2m2026-05-06T18:59:25.439668Z[0m [32m INFO[0m main ThreadId(01) audit logger initialized [3maudit_log[0m[2m=[0m/tmp/centralssh-qa/audit.jsonl

@@ -1,0 +1,4 @@
+UTF-8 smoke:
+zażółć gęślą jaźń
+日本語 terminal test
+emoji intentionally omitted

@@ -6,9 +6,7 @@ You connect in two stages:
 
 Your machine
 ↓ SSH
-FreeBSD host (192.168.122.141)
-↓ SSH
-Jail (192.168.122.151)
+FreeBSD host (192.168.122.195)
 
 ---
 
@@ -18,20 +16,14 @@ Always connect through the jump host.
 
 Jump host:
 
-```
--J 192.168.86.89
+```sh
+-J home
 ```
 
 Example:
 
-```
-ssh -J 192.168.86.89 cgpt@192.168.122.141
-```
-
-Then connect to the jail:
-
-```
-ssh 192.168.122.151
+```sh
+ssh -J home cgpt@192.168.122.195
 ```
 
 ---
@@ -51,20 +43,20 @@ Capabilities:
 
 ## Jail (example: myjail2)
 
-This jail is **illustrative**. It may not exist yet.
+This jail is illustrative. It may not exist yet.
 
 If it does not exist, you may need to create it using Bastille from the host.
 
 Typical lifecycle (from host):
 
-```
+```sh
 bastille create myjail2 15.0-RELEASE 192.168.122.151
 bastille start myjail2
 ```
 
 Then connect:
 
-```
+```sh
 ssh 192.168.122.151
 ```
 
@@ -117,6 +109,6 @@ If uncertain, stop and reassess before acting.
 
 * Host is the control layer
 * Jail is the execution layer
-* Access always goes through the jump host
+* Access goes through the `home` jump host
 * Always verify connectivity before proceeding
 

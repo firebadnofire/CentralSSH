@@ -1,0 +1,6 @@
+{"timestamp":"2026-05-06T18:57:40Z","stage":"01-environment","case":"reachability","status":"pass","detail":"host and jail reachable over documented path"}
+{"timestamp":"2026-05-06T18:57:42Z","stage":"02-build-bootstrap","case":"sync_repo","status":"pass","detail":"local checkout copied to FreeBSD host build path"}
+{"timestamp":"2026-05-06T18:58:19Z","stage":"02-build-bootstrap","case":"build_release","status":"pass","detail":"cargo build --release succeeded on FreeBSD host"}
+{"timestamp":"2026-05-06T18:58:57Z","stage":"02-build-bootstrap","case":"target_users","status":"pass","detail":"host and jail QA users refreshed"}
+{"timestamp":"2026-05-06T18:59:09Z","stage":"02-build-bootstrap","case":"lab_config","status":"pass","detail":"config, servers, and known_hosts refreshed"}
+{"timestamp":"2026-05-06T18:59:48Z","stage":"02-build-bootstrap","case":"start_gateway","status":"fail","detail":"gateway did not open 192.168.122.151:7788"}
