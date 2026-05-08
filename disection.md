@@ -95,6 +95,7 @@ Primary structs in `src/config/mod.rs`:
 
 - `ConfigFile`
 - `SettingsConfig`
+- `KexPolicyConfig`
 - `UserRecord`
 - `ServersFile`
 - `EffectivePaths`
@@ -142,6 +143,7 @@ Reload is all-or-nothing. Invalid reload input does not replace the previous act
 - valid TOTP secret parseability
 - at least one allowed server per user
 - every allowed server must exist in `servers.toml`
+- configured frontend KEX names must be supported by the pinned SSH library stack
 - fail2ban config must be parseable if present
 - password policy minimum must be `<= 256`
 
@@ -452,6 +454,7 @@ The current proxy code explicitly supports:
 - `subsystem`
 - `signal`
 - `window-change`
+- channel `window-adjust` flow-control handling
 - `env`
 - `x11-req`
 - local forwarding via `direct-tcpip`
@@ -483,6 +486,7 @@ For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a sim
 
 - forward `Data`
 - forward `ExtendedData`
+- ignore `WindowAdjusted` because it is transport-level flow control
 - forward `Eof`
 - close on `Close`
 - record unexpected messages as errors
@@ -514,20 +518,34 @@ Existing sessions are not live-mutated. New sessions see the latest validated sn
 
 ## 13. Crypto policy
 
-`src/crypto_policy.rs` defines one shared transport policy for both server and client sides.
+`src/crypto_policy.rs` defines the SSH transport policy for the frontend listener and the outbound target client.
 
 Current algorithm choices:
 
-- KEX: Curve25519 variants plus OpenSSH strict-kex extensions
+- frontend KEX default: `mlkem768x25519-sha256`, `curve25519-sha256`, `curve25519-sha256@libssh.org`, plus `ext-info-*` and OpenSSH strict-kex markers appended internally
+- outbound client KEX default: the same ML-KEM-first ordering
 - host keys: Ed25519, ECDSA P-256/P-384/P-521, RSA SHA-2
 - ciphers: `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`
 - MACs: `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256-etm@openssh.com`
 - compression: `none`
 - rekey: `512 MiB` or `30 minutes`
 
+`config.toml` can now carry a top-level `[kex_policy]` block with:
+
+- `frontend_preferred`: explicit operator-controlled KEX ordering
+- `frontend_require_post_quantum`: PQ-only frontend mode; classical KEX names are filtered out before the listener advertises capabilities
+- `backend_preferred`: explicit operator-controlled KEX ordering for gateway-to-target SSH transport
+- `backend_require_post_quantum`: outbound strict-PQ mode for gateway-to-target SSH transport
+
+Current supported configurable frontend KEX names are:
+
+- `mlkem768x25519-sha256`
+- `curve25519-sha256`
+- `curve25519-sha256@libssh.org`
+
 Legacy SSH choices such as SHA-1 `ssh-rsa`, CBC ciphers, and classic DH groups are intentionally absent.
 
-This is a classical SSH policy with forward secrecy and reduced legacy exposure, not a post-quantum transport. Captured Curve25519 SSH handshakes remain vulnerable to a future cryptographically relevant quantum computer. `russh 0.53.0` does not currently provide a production hybrid ML-KEM/Kyber SSH key exchange, so the repository documents this blocker in `SECURITY-SNDL.md` and keeps algorithm selection centralized for migration.
+This is now a partial PQ-hybrid transport upgrade, not full post-quantum coverage. The frontend listener and outbound SSH client can negotiate `mlkem768x25519-sha256`, but the current `russh 0.60.2` line still does not expose `sntrup761x25519-sha512`, and SSH host/user signatures remain classical. Frontend policy-load audit is implemented, backend policy-applied audit and backend negotiated-KEX audit are implemented, and per-session frontend negotiated-KEX audit remains blocked by the current `russh` server handler API.
 
 ## 14. Error model
 
@@ -553,7 +571,7 @@ Based on the code in this repository today:
 - The proxy code supports more than shell-only sessions.
 - `README.md` and `op-guide.md` now describe the transparent proxy model instead of the old shell-only assumptions.
 - Agent forwarding remains intentionally disabled.
-- Post-quantum or hybrid SSH key exchange is not implemented by the current SSH library stack.
+- Frontend and outbound SSH transport now support `mlkem768x25519-sha256`, but `sntrup761x25519-sha512` is still not implemented by the current SSH library stack.
 - The generic prompt helpers in `src/ui/mod.rs` are no longer the center of the live SSH login path.
 
 ## 16. Practical mental model

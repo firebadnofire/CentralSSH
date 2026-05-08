@@ -14,7 +14,7 @@ use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig, client};
 use ssh_key::{LineEnding, PrivateKey};
 use tokio::time::sleep;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use zeroize::Zeroizing;
 
 use crate::abuse::{BanEvent, BanEventKind, FailureOutcome, PreAuthCheck};
@@ -23,8 +23,7 @@ use crate::audit::{AuditEvent, AuditResult};
 use crate::config::validate_path_has_no_symlinks;
 use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
 use crate::crypto_policy::{
-    SSH_REKEY_BYTES, SSH_REKEY_TIME, apply_client_transport_crypto_policy,
-    apply_server_transport_crypto_policy,
+    apply_client_transport_crypto_policy, apply_server_transport_crypto_policy,
 };
 use crate::error::{CentralSshError, Result};
 
@@ -327,6 +326,13 @@ Use the plaintext secret or URI above.\n\n"
                 reason,
                 ban_duration_seconds: ban_duration.map(|duration| duration.as_secs()),
                 ban_until,
+                transport_side: None,
+                kex_algorithm: None,
+                kex_algorithms_offered: None,
+                post_quantum: None,
+                hybrid: None,
+                classical_fallback: None,
+                pq_required: None,
             })
             .await;
     }
@@ -1210,21 +1216,29 @@ fn qr_module_is_dark(colors: &[Color], width: usize, x: usize, y: usize) -> bool
     colors[idx] == Color::Dark
 }
 
-fn apply_server_transport_config(config: &mut server::Config) {
-    apply_server_transport_crypto_policy(config);
+fn apply_server_transport_config(
+    config: &mut server::Config,
+    policy: &crate::config::KexPolicyConfig,
+) -> Result<crate::crypto_policy::KexPolicySummary> {
+    let summary = apply_server_transport_crypto_policy(config, policy)?;
     // Russh defaults to a 10-minute inactivity timeout, which breaks quiet
     // long-lived exec sessions. Keep them alive with infrequent SSH keepalives
     // instead of a hard idle reap.
     config.inactivity_timeout = None;
     config.keepalive_interval = Some(SSH_KEEPALIVE_INTERVAL);
     config.keepalive_max = SSH_KEEPALIVE_MAX;
+    Ok(summary)
 }
 
-fn apply_client_transport_config(config: &mut client::Config) {
-    apply_client_transport_crypto_policy(config);
+fn apply_client_transport_config(
+    config: &mut client::Config,
+    policy: &crate::config::KexPolicyConfig,
+) -> Result<crate::crypto_policy::KexPolicySummary> {
+    let summary = apply_client_transport_crypto_policy(config, policy)?;
     config.inactivity_timeout = None;
     config.keepalive_interval = Some(SSH_KEEPALIVE_INTERVAL);
     config.keepalive_max = SSH_KEEPALIVE_MAX;
+    Ok(summary)
 }
 
 impl server::Handler for GatewayHandler {
@@ -1729,6 +1743,7 @@ pub async fn run_gateway_server(
     state: Arc<AppState>,
     strict_security: bool,
 ) -> Result<()> {
+    let frontend_kex_policy = state.config_store.snapshot().await.config.kex_policy;
     ensure_server_host_key(host_key_path)?;
     if strict_security {
         validate_host_key_security(host_key_path)?;
@@ -1737,11 +1752,45 @@ pub async fn run_gateway_server(
     let mut config = server::Config::default();
     config.methods = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
     config.auth_rejection_time = Duration::from_secs(3);
-    apply_server_transport_config(&mut config);
+    let frontend_kex_summary = apply_server_transport_config(&mut config, &frontend_kex_policy)?;
 
     let host_key = russh::keys::load_secret_key(host_key_path, None)
         .map_err(|error| CentralSshError::Ssh(format!("failed to load host key: {error}")))?;
     config.keys.push(host_key);
+
+    info!(
+        offered_kex = %frontend_kex_summary.offered_algorithms.join(","),
+        require_post_quantum = frontend_kex_summary.require_post_quantum,
+        classical_fallback = frontend_kex_summary.classical_fallback,
+        "frontend SSH KEX policy applied"
+    );
+    let _ = state
+        .audit
+        .log(AuditEvent {
+            timestamp: Utc::now(),
+            event_type: "frontend_kex_policy_loaded".to_string(),
+            request_id: "system".to_string(),
+            remote_ip: None,
+            remote_port: None,
+            username: None,
+            target_server: None,
+            auth_method: None,
+            result: AuditResult::Success,
+            reason: Some(
+                "frontend negotiated KEX audit is not exposed by the current russh server handler API"
+                    .to_string(),
+            ),
+            ban_duration_seconds: None,
+            ban_until: None,
+            transport_side: Some("frontend".to_string()),
+            kex_algorithm: None,
+            kex_algorithms_offered: Some(frontend_kex_summary.offered_algorithms.clone()),
+            post_quantum: Some(!frontend_kex_summary.classical_fallback),
+            hybrid: None,
+            classical_fallback: Some(frontend_kex_summary.classical_fallback),
+            pq_required: Some(frontend_kex_summary.require_post_quantum),
+        })
+        .await;
 
     let config = Arc::new(config);
     let mut server = GatewayServer::new(state);
@@ -1852,27 +1901,49 @@ mod tests {
     #[test]
     fn server_transport_config_disables_idle_reap_and_enables_sparse_keepalives() {
         let mut config = server::Config::default();
-        apply_server_transport_config(&mut config);
+        apply_server_transport_config(&mut config, &crate::config::KexPolicyConfig::default())
+            .expect("server transport config");
 
         assert_eq!(config.inactivity_timeout, None);
         assert_eq!(config.keepalive_interval, Some(SSH_KEEPALIVE_INTERVAL));
         assert_eq!(config.keepalive_max, SSH_KEEPALIVE_MAX);
-        assert_eq!(config.limits.rekey_write_limit, SSH_REKEY_BYTES);
-        assert_eq!(config.limits.rekey_read_limit, SSH_REKEY_BYTES);
-        assert_eq!(config.limits.rekey_time_limit, SSH_REKEY_TIME);
+        assert_eq!(
+            config.limits.rekey_write_limit,
+            crate::crypto_policy::SSH_REKEY_BYTES
+        );
+        assert_eq!(
+            config.limits.rekey_read_limit,
+            crate::crypto_policy::SSH_REKEY_BYTES
+        );
+        assert_eq!(
+            config.limits.rekey_time_limit,
+            crate::crypto_policy::SSH_REKEY_TIME
+        );
     }
 
     #[test]
     fn client_transport_config_disables_idle_reap_and_enables_sparse_keepalives() {
         let mut config = client::Config::default();
-        apply_client_transport_config(&mut config);
+        let summary =
+            apply_client_transport_config(&mut config, &crate::config::KexPolicyConfig::default())
+                .expect("client transport config");
 
         assert_eq!(config.inactivity_timeout, None);
         assert_eq!(config.keepalive_interval, Some(SSH_KEEPALIVE_INTERVAL));
         assert_eq!(config.keepalive_max, SSH_KEEPALIVE_MAX);
-        assert_eq!(config.limits.rekey_write_limit, SSH_REKEY_BYTES);
-        assert_eq!(config.limits.rekey_read_limit, SSH_REKEY_BYTES);
-        assert_eq!(config.limits.rekey_time_limit, SSH_REKEY_TIME);
+        assert!(summary.classical_fallback);
+        assert_eq!(
+            config.limits.rekey_write_limit,
+            crate::crypto_policy::SSH_REKEY_BYTES
+        );
+        assert_eq!(
+            config.limits.rekey_read_limit,
+            crate::crypto_policy::SSH_REKEY_BYTES
+        );
+        assert_eq!(
+            config.limits.rekey_time_limit,
+            crate::crypto_policy::SSH_REKEY_TIME
+        );
     }
 
     #[test]

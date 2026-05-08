@@ -2,18 +2,18 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chrono::Utc;
 use russh::client::{self, Handle as ClientHandle};
 use russh::keys::{PrivateKeyWithHashAlg, check_known_hosts_path, load_secret_key};
 use russh::server;
-use russh::{
-    Channel, ChannelId, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, CryptoVec, Disconnect, Sig,
-};
+use russh::{Channel, ChannelId, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, Sig};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::app::AppState;
 use crate::audit::{AuditEvent, AuditLogger, AuditResult};
+use crate::crypto_policy::{is_hybrid_kex_name, is_post_quantum_kex_name};
 use crate::error::{CentralSshError, Result};
 use crate::keys::resolve_user_server_private_key_path;
 use crate::ssh::apply_client_transport_config;
@@ -56,6 +56,78 @@ impl ProxyAuditContext {
                 reason: reason_code,
                 ban_duration_seconds: None,
                 ban_until: None,
+                transport_side: None,
+                kex_algorithm: None,
+                kex_algorithms_offered: None,
+                post_quantum: None,
+                hybrid: None,
+                classical_fallback: None,
+                pq_required: None,
+            })
+            .await;
+    }
+
+    async fn log_kex_negotiated(
+        &self,
+        event_type: &str,
+        transport_side: &str,
+        kex_algorithm: &str,
+    ) {
+        let _ = self
+            .audit
+            .log(AuditEvent {
+                timestamp: Utc::now(),
+                event_type: event_type.to_string(),
+                request_id: self.session_id.clone(),
+                remote_ip: Some(self.source_ip.clone()),
+                remote_port: None,
+                username: Some(self.username.clone()),
+                target_server: Some(self.target_server.clone()),
+                auth_method: None,
+                result: AuditResult::Success,
+                reason: None,
+                ban_duration_seconds: None,
+                ban_until: None,
+                transport_side: Some(transport_side.to_string()),
+                kex_algorithm: Some(kex_algorithm.to_string()),
+                kex_algorithms_offered: None,
+                post_quantum: Some(is_post_quantum_kex_name(kex_algorithm)),
+                hybrid: Some(is_hybrid_kex_name(kex_algorithm)),
+                classical_fallback: Some(!is_post_quantum_kex_name(kex_algorithm)),
+                pq_required: None,
+            })
+            .await;
+    }
+
+    async fn log_kex_policy_applied(
+        &self,
+        transport_side: &str,
+        offered_algorithms: Vec<String>,
+        require_post_quantum: bool,
+        classical_fallback: bool,
+    ) {
+        let _ = self
+            .audit
+            .log(AuditEvent {
+                timestamp: Utc::now(),
+                event_type: "backend_kex_policy_applied".to_string(),
+                request_id: self.session_id.clone(),
+                remote_ip: Some(self.source_ip.clone()),
+                remote_port: None,
+                username: Some(self.username.clone()),
+                target_server: Some(self.target_server.clone()),
+                auth_method: None,
+                result: AuditResult::Success,
+                reason: None,
+                ban_duration_seconds: None,
+                ban_until: None,
+                transport_side: Some(transport_side.to_string()),
+                kex_algorithm: None,
+                kex_algorithms_offered: Some(offered_algorithms),
+                post_quantum: Some(!classical_fallback),
+                hybrid: None,
+                classical_fallback: Some(classical_fallback),
+                pq_required: Some(require_post_quantum),
             })
             .await;
     }
@@ -66,6 +138,7 @@ struct TargetClientHandler {
     verifier: StrictKnownHostsVerifier,
     server_handle: server::Handle,
     last_error: Arc<Mutex<Option<String>>>,
+    audit_context: ProxyAuditContext,
 }
 
 pub struct ProxySession {
@@ -79,8 +152,9 @@ pub struct ProxySession {
 enum FrontendSessionAction {
     ForwardData {
         extended_code: Option<u32>,
-        data: CryptoVec,
+        data: Bytes,
     },
+    WindowAdjusted,
     RequestPty {
         want_reply: bool,
         term: String,
@@ -133,7 +207,7 @@ enum FrontendSessionAction {
 enum BackendSessionAction {
     ForwardData {
         extended_code: Option<u32>,
-        data: CryptoVec,
+        data: Bytes,
     },
     Eof,
     Close,
@@ -156,6 +230,18 @@ enum BackendSessionAction {
 
 impl client::Handler for TargetClientHandler {
     type Error = russh::Error;
+
+    async fn kex_done(
+        &mut self,
+        _shared_secret: Option<&[u8]>,
+        names: &russh::Names,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        self.audit_context
+            .log_kex_negotiated("backend_kex_negotiated", "backend", names.kex.as_ref())
+            .await;
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -259,6 +345,14 @@ impl ProxySession {
         )?;
 
         let last_error = Arc::new(Mutex::new(None));
+        let config_snapshot = app_state.config_store.snapshot().await;
+        let audit_context = ProxyAuditContext {
+            audit: app_state.audit.clone(),
+            session_id,
+            source_ip: source_ip.to_string(),
+            username: username.clone(),
+            target_server: target.name,
+        };
         let handler = TargetClientHandler {
             verifier: StrictKnownHostsVerifier {
                 expected_host: target.host.clone(),
@@ -266,11 +360,21 @@ impl ProxySession {
             },
             server_handle: server_handle.clone(),
             last_error: last_error.clone(),
+            audit_context: audit_context.clone(),
         };
 
         let target_addr = format!("{}:22", target.host);
         let mut config = client::Config::default();
-        apply_client_transport_config(&mut config);
+        let backend_kex_summary =
+            apply_client_transport_config(&mut config, &config_snapshot.config.kex_policy)?;
+        audit_context
+            .log_kex_policy_applied(
+                "backend",
+                backend_kex_summary.offered_algorithms.clone(),
+                backend_kex_summary.require_post_quantum,
+                backend_kex_summary.classical_fallback,
+            )
+            .await;
         let config = Arc::new(config);
         let mut target_handle = client::connect(config, target_addr, handler)
             .await
@@ -305,13 +409,7 @@ impl ProxySession {
             server_handle,
             target_handle: Arc::new(Mutex::new(target_handle)),
             last_error,
-            audit_context: ProxyAuditContext {
-                audit: app_state.audit.clone(),
-                session_id,
-                source_ip: source_ip.to_string(),
-                username,
-                target_server: target.name,
-            },
+            audit_context,
         })
     }
 
@@ -368,7 +466,7 @@ impl ProxySession {
     }
 
     pub async fn tcpip_forward(&self, address: &str, port: u32) -> Result<u32> {
-        let mut handle = self.target_handle.lock().await;
+        let handle = self.target_handle.lock().await;
         handle
             .tcpip_forward(address.to_string(), port)
             .await
@@ -557,6 +655,9 @@ async fn relay_raw_channel<S>(
                     break;
                 }
             }
+            Some(ChannelMsg::WindowAdjusted { .. }) => {
+                // SSH flow-control updates are handled by the library transport.
+            }
             Some(ChannelMsg::ExtendedData { ext, data }) => {
                 if let Err(error) = write_raw_channel_data(&writer, Some(ext), &data).await {
                     record_error(&last_error, error.to_string()).await;
@@ -598,6 +699,7 @@ fn classify_frontend_session_msg(
             extended_code: None,
             data,
         }),
+        ChannelMsg::WindowAdjusted { .. } => Ok(FrontendSessionAction::WindowAdjusted),
         ChannelMsg::ExtendedData { ext, data } => Ok(FrontendSessionAction::ForwardData {
             extended_code: Some(ext),
             data,
@@ -676,7 +778,6 @@ fn classify_frontend_session_msg(
         | ChannelMsg::XonXoff { .. }
         | ChannelMsg::ExitStatus { .. }
         | ChannelMsg::ExitSignal { .. }
-        | ChannelMsg::WindowAdjusted { .. }
         | ChannelMsg::Success
         | ChannelMsg::Failure) => Err(format!(
             "unexpected frontend session channel message: {unexpected:?}"
@@ -752,6 +853,7 @@ async fn apply_frontend_session_action(
         } => write_channel_data(backend, extended_code, &data)
             .await
             .map_err(|error| error.to_string()),
+        FrontendSessionAction::WindowAdjusted => Ok(()),
         FrontendSessionAction::RequestPty {
             want_reply,
             term,
@@ -880,12 +982,16 @@ async fn apply_backend_session_action(
                 server_handle
                     .extended_data(frontend_id, ext, data)
                     .await
-                    .map_err(|failed_data| String::from_utf8_lossy(&failed_data).to_string())
+                    .map_err(|failed_data: Bytes| {
+                        String::from_utf8_lossy(failed_data.as_ref()).to_string()
+                    })
             } else {
                 server_handle
                     .data(frontend_id, data)
                     .await
-                    .map_err(|failed_data| String::from_utf8_lossy(&failed_data).to_string())
+                    .map_err(|failed_data: Bytes| {
+                        String::from_utf8_lossy(failed_data.as_ref()).to_string()
+                    })
             }
         }
         BackendSessionAction::Eof => server_handle
@@ -934,7 +1040,7 @@ async fn apply_backend_session_action(
 async fn write_channel_data(
     backend: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
     extended_code: Option<u32>,
-    data: &CryptoVec,
+    data: &[u8],
 ) -> std::result::Result<(), russh::Error> {
     let guard = backend.lock().await;
     write_raw_channel_data(&*guard, extended_code, data).await
@@ -943,7 +1049,7 @@ async fn write_channel_data(
 async fn write_raw_channel_data<S>(
     writer: &ChannelWriteHalf<S>,
     extended_code: Option<u32>,
-    data: &CryptoVec,
+    data: &[u8],
 ) -> std::result::Result<(), russh::Error>
 where
     S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static,
@@ -983,8 +1089,8 @@ async fn record_error(last_error: &Arc<Mutex<Option<String>>>, message: String) 
 mod tests {
     use super::*;
 
-    fn data(bytes: &[u8]) -> CryptoVec {
-        CryptoVec::from_slice(bytes)
+    fn data(bytes: &[u8]) -> Bytes {
+        Bytes::copy_from_slice(bytes)
     }
 
     #[test]
@@ -1056,6 +1162,19 @@ mod tests {
             FrontendSessionAction::Signal { signal } => {
                 assert!(matches!(signal, Sig::TERM));
             }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_frontend_window_adjusted_is_ignored() {
+        let action = classify_frontend_session_msg(ChannelMsg::WindowAdjusted {
+            new_size: 1_047_061,
+        })
+        .expect("window-adjust action");
+
+        match action {
+            FrontendSessionAction::WindowAdjusted => {}
             other => panic!("unexpected action: {other:?}"),
         }
     }

@@ -174,13 +174,13 @@ fn ensure_keypair_files(user_dir: &Path) -> Result<KeypairFileReport> {
         })?
     } else {
         private_key_created = true;
-        let private_key = PrivateKey::random(
-            &mut ssh_key::rand_core::OsRng,
-            ssh_key::Algorithm::Ed25519,
-        )
-        .map_err(|error| {
-            CentralSshError::InvalidConfig(format!("failed to create user private key: {error}"))
-        })?;
+        let private_key =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+                .map_err(|error| {
+                    CentralSshError::InvalidConfig(format!(
+                        "failed to create user private key: {error}"
+                    ))
+                })?;
         let encoded = private_key.to_openssh(LineEnding::LF).map_err(|error| {
             CentralSshError::InvalidConfig(format!("failed to encode user private key: {error}"))
         })?;
@@ -200,14 +200,9 @@ fn ensure_keypair_files(user_dir: &Path) -> Result<KeypairFileReport> {
         validate_existing_regular_file(&public_key_path)?;
         false
     } else {
-        let encoded = private_key
-            .public_key()
-            .to_openssh()
-            .map_err(|error| {
-                CentralSshError::InvalidConfig(format!(
-                    "failed to encode user public key: {error}"
-                ))
-            })?;
+        let encoded = private_key.public_key().to_openssh().map_err(|error| {
+            CentralSshError::InvalidConfig(format!("failed to encode user public key: {error}"))
+        })?;
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -256,7 +251,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::TempDir;
 
-    use crate::config::{ConfigFile, SettingsConfig, UserRecord};
+    use crate::config::{ConfigFile, KexPolicyConfig, SettingsConfig, UserRecord};
 
     fn valid_config() -> ConfigFile {
         ConfigFile {
@@ -268,8 +263,13 @@ mod tests {
                 allowed_servers: vec!["git".to_string(), "httpd".to_string()],
             }],
             settings: SettingsConfig::default(),
+            kex_policy: KexPolicyConfig::default(),
             fail2ban: None,
         }
+    }
+
+    fn canonical_tempdir_path(tempdir: &TempDir) -> PathBuf {
+        fs::canonicalize(tempdir.path()).expect("canonicalize tempdir")
     }
 
     #[test]
@@ -282,8 +282,7 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("chmod root");
         fs::set_permissions(root.join("alice"), fs::Permissions::from_mode(0o700))
             .expect("chmod user");
-        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700))
-            .expect("chmod server");
+        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700)).expect("chmod server");
         let key = server_dir.join("id_ed25519");
         fs::write(&key, b"key").expect("write key");
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("chmod key");
@@ -346,7 +345,7 @@ mod tests {
     #[test]
     fn ensure_private_keys_for_config_users_creates_missing_tree() {
         let tempdir = TempDir::new().expect("tempdir");
-        let root = tempdir.path().join("keys");
+        let root = canonical_tempdir_path(&tempdir).join("keys");
 
         let report =
             ensure_private_keys_for_config_users(&root, &valid_config(), true).expect("ensure");
@@ -369,7 +368,7 @@ mod tests {
     #[test]
     fn ensure_private_keys_for_config_users_creates_single_key_in_user_only_mode() {
         let tempdir = TempDir::new().expect("tempdir");
-        let root = tempdir.path().join("keys");
+        let root = canonical_tempdir_path(&tempdir).join("keys");
 
         let report =
             ensure_private_keys_for_config_users(&root, &valid_config(), false).expect("ensure");
@@ -390,20 +389,17 @@ mod tests {
     #[test]
     fn ensure_private_keys_for_config_users_preserves_existing_keys() {
         let tempdir = TempDir::new().expect("tempdir");
-        let root = tempdir.path().join("keys");
+        let root = canonical_tempdir_path(&tempdir).join("keys");
         let user_dir = root.join("alice");
         let server_dir = user_dir.join("git");
         fs::create_dir_all(&server_dir).expect("mkdir");
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("chmod root");
         fs::set_permissions(&user_dir, fs::Permissions::from_mode(0o700)).expect("chmod user");
-        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700))
-            .expect("chmod server");
+        fs::set_permissions(&server_dir, fs::Permissions::from_mode(0o700)).expect("chmod server");
 
-        let private_key = PrivateKey::random(
-            &mut ssh_key::rand_core::OsRng,
-            ssh_key::Algorithm::Ed25519,
-        )
-        .expect("private key");
+        let private_key =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+                .expect("private key");
         let existing_key = server_dir.join("id_ed25519");
         fs::write(
             &existing_key,

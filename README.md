@@ -13,6 +13,7 @@ CentralSSH is strictly an SSH server.
 - No custom SSH protocol extensions.
 - Accepts only standard SSH mechanisms needed for gateway flow.
 - Proxies standard SSH behavior after target selection, including shell, `exec`, subsystem/SFTP, and forwarding requests.
+- Treats SSH channel `window-adjust` messages as normal flow control instead of session-fatal input.
 - Denies gateway-local shell, gateway-local command execution, gateway filesystem access, and agent forwarding.
 - Gateway login auth is internal only (`username/password/TOTP`), not SSH public-key auth.
 
@@ -27,7 +28,8 @@ CentralSSH is strictly an SSH server.
 - Structured JSONL audit logging.
 - Startup reconciliation for missing per-user outbound keys.
 - Hot config reload on `SIGHUP`.
-- Centralized SSH crypto policy; see `SECURITY-SNDL.md` for Store Now, Decrypt Later limitations and migration work.
+- Frontend SSH transport now prefers the OpenSSH-aligned hybrid PQ KEX `mlkem768x25519-sha256`, with explicit classical Curve25519 fallback unless PQ-only mode is enabled.
+- Centralized SSH crypto policy; see `SECURITY-SNDL.md` for Store Now, Decrypt Later limits, the current `sntrup761x25519-sha512` gap, and rollout guidance.
 
 ## Install Targets and Paths
 
@@ -145,6 +147,20 @@ whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = true
 min_password_policy = 12
 
+[kex_policy]
+frontend_preferred = [
+  "mlkem768x25519-sha256",
+  "curve25519-sha256",
+  "curve25519-sha256@libssh.org",
+]
+frontend_require_post_quantum = false
+backend_preferred = [
+  "mlkem768x25519-sha256",
+  "curve25519-sha256",
+  "curve25519-sha256@libssh.org",
+]
+backend_require_post_quantum = false
+
 [fail2ban]
 enabled = true
 max_failures = 5
@@ -176,6 +192,10 @@ Fields:
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.
 - `settings.enforce_password_policy`: optional bool, default `true`.
 - `settings.min_password_policy`: optional integer minimum password length, default `12`.
+- `kex_policy.frontend_preferred`: ordered frontend SSH KEX allowlist. Supported values today are `mlkem768x25519-sha256`, `curve25519-sha256`, and `curve25519-sha256@libssh.org`.
+- `kex_policy.frontend_require_post_quantum`: optional bool, default `false`. When `true`, CentralSSH advertises only supported post-quantum frontend KEX algorithms and classical-only clients fail during SSH negotiation. Legacy `kex_policy.require_post_quantum` is still accepted as a compatibility alias for this frontend-only setting.
+- `kex_policy.backend_preferred`: ordered gateway-to-target SSH KEX allowlist. Supported values today are the same three names as `frontend_preferred`.
+- `kex_policy.backend_require_post_quantum`: optional bool, default `false`. When `true`, CentralSSH refuses to negotiate a classical-only outbound SSH transport to the selected target.
 - `fail2ban.enabled`: optional bool, default `true`.
 - `fail2ban.max_failures`: optional integer threshold inside the sliding window, default `5`.
 - `fail2ban.find_time`: optional duration string, default `60s`.
@@ -193,6 +213,21 @@ Notes:
 - Outbound target SSH username is always the authenticated CentralSSH username.
 - If bootstrap plaintext passwords are present, CentralSSH hashes them with Argon2id at startup and atomically rewrites config.
 - The documented placeholder password is rejected at config validation time. Replace it before starting the service.
+- The frontend listener and outbound SSH client currently support `mlkem768x25519-sha256` but not `sntrup761x25519-sha512`; configuring the latter in either frontend or backend policy fails startup validation.
+- `SIGHUP` reload updates auth, authorization, and abuse-control settings, but transport KEX policy is fixed for existing listener/client configs and currently requires a process restart to change the frontend offer set.
+- No OpenSSH weak-crypto warning on the frontend means the client-to-gateway KEX was hybrid; it does not mean signatures, stored keys, or every outbound target session are post-quantum.
+
+## PQ Validation
+
+For a repeatable local validation of frontend PQ negotiation and strict-mode rejection, use [tools/validate-pq-kex.sh](/Users/william/git/CentralSSH/tools/validate-pq-kex.sh:1).
+
+Build first:
+
+```bash
+CARGO_HOME=/tmp/centralssh-cargo-home CARGO_TARGET_DIR=/tmp/centralssh-target cargo build
+chmod +x tools/validate-pq-kex.sh
+CENTRALSSH_BIN=/tmp/centralssh-target/debug/centralssh tools/validate-pq-kex.sh
+```
 
 ## Built-In Abuse Protection
 

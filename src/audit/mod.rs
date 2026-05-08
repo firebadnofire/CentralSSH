@@ -36,6 +36,20 @@ pub struct AuditEvent {
     pub reason: Option<String>,
     pub ban_duration_seconds: Option<u64>,
     pub ban_until: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_side: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kex_algorithm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kex_algorithms_offered: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_quantum: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hybrid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classical_fallback: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pq_required: Option<bool>,
 }
 
 impl AuditEvent {
@@ -53,6 +67,13 @@ impl AuditEvent {
             reason,
             ban_duration_seconds: None,
             ban_until: None,
+            transport_side: None,
+            kex_algorithm: None,
+            kex_algorithms_offered: None,
+            post_quantum: None,
+            hybrid: None,
+            classical_fallback: None,
+            pq_required: None,
         }
     }
 }
