@@ -116,6 +116,20 @@ audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
 min_password_policy = 12
 
+[kex_policy]
+frontend_preferred = [
+  "mlkem768x25519-sha256",
+  "curve25519-sha256",
+  "curve25519-sha256@libssh.org",
+]
+frontend_require_post_quantum = false
+backend_preferred = [
+  "mlkem768x25519-sha256",
+  "curve25519-sha256",
+  "curve25519-sha256@libssh.org",
+]
+backend_require_post_quantum = false
+
 [fail2ban]
 enabled = true
 max_failures = 5
@@ -162,6 +176,28 @@ ips = ["127.0.0.1/32", "::1/128", "192.168.0.0/16"]
 - `persist_state`: save and reload abuse state on restart
 - `state_path`: JSON state file for persisted ban metadata
 - `whitelist.ips`: CIDR ranges that bypass bans and failure tracking
+
+### KEX policy fields
+
+- `frontend_preferred`: ordered frontend SSH key-exchange preference list
+- `frontend_require_post_quantum`: when `true`, the frontend listener advertises only supported PQ KEX algorithms
+- `backend_preferred`: ordered gateway-to-target SSH key-exchange preference list
+- `backend_require_post_quantum`: when `true`, the outbound gateway-to-target SSH client refuses classical-only KEX
+
+Backward compatibility:
+
+- `kex_policy.require_post_quantum` is still accepted as an alias for `frontend_require_post_quantum`, but new config and docs should use the explicit frontend name
+
+Current supported `frontend_preferred` values:
+
+- `mlkem768x25519-sha256`
+- `curve25519-sha256`
+- `curve25519-sha256@libssh.org`
+
+Current non-support:
+
+- `sntrup761x25519-sha512` is not yet exposed by the pinned `russh` dependency and CentralSSH rejects it during config validation instead of silently accepting it
+- frontend per-session negotiated-KEX audit is not yet available because the current `russh` server handler API does not expose the negotiated `Names` back to CentralSSH
 
 ### Validation rules
 
@@ -652,6 +688,8 @@ Current semantics:
 - it re-validates security checks and config semantics
 - invalid new config does not replace the active in-memory config
 - it writes an audit event for reload success or failure
+- frontend SSH transport policy is not live-swapped on `SIGHUP`; restart the process to change advertised KEX algorithms
+- backend KEX policy is read from the current config snapshot when each outbound target connection starts; existing proxied sessions keep the KEX they already negotiated
 
 Practical usage:
 
@@ -684,8 +722,26 @@ Current code rejects:
 Operator caution:
 
 - The SSH transport policy is centralized in `src/crypto_policy.rs`.
-- Current SSH transport still depends on classical Curve25519 key exchange because `russh 0.53.0` does not provide a hybrid/PQC KEX.
+- Frontend SSH transport now prefers `mlkem768x25519-sha256`, so current OpenSSH 9.9+ and 10.x clients should negotiate a PQ-hybrid KEX and avoid the weak-crypto warning.
+- `kex_policy.frontend_require_post_quantum=true` removes classical frontend fallback entirely. Classical-only clients then fail during SSH negotiation with a no-matching-KEX error.
+- `kex_policy.backend_require_post_quantum=true` is a separate control. It hard-fails outbound sessions to classical-only targets without changing frontend behavior.
+- `sntrup761x25519-sha512` is still unavailable in the current `russh` line, so do not promise it operationally.
+- A clean frontend handshake does not imply full PQ coverage. Host signatures, user authentication, stored key material, and any classical outbound target connection remain classical.
 - See `SECURITY-SNDL.md` before using this gateway for data that must remain confidential for years.
+
+### Reproducible validation
+
+Local validation script:
+
+- [tools/validate-pq-kex.sh](/Users/william/git/CentralSSH/tools/validate-pq-kex.sh:1)
+
+Suggested usage:
+
+```bash
+CARGO_HOME=/tmp/centralssh-cargo-home CARGO_TARGET_DIR=/tmp/centralssh-target cargo build
+chmod +x tools/validate-pq-kex.sh
+CENTRALSSH_BIN=/tmp/centralssh-target/debug/centralssh tools/validate-pq-kex.sh
+```
 
 ## 28. Troubleshooting
 

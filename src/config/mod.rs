@@ -36,6 +36,42 @@ pub struct SettingsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KexPolicyConfig {
+    #[serde(default = "default_frontend_preferred_kex")]
+    pub frontend_preferred: Vec<String>,
+    #[serde(default)]
+    #[serde(alias = "require_post_quantum")]
+    pub frontend_require_post_quantum: bool,
+    #[serde(default = "default_backend_preferred_kex")]
+    pub backend_preferred: Vec<String>,
+    #[serde(default)]
+    pub backend_require_post_quantum: bool,
+}
+
+impl Default for KexPolicyConfig {
+    fn default() -> Self {
+        Self {
+            frontend_preferred: default_frontend_preferred_kex(),
+            frontend_require_post_quantum: false,
+            backend_preferred: default_backend_preferred_kex(),
+            backend_require_post_quantum: false,
+        }
+    }
+}
+
+fn default_frontend_preferred_kex() -> Vec<String> {
+    vec![
+        "mlkem768x25519-sha256".to_string(),
+        "curve25519-sha256".to_string(),
+        "curve25519-sha256@libssh.org".to_string(),
+    ]
+}
+
+fn default_backend_preferred_kex() -> Vec<String> {
+    default_frontend_preferred_kex()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserRecord {
     pub name: String,
     pub password: String,
@@ -51,6 +87,8 @@ pub struct ConfigFile {
     pub users: Vec<UserRecord>,
     #[serde(default)]
     pub settings: SettingsConfig,
+    #[serde(default)]
+    pub kex_policy: KexPolicyConfig,
     #[serde(default)]
     pub fail2ban: Option<Fail2banConfig>,
 }
@@ -327,6 +365,7 @@ pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<
     if let Some(fail2ban) = &config.fail2ban {
         fail2ban.effective(config.settings.whitelist_path.as_deref())?;
     }
+    crate::crypto_policy::validate_kex_policy(&config.kex_policy)?;
 
     if let Some(min_password_policy) = config.settings.min_password_policy {
         if min_password_policy > 256 {
@@ -723,6 +762,7 @@ mod tests {
                 allowed_servers: vec!["git".to_string()],
             }],
             settings: SettingsConfig::default(),
+            kex_policy: KexPolicyConfig::default(),
             fail2ban: None,
         }
     }
@@ -733,8 +773,12 @@ mod tests {
         ServersFile { servers }
     }
 
+    fn canonical_tempdir_path(tempdir: &TempDir) -> PathBuf {
+        fs::canonicalize(tempdir.path()).expect("canonicalize tempdir")
+    }
+
     fn write_temp_file(tempdir: &TempDir, name: &str, contents: &str) -> PathBuf {
-        let path = tempdir.path().join(name);
+        let path = canonical_tempdir_path(tempdir).join(name);
         fs::write(&path, contents).expect("write temp file");
         normalize_test_file_owner(&path);
         path
@@ -873,6 +917,16 @@ allowed_servers = ["git"]
         assert_eq!(loaded.settings.per_user_per_server, None);
         assert_eq!(loaded.settings.enforce_password_policy, None);
         assert_eq!(loaded.settings.min_password_policy, None);
+        assert_eq!(
+            loaded.kex_policy.frontend_preferred,
+            default_frontend_preferred_kex()
+        );
+        assert!(!loaded.kex_policy.frontend_require_post_quantum);
+        assert_eq!(
+            loaded.kex_policy.backend_preferred,
+            default_backend_preferred_kex()
+        );
+        assert!(!loaded.kex_policy.backend_require_post_quantum);
     }
 
     #[test]
@@ -928,6 +982,30 @@ min_password_policy = 20
         assert_eq!(loaded.settings.per_user_per_server, Some(false));
         assert_eq!(loaded.settings.enforce_password_policy, Some(false));
         assert_eq!(loaded.settings.min_password_policy, Some(20));
+    }
+
+    #[test]
+    fn load_config_file_accepts_legacy_frontend_require_post_quantum_field() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "config.toml",
+            r#"
+[[users]]
+name = "alice"
+password = "BootstrapPass123!"
+must_change_password = true
+allowed_servers = ["git"]
+
+[kex_policy]
+require_post_quantum = true
+"#,
+        );
+
+        let loaded = load_config_file(&path).expect("load config");
+
+        assert!(loaded.kex_policy.frontend_require_post_quantum);
+        assert!(!loaded.kex_policy.backend_require_post_quantum);
     }
 
     #[test]
@@ -1029,6 +1107,7 @@ servers = ["git"]
                 allowed_servers: vec!["git".to_string()],
             }],
             settings: SettingsConfig::default(),
+            kex_policy: KexPolicyConfig::default(),
             fail2ban: None,
         };
 
