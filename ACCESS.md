@@ -118,35 +118,6 @@ sudo bastille console testjail
 
 ---
 
-# Suggested SSH Config
-
-Example `~/.ssh/config`:
-
-```sshconfig
-Host home
-    HostName 192.168.86.65
-    User cgpt
-    IdentityFile /Users/william/.ssh/cgpt/cgpt
-
-Host internal
-    HostName 192.168.122.195
-    User cgpt
-    IdentityFile /Users/william/.ssh/cgpt/cgpt
-    ProxyJump home
-```
-
-Usage:
-
-```bash
-ssh home
-```
-
-```bash
-ssh internal
-```
-
----
-
 # Operational Notes
 
 * Use key-based authentication only.
@@ -155,4 +126,5 @@ ssh internal
 * Validate host keys before trusting newly rebuilt systems.
 * Use Bastille networking carefully to avoid subnet conflicts.
 * Review firewall and PF configuration before exposing jails externally.
-
+* The host 192.168.86.65 is AARCH64. The host 192.168.122.195 is AMD64.
+* It is recommended to build on the current machine, then push to 192.168.86.65. This is because they share an arch, and 192.168.86.65 has a weak CPU.
