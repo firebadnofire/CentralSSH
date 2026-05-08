@@ -1,20 +1,158 @@
-# Access Notes
+# ACCESS.md
 
-Do not commit live access details to this repository.
+## Purpose
 
-This file is intentionally a placeholder. Keep real SSH key paths, usernames, hostnames, IP addresses, jail names, topology notes, and operational credentials in an approved secrets or runbook system outside source control.
+This document describes the approved access workflow and operational assumptions for the environment.
 
-Safe template:
+Treat all access information in this document as sensitive operational data.
+
+---
+
+# Operator Access
+
+## SSH Key
+
+Primary SSH key:
 
 ```text
-Operator workstation
-  -> bastion or host: <inventory reference>
-  -> jail or target: <inventory reference>
-
-SSH key: <secret-manager reference, not a filesystem path>
-Network notes: <restricted runbook reference>
-Rotation owner: <team or role>
-Last reviewed: <date>
+/Users/william/.ssh/cgpt/cgpt
 ```
 
-If access details were previously committed, rotate affected credentials and review repository history exposure before treating the data as private again.
+Recommended permissions:
+
+```bash
+chmod 600 /Users/william/.ssh/cgpt/cgpt
+```
+
+---
+
+# User Information
+
+Primary SSH user:
+
+```text
+cgpt
+```
+
+---
+
+# Reachable Systems
+
+## Home System
+
+Directly reachable:
+
+```text
+192.168.86.65
+```
+
+Example connection:
+
+```bash
+ssh -i /Users/william/.ssh/cgpt/cgpt cgpt@192.168.86.65
+```
+
+---
+
+## Internal System
+
+Reachable through SSH jump host using `-J home`:
+
+```text
+192.168.122.195
+```
+
+Example connection:
+
+```bash
+ssh -J home -i /Users/william/.ssh/cgpt/cgpt cgpt@192.168.122.195
+```
+
+Equivalent explicit jump example:
+
+```bash
+ssh -J cgpt@192.168.86.65 -i /Users/william/.ssh/cgpt/cgpt cgpt@192.168.122.195
+```
+
+---
+
+# Privilege Escalation
+
+`sudo` access is available.
+
+Example:
+
+```bash
+sudo -i
+```
+
+Validate access:
+
+```bash
+sudo true
+```
+
+---
+
+# Bastille Availability
+
+`Bastille` is installed and available on:
+
+```text
+192.168.122.195
+```
+
+Example commands:
+
+```bash
+sudo bastille list
+```
+
+```bash
+sudo bastille create testjail 15.0-RELEASE 192.168.122.210
+```
+
+```bash
+sudo bastille console testjail
+```
+
+---
+
+# Suggested SSH Config
+
+Example `~/.ssh/config`:
+
+```sshconfig
+Host home
+    HostName 192.168.86.65
+    User cgpt
+    IdentityFile /Users/william/.ssh/cgpt/cgpt
+
+Host internal
+    HostName 192.168.122.195
+    User cgpt
+    IdentityFile /Users/william/.ssh/cgpt/cgpt
+    ProxyJump home
+```
+
+Usage:
+
+```bash
+ssh home
+```
+
+```bash
+ssh internal
+```
+
+---
+
+# Operational Notes
+
+* Use key-based authentication only.
+* Avoid copying private keys to remote systems.
+* Prefer SSH jump hosts over exposing internal systems directly.
+* Validate host keys before trusting newly rebuilt systems.
+* Use Bastille networking carefully to avoid subnet conflicts.
+* Review firewall and PF configuration before exposing jails externally.
+
