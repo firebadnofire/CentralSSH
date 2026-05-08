@@ -668,6 +668,7 @@ Current code supports these behaviors through the proxy layer:
 - `exec` requests
 - PTY allocation
 - PTY resize events
+- SSH channel `window-adjust` flow-control messages
 - environment variable requests
 - subsystem requests, including SFTP-style subsystem forwarding
 - local forwarding via `direct-tcpip`

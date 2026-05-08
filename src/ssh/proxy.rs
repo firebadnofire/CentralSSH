@@ -81,6 +81,7 @@ enum FrontendSessionAction {
         extended_code: Option<u32>,
         data: CryptoVec,
     },
+    WindowAdjusted,
     RequestPty {
         want_reply: bool,
         term: String,
@@ -557,6 +558,9 @@ async fn relay_raw_channel<S>(
                     break;
                 }
             }
+            Some(ChannelMsg::WindowAdjusted { .. }) => {
+                // SSH flow-control updates are handled by the library transport.
+            }
             Some(ChannelMsg::ExtendedData { ext, data }) => {
                 if let Err(error) = write_raw_channel_data(&writer, Some(ext), &data).await {
                     record_error(&last_error, error.to_string()).await;
@@ -598,6 +602,7 @@ fn classify_frontend_session_msg(
             extended_code: None,
             data,
         }),
+        ChannelMsg::WindowAdjusted { .. } => Ok(FrontendSessionAction::WindowAdjusted),
         ChannelMsg::ExtendedData { ext, data } => Ok(FrontendSessionAction::ForwardData {
             extended_code: Some(ext),
             data,
@@ -676,7 +681,6 @@ fn classify_frontend_session_msg(
         | ChannelMsg::XonXoff { .. }
         | ChannelMsg::ExitStatus { .. }
         | ChannelMsg::ExitSignal { .. }
-        | ChannelMsg::WindowAdjusted { .. }
         | ChannelMsg::Success
         | ChannelMsg::Failure) => Err(format!(
             "unexpected frontend session channel message: {unexpected:?}"
@@ -752,6 +756,7 @@ async fn apply_frontend_session_action(
         } => write_channel_data(backend, extended_code, &data)
             .await
             .map_err(|error| error.to_string()),
+        FrontendSessionAction::WindowAdjusted => Ok(()),
         FrontendSessionAction::RequestPty {
             want_reply,
             term,
@@ -1056,6 +1061,19 @@ mod tests {
             FrontendSessionAction::Signal { signal } => {
                 assert!(matches!(signal, Sig::TERM));
             }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_frontend_window_adjusted_is_ignored() {
+        let action = classify_frontend_session_msg(ChannelMsg::WindowAdjusted {
+            new_size: 1_047_061,
+        })
+        .expect("window-adjust action");
+
+        match action {
+            FrontendSessionAction::WindowAdjusted => {}
             other => panic!("unexpected action: {other:?}"),
         }
     }

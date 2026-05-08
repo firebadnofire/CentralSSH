@@ -452,6 +452,7 @@ The current proxy code explicitly supports:
 - `subsystem`
 - `signal`
 - `window-change`
+- channel `window-adjust` flow-control handling
 - `env`
 - `x11-req`
 - local forwarding via `direct-tcpip`
@@ -483,6 +484,7 @@ For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a sim
 
 - forward `Data`
 - forward `ExtendedData`
+- ignore `WindowAdjusted` because it is transport-level flow control
 - forward `Eof`
 - close on `Close`
 - record unexpected messages as errors
