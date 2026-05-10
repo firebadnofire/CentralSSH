@@ -792,7 +792,38 @@ async fn relay_backend_session(
                     }
                 };
 
+                let keep_frontend_for_menu = shell_channel_should_reuse_menu(
+                    &frontend_channel_state,
+                    frontend_id,
+                    drop_to_menu,
+                )
+                .await;
+
+                if keep_frontend_for_menu
+                    && matches!(
+                        action,
+                        BackendSessionAction::ExitStatus { .. }
+                            | BackendSessionAction::ExitSignal { .. }
+                            | BackendSessionAction::Eof
+                    )
+                {
+                    continue;
+                }
+
                 let should_break = matches!(action, BackendSessionAction::Close);
+                if keep_frontend_for_menu && should_break {
+                    session_channels.lock().await.remove(&frontend_id);
+                    return !activate_menu_after_disconnect(
+                        &app_state,
+                        &server_handle,
+                        &username,
+                        frontend_id,
+                        drop_to_menu,
+                        &frontend_channel_state,
+                    )
+                    .await;
+                }
+
                 if let Err(error) =
                     apply_backend_session_action(action, frontend_id, &server_handle).await
                 {
@@ -884,6 +915,26 @@ async fn activate_menu_after_disconnect(
         .data(frontend_id, Bytes::from(menu))
         .await
         .is_ok()
+}
+
+async fn shell_channel_should_reuse_menu(
+    frontend_channel_state: &Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
+    frontend_id: ChannelId,
+    drop_to_menu: bool,
+) -> bool {
+    frontend_channel_state
+        .lock()
+        .await
+        .get(&frontend_id)
+        .map(|channel_state| shell_channel_state_should_reuse_menu(channel_state, drop_to_menu))
+        .unwrap_or(false)
+}
+
+fn shell_channel_state_should_reuse_menu(
+    channel_state: &SessionChannelState,
+    drop_to_menu: bool,
+) -> bool {
+    drop_to_menu && channel_state.shell_requested
 }
 
 async fn relay_raw_channel<S>(
@@ -1142,4 +1193,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shell_channel_menu_reuse_requires_shell_and_drop_to_menu() {
+        assert!(!shell_channel_state_should_reuse_menu(
+            &SessionChannelState::default(),
+            false,
+        ));
+        assert!(!shell_channel_state_should_reuse_menu(
+            &SessionChannelState::default(),
+            true,
+        ));
+
+        let shell_channel = SessionChannelState {
+            shell_requested: true,
+            ..SessionChannelState::default()
+        };
+        assert!(!shell_channel_state_should_reuse_menu(&shell_channel, false));
+        assert!(shell_channel_state_should_reuse_menu(&shell_channel, true));
+    }
 }

@@ -482,7 +482,7 @@ The session proxy keeps a per-frontend-channel map of backend session write hand
 
 - `BackendSessionAction`
 
-Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, a clean interactive shell disconnect renders the server menu back onto that same frontend channel instead of closing the gateway connection immediately.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, a clean interactive shell disconnect suppresses the terminal close sequence long enough to render the server menu back onto that same frontend channel instead of closing the gateway connection immediately.
 
 ### 11.4 Raw channel bridge structure
 
@@ -499,7 +499,7 @@ For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a sim
 
 The proxy records the first terminal error string in `last_error`.
 Normal frontend `channel_eof` / `channel_close` callbacks are treated idempotently so a clean backend-driven close does not create a false proxy failure.
-The in-channel selection menu accepts `Q` to disconnect the gateway session.
+Both the keyboard-interactive selection prompt and the in-channel selection menu accept `Q` to disconnect the gateway session.
 
 On fatal relay failure it:
 

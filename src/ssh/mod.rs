@@ -1115,10 +1115,7 @@ Use the plaintext secret or URI above.\n\n"
             self.keyboard_auth_state = None;
             self.authenticated_username = None;
             self.pending_target = None;
-            return Ok(Auth::Reject {
-                proceed_with_methods: None,
-                partial_success: false,
-            });
+            return Err(russh::Error::Disconnect);
         }
         let entries = self
             .allowed_server_entries(&username)

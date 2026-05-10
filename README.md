@@ -208,7 +208,7 @@ Fields:
 - `users[].allowed_servers`: required non-empty list of server names in `servers.toml`.
 - `settings.user_key_root`: optional path override.
 - `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
-- `settings.drop_to_menu`: optional bool, default `false`. When `true`, an interactive shell channel that disconnects is returned to the server menu instead of closing the gateway connection.
+- `settings.drop_to_menu`: optional bool, default `false`. When `true`, an interactive shell channel that disconnects is returned to the server menu instead of closing the gateway connection, and choosing `Q` from either selection menu disconnects the SSH session instead of restarting authentication.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.
