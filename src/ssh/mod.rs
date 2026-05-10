@@ -1546,16 +1546,33 @@ impl server::Handler for GatewayHandler {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
-        _col_width: u32,
-        _row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        _modes: &[(russh::Pty, u32)],
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
             let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        match proxy_session
+            .request_pty(
+                channel, true, term, col_width, row_height, pix_width, pix_height, modes,
+            )
+            .await
+        {
+            Ok(()) => {
+                let _ = session.channel_success(channel);
+            }
+            Err(error) => {
+                warn!(error = %error, ?channel, "failed to relay pty request");
+                let _ = session.channel_failure(channel);
+                proxy_session.abort(error.to_string()).await;
+            }
         }
 
         Ok(())
@@ -1564,15 +1581,22 @@ impl server::Handler for GatewayHandler {
     async fn x11_request(
         &mut self,
         channel: ChannelId,
-        _single_connection: bool,
-        _x11_auth_protocol: &str,
+        single_connection: bool,
+        x11_auth_protocol: &str,
         _x11_auth_cookie: &str,
-        _x11_screen_number: u32,
+        x11_screen_number: u32,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
-            let _ = session.channel_failure(channel);
+        if self.proxy_session.is_some() {
+            warn!(
+                ?channel,
+                single_connection,
+                x11_auth_protocol,
+                x11_screen_number,
+                "rejecting x11 forwarding request"
+            );
         }
+        let _ = session.channel_failure(channel);
 
         Ok(())
     }
@@ -1582,8 +1606,20 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
             let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        match proxy_session.request_shell(channel, true).await {
+            Ok(()) => {
+                let _ = session.channel_success(channel);
+            }
+            Err(error) => {
+                warn!(error = %error, ?channel, "failed to relay shell request");
+                let _ = session.channel_failure(channel);
+                proxy_session.abort(error.to_string()).await;
+            }
         }
 
         Ok(())
@@ -1592,11 +1628,23 @@ impl server::Handler for GatewayHandler {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _data: &[u8],
+        data: &[u8],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
             let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        match proxy_session.exec(channel, true, data.to_vec()).await {
+            Ok(()) => {
+                let _ = session.channel_success(channel);
+            }
+            Err(error) => {
+                warn!(error = %error, ?channel, command = %String::from_utf8_lossy(data), "failed to relay exec request");
+                let _ = session.channel_failure(channel);
+                proxy_session.abort(error.to_string()).await;
+            }
         }
 
         Ok(())
@@ -1605,11 +1653,26 @@ impl server::Handler for GatewayHandler {
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
-        _name: &str,
+        name: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
             let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        match proxy_session
+            .request_subsystem(channel, true, name.to_string())
+            .await
+        {
+            Ok(()) => {
+                let _ = session.channel_success(channel);
+            }
+            Err(error) => {
+                warn!(error = %error, ?channel, subsystem = name, "failed to relay subsystem request");
+                let _ = session.channel_failure(channel);
+                proxy_session.abort(error.to_string()).await;
+            }
         }
 
         Ok(())
@@ -1618,12 +1681,32 @@ impl server::Handler for GatewayHandler {
     async fn env_request(
         &mut self,
         channel: ChannelId,
-        _variable_name: &str,
-        _variable_value: &str,
+        variable_name: &str,
+        variable_value: &str,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.proxy_session.is_none() {
+        let Some(proxy_session) = &self.proxy_session else {
             let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        match proxy_session
+            .set_env(
+                channel,
+                true,
+                variable_name.to_string(),
+                variable_value.to_string(),
+            )
+            .await
+        {
+            Ok(()) => {
+                let _ = session.channel_success(channel);
+            }
+            Err(error) => {
+                warn!(error = %error, ?channel, variable_name, "failed to relay env request");
+                let _ = session.channel_failure(channel);
+                proxy_session.abort(error.to_string()).await;
+            }
         }
 
         Ok(())
@@ -1631,22 +1714,49 @@ impl server::Handler for GatewayHandler {
 
     async fn window_change_request(
         &mut self,
-        _channel: ChannelId,
-        _col_width: u32,
-        _row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
+        channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(());
+        };
+
+        if let Err(error) = proxy_session
+            .window_change(channel, col_width, row_height, pix_width, pix_height)
+            .await
+        {
+            warn!(error = %error, ?channel, "non-fatal window-change relay failure");
+        }
+
         Ok(())
     }
 
     async fn signal(
         &mut self,
-        _channel: ChannelId,
-        _signal: Sig,
-        _session: &mut Session,
+        channel: ChannelId,
+        signal: Sig,
+        session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        match proxy_session.signal(channel, signal).await {
+            Ok(()) => {
+                let _ = session.channel_success(channel);
+            }
+            Err(error) => {
+                warn!(error = %error, ?channel, "failed to relay signal");
+                let _ = session.channel_failure(channel);
+                proxy_session.abort(error.to_string()).await;
+            }
+        }
+
         Ok(())
     }
 
@@ -1660,36 +1770,72 @@ impl server::Handler for GatewayHandler {
 
     async fn data(
         &mut self,
-        _channel: ChannelId,
-        _data: &[u8],
+        channel: ChannelId,
+        data: &[u8],
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(());
+        };
+
+        if let Err(error) = proxy_session.data(channel, data).await {
+            warn!(error = %error, ?channel, "failed to relay channel data");
+            proxy_session.abort(error.to_string()).await;
+        }
+
         Ok(())
     }
 
     async fn extended_data(
         &mut self,
-        _channel: ChannelId,
-        _code: u32,
-        _data: &[u8],
+        channel: ChannelId,
+        code: u32,
+        data: &[u8],
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(());
+        };
+
+        if let Err(error) = proxy_session.extended_data(channel, code, data).await {
+            warn!(error = %error, ?channel, code, "failed to relay channel extended data");
+            proxy_session.abort(error.to_string()).await;
+        }
+
         Ok(())
     }
 
     async fn channel_eof(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(());
+        };
+
+        if let Err(error) = proxy_session.channel_eof(channel).await {
+            warn!(error = %error, ?channel, "failed to relay channel EOF");
+            proxy_session.abort(error.to_string()).await;
+        }
+
         Ok(())
     }
 
     async fn channel_close(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        let Some(proxy_session) = &self.proxy_session else {
+            return Ok(());
+        };
+
+        if let Err(error) = proxy_session.channel_close(channel).await {
+            warn!(error = %error, ?channel, "failed to relay channel close");
+            proxy_session.abort(error.to_string()).await;
+        }
+
         Ok(())
     }
 

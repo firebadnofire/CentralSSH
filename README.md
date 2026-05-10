@@ -13,6 +13,7 @@ CentralSSH is strictly an SSH server.
 - No custom SSH protocol extensions.
 - Accepts only standard SSH mechanisms needed for gateway flow.
 - Proxies standard SSH behavior after target selection, including shell, `exec`, subsystem/SFTP, and forwarding requests.
+- Relays post-selection session requests and data from the `russh` server callback path instead of depending on a gateway-side pseudo-shell.
 - Treats SSH channel `window-adjust` messages as normal flow control instead of session-fatal input.
 - Denies gateway-local shell, gateway-local command execution, gateway filesystem access, and agent forwarding.
 - Gateway login auth is internal only (`username/password/TOTP`), not SSH public-key auth.

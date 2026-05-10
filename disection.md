@@ -472,17 +472,16 @@ Current explicit policy rejection:
 
 ### 11.3 Session bridge structure
 
-For session channels the proxy starts two async loops:
+For session channels the proxy now splits responsibility across the `russh` server callback path and one backend read loop:
 
-- frontend client -> target session
 - target session -> frontend client
+- frontend client -> target session requests and data are forwarded immediately from the server handler callbacks in `src/ssh/mod.rs`
 
-Messages are classified into internal action enums:
+The session proxy keeps a per-frontend-channel map of backend session write handles so callback-driven events can be forwarded without waiting for a synthetic frontend read loop.
 
-- `FrontendSessionAction`
 - `BackendSessionAction`
 
-These actions are then applied to the opposite side, preserving SSH request semantics instead of flattening everything into one shell byte stream.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream.
 
 ### 11.4 Raw channel bridge structure
 
@@ -498,6 +497,7 @@ For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a sim
 ### 11.5 Error handling and teardown
 
 The proxy records the first terminal error string in `last_error`.
+Normal frontend `channel_eof` / `channel_close` callbacks are treated idempotently so a clean backend-driven close does not create a false proxy failure.
 
 On fatal relay failure it:
 
