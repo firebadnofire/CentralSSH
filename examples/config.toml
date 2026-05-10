@@ -14,6 +14,7 @@ allowed_servers = ["dns"]
 user_key_root = "/var/lib/centralssh/keys"
 per_user_per_server = true
 drop_to_menu = false
+hide_proxy_ip = false
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 # whitelist_path = "/etc/centralssh/whitelist.txt"

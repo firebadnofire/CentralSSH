@@ -126,6 +126,9 @@ struct Cli {
     #[arg(long, env = "CENTRALSSH_DROP_TO_MENU")]
     drop_to_menu: Option<bool>,
 
+    #[arg(long, env = "CENTRALSSH_HIDE_PROXY_IP")]
+    hide_proxy_ip: Option<bool>,
+
     #[arg(
         long,
         env = "CENTRALSSH_ENFORCE_STRICT_SECURITY",
@@ -198,6 +201,7 @@ async fn run() -> Result<()> {
         cli.whitelist.clone(),
         cli.per_user_per_server,
         cli.drop_to_menu,
+        cli.hide_proxy_ip,
         Some(&seed_config.settings),
     );
     ensure_user_key_root_directory(&paths.user_key_root)?;
@@ -234,6 +238,7 @@ async fn run() -> Result<()> {
         created_private_keys = report.created_private_keys,
         created_public_keys = report.created_public_keys,
         per_user_per_server = paths.per_user_per_server,
+        hide_proxy_ip = paths.hide_proxy_ip,
         "startup bootstrap completed"
     );
 
@@ -244,6 +249,7 @@ async fn run() -> Result<()> {
         config = %paths.config_path.display(),
         servers = %paths.servers_path.display(),
         known_hosts = %paths.known_hosts_path.display(),
+        hide_proxy_ip = paths.hide_proxy_ip,
         strict_security = cli.enforce_strict_security,
         "starting gateway server"
     );

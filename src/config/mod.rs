@@ -32,6 +32,7 @@ pub struct SettingsConfig {
     pub whitelist_path: Option<PathBuf>,
     pub per_user_per_server: Option<bool>,
     pub drop_to_menu: Option<bool>,
+    pub hide_proxy_ip: Option<bool>,
     pub enforce_password_policy: Option<bool>,
     pub min_password_policy: Option<usize>,
 }
@@ -109,6 +110,7 @@ pub struct EffectivePaths {
     pub whitelist_path: Option<PathBuf>,
     pub per_user_per_server: bool,
     pub drop_to_menu: bool,
+    pub hide_proxy_ip: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +267,7 @@ pub fn resolve_paths(
     whitelist_path: Option<PathBuf>,
     per_user_per_server: Option<bool>,
     drop_to_menu: Option<bool>,
+    hide_proxy_ip: Option<bool>,
     settings: Option<&SettingsConfig>,
 ) -> EffectivePaths {
     EffectivePaths {
@@ -287,6 +290,9 @@ pub fn resolve_paths(
         drop_to_menu: drop_to_menu
             .or_else(|| settings.and_then(|config| config.drop_to_menu))
             .unwrap_or(false),
+        hide_proxy_ip: hide_proxy_ip
+            .or_else(|| settings.and_then(|config| config.hide_proxy_ip))
+            .unwrap_or(false),
     }
 }
 
@@ -294,6 +300,7 @@ fn apply_runtime_overrides(config: &mut ConfigFile, paths: &EffectivePaths) {
     config.settings.whitelist_path = paths.whitelist_path.clone();
     config.settings.per_user_per_server = Some(paths.per_user_per_server);
     config.settings.drop_to_menu = Some(paths.drop_to_menu);
+    config.settings.hide_proxy_ip = Some(paths.hide_proxy_ip);
 }
 
 pub fn load_config_file(path: &Path) -> Result<ConfigFile> {
@@ -923,6 +930,7 @@ allowed_servers = ["git"]
         assert!(loaded.settings.whitelist_path.is_none());
         assert_eq!(loaded.settings.per_user_per_server, None);
         assert_eq!(loaded.settings.drop_to_menu, None);
+        assert_eq!(loaded.settings.hide_proxy_ip, None);
         assert_eq!(loaded.settings.enforce_password_policy, None);
         assert_eq!(loaded.settings.min_password_policy, None);
         assert_eq!(
@@ -962,6 +970,7 @@ audit_log_path = "/var/log/centralssh/audit.jsonl"
 whitelist_path = "/etc/centralssh/whitelist.txt"
 per_user_per_server = false
 drop_to_menu = true
+hide_proxy_ip = true
 enforce_password_policy = false
 min_password_policy = 20
 "#,
@@ -990,6 +999,7 @@ min_password_policy = 20
         );
         assert_eq!(loaded.settings.per_user_per_server, Some(false));
         assert_eq!(loaded.settings.drop_to_menu, Some(true));
+        assert_eq!(loaded.settings.hide_proxy_ip, Some(true));
         assert_eq!(loaded.settings.enforce_password_policy, Some(false));
         assert_eq!(loaded.settings.min_password_policy, Some(20));
     }
@@ -1127,6 +1137,7 @@ servers = ["git"]
         assert!(!encoded.contains("totp_secret"));
         assert!(!encoded.contains("user_key_root"));
         assert!(!encoded.contains("per_user_per_server"));
+        assert!(!encoded.contains("hide_proxy_ip"));
     }
 
     #[test]

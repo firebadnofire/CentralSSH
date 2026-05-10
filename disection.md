@@ -117,7 +117,7 @@ Important exception:
 - `config.toml` itself must be found before settings can be read, so its path cannot depend on settings inside the file.
 - `servers.toml` has no `settings` override inside `config.toml`; it is controlled by CLI/env or the compiled default.
 - the gateway host key is not separately configurable; it is derived from the config directory as `<config_dir>/host_ed25519`.
-- `drop_to_menu` is a runtime setting and can be overridden by CLI/env or FreeBSD rc.conf the same way `per_user_per_server` can.
+- `drop_to_menu` and `hide_proxy_ip` are runtime settings and can be overridden by CLI/env or FreeBSD rc.conf the same way `per_user_per_server` can.
 
 ### 4.2 Load and reload
 
@@ -128,6 +128,8 @@ Important exception:
 3. apply runtime overrides back into the in-memory config
 4. validate filesystem security rules
 5. validate config semantics
+
+`settings.hide_proxy_ip` is presentation-only: it changes the authenticated server-selection menu so users see only logical server names instead of `name (host)` entries.
 6. install the result as a new immutable snapshot
 
 Reload is all-or-nothing. Invalid reload input does not replace the previous active state.
@@ -482,11 +484,11 @@ The session proxy keeps a per-frontend-channel map of backend session write hand
 
 - `BackendSessionAction`
 
-Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, a clean interactive shell disconnect renders the server menu back onto that same frontend channel instead of closing the gateway connection immediately.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Stock OpenSSH `sftp` and `scp` clients exit when their subsystem or exec channel closes, so those channels close normally instead of attempting an inline gateway menu.
 
 ### 11.4 Raw channel bridge structure
 
-For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a simpler raw relay:
+For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code keeps a separate per-channel backend write-handle map and uses a simpler raw relay for backend-to-frontend traffic, so forwarding channels are not mistaken for proxied `session` channels during later callbacks:
 
 - forward `Data`
 - forward `ExtendedData`
@@ -499,7 +501,7 @@ For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a sim
 
 The proxy records the first terminal error string in `last_error`.
 Normal frontend `channel_eof` / `channel_close` callbacks are treated idempotently so a clean backend-driven close does not create a false proxy failure.
-The in-channel selection menu accepts `Q` to disconnect the gateway session.
+Both the keyboard-interactive selection prompt and the in-channel selection menu accept `Q` to disconnect the gateway session.
 
 On fatal relay failure it:
 

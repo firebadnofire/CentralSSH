@@ -24,7 +24,7 @@ The operator should know that the repo currently contains both old and new assum
 - The top-level spec in `AGENTS.md` requires transparent SSH proxying, including `exec`, SFTP, PTY forwarding, and forwarding support.
 - The current proxy code does relay `session`, `exec`, `subsystem`, PTY, `direct-tcpip`, and remote forwarding requests.
 - Session request/data forwarding happens from the `russh` server callbacks, so post-selection SSH behavior does not depend on a gateway-local shell shim.
-- If `settings.drop_to_menu=true`, an interactive shell channel is returned to the selection menu after target disconnect; `Q` exits that menu.
+- If `settings.drop_to_menu=true`, completed interactive shell channels return to the selection menu inline. Stock OpenSSH `sftp` and `scp` clients do not support an inline post-exit gateway menu, so those channels close normally. `Q` disconnects the SSH session from either selection menu.
 - The `README.md` has been updated to match this transparent proxy model.
 - Agent forwarding is still rejected by policy.
 
@@ -113,6 +113,8 @@ allowed_servers = ["git", "httpd"]
 [settings]
 user_key_root = "/var/lib/centralssh/keys"
 per_user_per_server = true
+drop_to_menu = false
+hide_proxy_ip = false
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
@@ -147,6 +149,8 @@ state_path = "/var/lib/centralssh/fail2ban_state.json"
 [fail2ban.whitelist]
 ips = ["127.0.0.1/32", "::1/128", "192.168.0.0/16"]
 ```
+
+If `settings.hide_proxy_ip=true`, the authenticated selection menu shows only logical server names and omits the configured endpoint IP or hostname from the displayed list.
 
 ### User fields
 
@@ -613,6 +617,7 @@ centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
 centralssh_drop_to_menu="false"
+centralssh_hide_proxy_ip="false"
 ```
 
 Important note:

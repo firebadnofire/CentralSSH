@@ -140,6 +140,7 @@ impl ProxyAuditContext {
 struct TargetClientHandler {
     verifier: StrictKnownHostsVerifier,
     server_handle: server::Handle,
+    raw_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
     audit_context: ProxyAuditContext,
 }
@@ -150,6 +151,7 @@ pub struct ProxySession {
     frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
     session_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
+    raw_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
     audit_context: ProxyAuditContext,
     username: String,
@@ -169,9 +171,18 @@ pub struct ChannelPtyState {
 #[derive(Debug, Clone, Default)]
 pub struct SessionChannelState {
     pub pty: Option<ChannelPtyState>,
-    pub shell_requested: bool,
+    pub request: SessionRequest,
     pub menu_active: bool,
     pub input_buffer: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum SessionRequest {
+    #[default]
+    None,
+    Shell,
+    Exec(Vec<u8>),
+    Subsystem(String),
 }
 
 #[derive(Debug)]
@@ -239,6 +250,7 @@ impl client::Handler for TargetClientHandler {
         let server_handle = self.server_handle.clone();
         let connected_address = connected_address.to_string();
         let originator_address = originator_address.to_string();
+        let raw_channels = self.raw_channels.clone();
         let last_error = self.last_error.clone();
 
         tokio::spawn(async move {
@@ -252,8 +264,20 @@ impl client::Handler for TargetClientHandler {
                     )
                     .await
                     .map_err(|error| CentralSshError::Ssh(error.to_string()))?;
+                let frontend_id = frontend_channel.id();
+                let (target_read, target_write) = target_channel.split();
 
-                spawn_raw_channel_bridge(frontend_channel, target_channel, last_error.clone());
+                raw_channels
+                    .lock()
+                    .await
+                    .insert(frontend_id, Arc::new(Mutex::new(target_write)));
+                spawn_raw_backend_bridge(
+                    frontend_id,
+                    target_read,
+                    server_handle.clone(),
+                    last_error.clone(),
+                );
+
                 Ok::<(), CentralSshError>(())
             }
             .await;
@@ -275,6 +299,7 @@ impl client::Handler for TargetClientHandler {
     ) -> std::result::Result<(), Self::Error> {
         let server_handle = self.server_handle.clone();
         let originator_address = originator_address.to_string();
+        let raw_channels = self.raw_channels.clone();
         let last_error = self.last_error.clone();
 
         tokio::spawn(async move {
@@ -283,8 +308,20 @@ impl client::Handler for TargetClientHandler {
                     .channel_open_x11(originator_address.clone(), originator_port)
                     .await
                     .map_err(|error| CentralSshError::Ssh(error.to_string()))?;
+                let frontend_id = frontend_channel.id();
+                let (target_read, target_write) = target_channel.split();
 
-                spawn_raw_channel_bridge(frontend_channel, target_channel, last_error.clone());
+                raw_channels
+                    .lock()
+                    .await
+                    .insert(frontend_id, Arc::new(Mutex::new(target_write)));
+                spawn_raw_backend_bridge(
+                    frontend_id,
+                    target_read,
+                    server_handle.clone(),
+                    last_error.clone(),
+                );
+
                 Ok::<(), CentralSshError>(())
             }
             .await;
@@ -325,12 +362,14 @@ impl ProxySession {
             username: username.clone(),
             target_server: target.name,
         };
+        let raw_channels = Arc::new(Mutex::new(HashMap::new()));
         let handler = TargetClientHandler {
             verifier: StrictKnownHostsVerifier {
                 expected_host: target.host.clone(),
                 known_hosts_path: app_state.config_store.paths.known_hosts_path.clone(),
             },
             server_handle: server_handle.clone(),
+            raw_channels: raw_channels.clone(),
             last_error: last_error.clone(),
             audit_context: audit_context.clone(),
         };
@@ -390,10 +429,15 @@ impl ProxySession {
             frontend_channel_state,
             target_handle: Arc::new(Mutex::new(target_handle)),
             session_channels: Arc::new(Mutex::new(HashMap::new())),
+            raw_channels,
             last_error,
             audit_context,
             username,
-            drop_to_menu: config_snapshot.config.settings.drop_to_menu.unwrap_or(false),
+            drop_to_menu: config_snapshot
+                .config
+                .settings
+                .drop_to_menu
+                .unwrap_or(false),
         })
     }
 
@@ -574,14 +618,9 @@ impl ProxySession {
     pub async fn signal(&self, channel: ChannelId, signal: Sig) -> Result<()> {
         let backend = self.backend_channel(channel).await?;
         let signal_display = format!("{signal:?}");
-        backend
-            .lock()
-            .await
-            .signal(signal)
-            .await
-            .map_err(|error| {
-                CentralSshError::Ssh(format!("failed to relay signal {signal_display}: {error}"))
-            })
+        backend.lock().await.signal(signal).await.map_err(|error| {
+            CentralSshError::Ssh(format!("failed to relay signal {signal_display}: {error}"))
+        })
     }
 
     pub async fn data(&self, channel: ChannelId, data: &[u8]) -> Result<()> {
@@ -599,7 +638,13 @@ impl ProxySession {
     }
 
     pub async fn channel_eof(&self, channel: ChannelId) -> Result<()> {
-        let Some(backend) = self.session_channels.lock().await.get(&channel).cloned() else {
+        let backend =
+            if let Some(backend) = self.session_channels.lock().await.get(&channel).cloned() {
+                Some(backend)
+            } else {
+                self.raw_channels.lock().await.get(&channel).cloned()
+            };
+        let Some(backend) = backend else {
             return Ok(());
         };
         backend
@@ -611,7 +656,12 @@ impl ProxySession {
     }
 
     pub async fn channel_close(&self, channel: ChannelId) -> Result<()> {
-        let Some(backend) = self.session_channels.lock().await.remove(&channel) else {
+        let backend = if let Some(backend) = self.session_channels.lock().await.remove(&channel) {
+            Some(backend)
+        } else {
+            self.raw_channels.lock().await.remove(&channel)
+        };
+        let Some(backend) = backend else {
             return Ok(());
         };
         backend
@@ -636,14 +686,18 @@ impl ProxySession {
         &self,
         channel: ChannelId,
     ) -> Result<Arc<Mutex<ChannelWriteHalf<client::Msg>>>> {
-        self.session_channels
+        if let Some(backend) = self.session_channels.lock().await.get(&channel).cloned() {
+            return Ok(backend);
+        }
+
+        self.raw_channels
             .lock()
             .await
             .get(&channel)
             .cloned()
             .ok_or_else(|| {
                 CentralSshError::Ssh(format!(
-                    "missing proxied backend session channel for frontend channel {channel:?}"
+                    "missing proxied backend channel for frontend channel {channel:?}"
                 ))
             })
     }
@@ -668,8 +722,18 @@ impl ProxySession {
                 .await
                 .map_err(|error| CentralSshError::Ssh(error.to_string()))?
         };
-
-        spawn_raw_channel_bridge(frontend_channel, target_channel, self.last_error.clone());
+        let frontend_id = frontend_channel.id();
+        let (target_read, target_write) = target_channel.split();
+        self.raw_channels
+            .lock()
+            .await
+            .insert(frontend_id, Arc::new(Mutex::new(target_write)));
+        spawn_raw_backend_bridge(
+            frontend_id,
+            target_read,
+            self.server_handle.clone(),
+            self.last_error.clone(),
+        );
         Ok(())
     }
 
@@ -752,19 +816,69 @@ fn spawn_session_bridge(
     });
 }
 
-fn spawn_raw_channel_bridge(
-    frontend_channel: Channel<server::Msg>,
-    target_channel: Channel<client::Msg>,
+fn spawn_raw_backend_bridge(
+    frontend_id: ChannelId,
+    mut target_read: ChannelReadHalf,
+    server_handle: server::Handle,
     last_error: Arc<Mutex<Option<String>>>,
 ) {
     tokio::spawn(async move {
-        let (frontend_read, frontend_write) = frontend_channel.split();
-        let (target_read, target_write) = target_channel.split();
-
-        let front_to_back = relay_raw_channel(frontend_read, target_write, last_error.clone());
-        let back_to_front = relay_raw_channel(target_read, frontend_write, last_error.clone());
-
-        let _ = tokio::join!(front_to_back, back_to_front);
+        loop {
+            match target_read.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    if let Err(failed_data) = server_handle.data(frontend_id, data).await {
+                        record_error(
+                            &last_error,
+                            String::from_utf8_lossy(failed_data.as_ref()).to_string(),
+                        )
+                        .await;
+                        break;
+                    }
+                }
+                Some(ChannelMsg::WindowAdjusted { .. }) => {
+                    // SSH flow-control updates are handled by the library transport.
+                }
+                Some(ChannelMsg::ExtendedData { ext, data }) => {
+                    if let Err(failed_data) =
+                        server_handle.extended_data(frontend_id, ext, data).await
+                    {
+                        record_error(
+                            &last_error,
+                            String::from_utf8_lossy(failed_data.as_ref()).to_string(),
+                        )
+                        .await;
+                        break;
+                    }
+                }
+                Some(ChannelMsg::Eof) => {
+                    if server_handle.eof(frontend_id).await.is_err() {
+                        record_error(
+                            &last_error,
+                            format!("failed to send EOF to raw frontend channel {frontend_id:?}"),
+                        )
+                        .await;
+                        break;
+                    }
+                }
+                Some(ChannelMsg::Close) => {
+                    let _ = server_handle.close(frontend_id).await;
+                    break;
+                }
+                Some(other) => {
+                    record_error(
+                        &last_error,
+                        format!("unexpected raw backend channel message: {other:?}"),
+                    )
+                    .await;
+                    let _ = server_handle.close(frontend_id).await;
+                    break;
+                }
+                None => {
+                    let _ = server_handle.close(frontend_id).await;
+                    break;
+                }
+            }
+        }
     });
 }
 
@@ -792,7 +906,35 @@ async fn relay_backend_session(
                     }
                 };
 
+                let keep_frontend_for_menu =
+                    channel_should_reuse_menu(&frontend_channel_state, frontend_id, drop_to_menu)
+                        .await;
+
+                if keep_frontend_for_menu
+                    && matches!(
+                        action,
+                        BackendSessionAction::ExitStatus { .. }
+                            | BackendSessionAction::ExitSignal { .. }
+                            | BackendSessionAction::Eof
+                    )
+                {
+                    continue;
+                }
+
                 let should_break = matches!(action, BackendSessionAction::Close);
+                if keep_frontend_for_menu && should_break {
+                    session_channels.lock().await.remove(&frontend_id);
+                    return !activate_menu_after_disconnect(
+                        &app_state,
+                        &server_handle,
+                        &username,
+                        frontend_id,
+                        drop_to_menu,
+                        &frontend_channel_state,
+                    )
+                    .await;
+                }
+
                 if let Err(error) =
                     apply_backend_session_action(action, frontend_id, &server_handle).await
                 {
@@ -846,7 +988,7 @@ async fn activate_menu_after_disconnect(
         let Some(channel_state) = guard.get_mut(&frontend_id) else {
             return false;
         };
-        if !channel_state.shell_requested {
+        if !channel_state.request.supports_inline_drop_to_menu() {
             return false;
         }
         channel_state.menu_active = true;
@@ -879,61 +1021,37 @@ async fn activate_menu_after_disconnect(
         return false;
     }
 
-    let menu = render_server_menu(username, &entries);
+    let hide_proxy_ip = app_state.config_store.paths.hide_proxy_ip;
+    let menu = render_server_menu(username, &entries, hide_proxy_ip);
     server_handle
         .data(frontend_id, Bytes::from(menu))
         .await
         .is_ok()
 }
 
-async fn relay_raw_channel<S>(
-    mut reader: ChannelReadHalf,
-    writer: ChannelWriteHalf<S>,
-    last_error: Arc<Mutex<Option<String>>>,
-) where
-    S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static,
-{
-    loop {
-        match reader.wait().await {
-            Some(ChannelMsg::Data { data }) => {
-                if let Err(error) = write_raw_channel_data(&writer, None, &data).await {
-                    record_error(&last_error, error.to_string()).await;
-                    break;
-                }
-            }
-            Some(ChannelMsg::WindowAdjusted { .. }) => {
-                // SSH flow-control updates are handled by the library transport.
-            }
-            Some(ChannelMsg::ExtendedData { ext, data }) => {
-                if let Err(error) = write_raw_channel_data(&writer, Some(ext), &data).await {
-                    record_error(&last_error, error.to_string()).await;
-                    break;
-                }
-            }
-            Some(ChannelMsg::Eof) => {
-                if let Err(error) = writer.eof().await {
-                    record_error(&last_error, error.to_string()).await;
-                    break;
-                }
-            }
-            Some(ChannelMsg::Close) => {
-                let _ = writer.close().await;
-                break;
-            }
-            Some(other) => {
-                record_error(
-                    &last_error,
-                    format!("unexpected raw channel message: {other:?}"),
-                )
-                .await;
-                let _ = writer.close().await;
-                break;
-            }
-            None => {
-                let _ = writer.close().await;
-                break;
-            }
-        }
+async fn channel_should_reuse_menu(
+    frontend_channel_state: &Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
+    frontend_id: ChannelId,
+    drop_to_menu: bool,
+) -> bool {
+    frontend_channel_state
+        .lock()
+        .await
+        .get(&frontend_id)
+        .map(|channel_state| channel_state_should_reuse_menu(channel_state, drop_to_menu))
+        .unwrap_or(false)
+}
+
+fn channel_state_should_reuse_menu(
+    channel_state: &SessionChannelState,
+    drop_to_menu: bool,
+) -> bool {
+    drop_to_menu && channel_state.request.supports_inline_drop_to_menu()
+}
+
+impl SessionRequest {
+    fn supports_inline_drop_to_menu(&self) -> bool {
+        matches!(self, Self::Shell)
     }
 }
 
@@ -1142,4 +1260,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn channel_menu_reuse_requires_shell_and_drop_to_menu() {
+        assert!(!channel_state_should_reuse_menu(
+            &SessionChannelState::default(),
+            false,
+        ));
+        assert!(!channel_state_should_reuse_menu(
+            &SessionChannelState::default(),
+            true,
+        ));
+
+        let shell_channel = SessionChannelState {
+            request: SessionRequest::Shell,
+            ..SessionChannelState::default()
+        };
+        assert!(!channel_state_should_reuse_menu(&shell_channel, false));
+        assert!(channel_state_should_reuse_menu(&shell_channel, true));
+    }
+
+    #[test]
+    fn non_shell_requests_do_not_reuse_menu_inline() {
+        let sftp_channel = SessionChannelState {
+            request: SessionRequest::Subsystem("sftp".to_string()),
+            ..SessionChannelState::default()
+        };
+        assert!(!channel_state_should_reuse_menu(&sftp_channel, true));
+
+        let scp_channel = SessionChannelState {
+            request: SessionRequest::Exec(b"scp -t /tmp/file".to_vec()),
+            ..SessionChannelState::default()
+        };
+        assert!(!channel_state_should_reuse_menu(&scp_channel, true));
+
+        let plain_exec_channel = SessionChannelState {
+            request: SessionRequest::Exec(b"uname -a".to_vec()),
+            ..SessionChannelState::default()
+        };
+        assert!(!channel_state_should_reuse_menu(&plain_exec_channel, true));
+    }
 }
