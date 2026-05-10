@@ -2,11 +2,35 @@
 set -eu
 
 prog="$(basename "$0")"
-known_hosts="${CENTRALSSH_KNOWN_HOSTS:-/etc/centralssh/known_hosts}"
+
+resolve_known_hosts_path() {
+	if [ -n "${CENTRALSSH_KNOWN_HOSTS:-}" ]; then
+		printf '%s\n' "${CENTRALSSH_KNOWN_HOSTS}"
+		return
+	fi
+
+	if [ -r /etc/rc.subr ]; then
+		# Follow the same rc.conf and rc.conf.d override flow as the FreeBSD
+		# service script so this helper updates the trust store the daemon uses.
+		name="centralssh"
+		# shellcheck source=/etc/rc.subr
+		. /etc/rc.subr
+		load_rc_config "$name"
+		if [ -n "${centralssh_known_hosts:-}" ]; then
+			printf '%s\n' "${centralssh_known_hosts}"
+			return
+		fi
+	fi
+
+	printf '%s\n' "/etc/centralssh/known_hosts"
+}
+
+known_hosts="$(resolve_known_hosts_path)"
 
 usage() {
 	echo "Usage: ${prog} <server IP or domain> [expected key]" >&2
 	echo "Fetches ssh-ed25519/rsa/ecdsa host keys and appends missing keys to ${known_hosts}." >&2
+	echo "Known-hosts path precedence: CENTRALSSH_KNOWN_HOSTS, FreeBSD centralssh_known_hosts rc.conf override, then /etc/centralssh/known_hosts." >&2
 	echo "Optional expected key formats (at least one scanned key must match):" >&2
 	echo "  <base64-key-blob>" >&2
 	echo "  <algorithm> <base64-key-blob>" >&2

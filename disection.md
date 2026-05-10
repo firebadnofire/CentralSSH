@@ -40,6 +40,8 @@ Support files:
 Entry path in `src/main.rs`:
 
 1. Initialize `tracing_subscriber`.
+   - Log filtering is driven by `CENTRALSSH_LOG` first, then `RUST_LOG`, defaulting to `info`.
+   - Log formatting is driven by `CENTRALSSH_LOG_FORMAT`; if `JOURNAL_STREAM` is present, the default switches to a journald-friendly compact format on stderr.
 2. Parse CLI flags and env-backed overrides with `clap`.
 3. Load the seed config first so `settings` can influence downstream path resolution.
 4. Resolve effective runtime paths with `config::resolve_paths`.
@@ -115,6 +117,7 @@ Important exception:
 - `config.toml` itself must be found before settings can be read, so its path cannot depend on settings inside the file.
 - `servers.toml` has no `settings` override inside `config.toml`; it is controlled by CLI/env or the compiled default.
 - the gateway host key is not separately configurable; it is derived from the config directory as `<config_dir>/host_ed25519`.
+- `drop_to_menu` is a runtime setting and can be overridden by CLI/env or FreeBSD rc.conf the same way `per_user_per_server` can.
 
 ### 4.2 Load and reload
 
@@ -250,6 +253,8 @@ Rate-limit exhaustion becomes `CentralSshError::RateLimitExceeded`.
 ## 7. Abuse tracker internals
 
 `src/abuse.rs` is a second layer above the auth token buckets. It is IP-centric and behaves like an internal fail2ban implementation.
+
+Normal SSH auth-method discovery is intentionally excluded from this tracker. Probes such as `none`, opportunistic `publickey`, or disabled `password` auth are redirected toward keyboard-interactive without being counted as failed credentials.
 
 ### 7.1 Effective settings
 
@@ -441,7 +446,7 @@ After a valid choice, the handler stops acting like a menu flow and switches to 
 
 If target auth fails, the proxy session is not created.
 
-`tools/cssh-keyscan` helps operators populate trust entries. It accepts raw known_hosts lines and SHA256 OpenSSH fingerprints only; MD5 fingerprints are rejected rather than supported as a compatibility fallback.
+`tools/cssh-keyscan` helps operators populate trust entries. It accepts raw known_hosts lines and SHA256 OpenSSH fingerprints only; MD5 fingerprints are rejected rather than supported as a compatibility fallback. For destination path resolution it prefers `CENTRALSSH_KNOWN_HOSTS`, then FreeBSD `centralssh_known_hosts` via the normal `rc.conf` / `rc.conf.d` load path, then `/etc/centralssh/known_hosts`.
 
 ### 11.2 Supported forwarded features
 
@@ -468,17 +473,16 @@ Current explicit policy rejection:
 
 ### 11.3 Session bridge structure
 
-For session channels the proxy starts two async loops:
+For session channels the proxy now splits responsibility across the `russh` server callback path and one backend read loop:
 
-- frontend client -> target session
 - target session -> frontend client
+- frontend client -> target session requests and data are forwarded immediately from the server handler callbacks in `src/ssh/mod.rs`
 
-Messages are classified into internal action enums:
+The session proxy keeps a per-frontend-channel map of backend session write handles so callback-driven events can be forwarded without waiting for a synthetic frontend read loop.
 
-- `FrontendSessionAction`
 - `BackendSessionAction`
 
-These actions are then applied to the opposite side, preserving SSH request semantics instead of flattening everything into one shell byte stream.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, a clean interactive shell disconnect renders the server menu back onto that same frontend channel instead of closing the gateway connection immediately.
 
 ### 11.4 Raw channel bridge structure
 
@@ -494,6 +498,8 @@ For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a sim
 ### 11.5 Error handling and teardown
 
 The proxy records the first terminal error string in `last_error`.
+Normal frontend `channel_eof` / `channel_close` callbacks are treated idempotently so a clean backend-driven close does not create a false proxy failure.
+The in-channel selection menu accepts `Q` to disconnect the gateway session.
 
 On fatal relay failure it:
 

@@ -23,6 +23,8 @@ The operator should know that the repo currently contains both old and new assum
 
 - The top-level spec in `AGENTS.md` requires transparent SSH proxying, including `exec`, SFTP, PTY forwarding, and forwarding support.
 - The current proxy code does relay `session`, `exec`, `subsystem`, PTY, `direct-tcpip`, and remote forwarding requests.
+- Session request/data forwarding happens from the `russh` server callbacks, so post-selection SSH behavior does not depend on a gateway-local shell shim.
+- If `settings.drop_to_menu=true`, an interactive shell channel is returned to the selection menu after target disconnect; `Q` exits that menu.
 - The `README.md` has been updated to match this transparent proxy model.
 - Agent forwarding is still rejected by policy.
 
@@ -240,6 +242,7 @@ CentralSSH only accepts keyboard-interactive SSH auth for gateway login.
 - SSH public-key auth to the gateway is rejected.
 - Plain SSH password auth to the gateway is rejected.
 - The transport auth flow is implemented entirely through keyboard-interactive prompts.
+- Normal OpenSSH auth-method discovery probes do not count toward fail2ban or password/TOTP failures.
 
 The user experience is:
 
@@ -249,6 +252,11 @@ The user experience is:
 4. If `must_change_password=true`, the user must change their password before target access.
 5. If `totp_secret=null`, the user must enroll in TOTP before target access.
 6. The user selects an authorized target.
+
+Terminal resize behavior:
+
+- PTY resize events are forwarded to the selected target as `window-change` requests.
+- A failed resize relay is logged, but it does not tear down the whole SSH session.
 
 The gateway does not allow target selection before the auth and first-login flow completes.
 
@@ -413,6 +421,9 @@ sudo cssh-keyscan 192.168.122.123 'ssh-ed25519 AAAA...'
 
 Behavior worth knowing:
 
+- `CENTRALSSH_KNOWN_HOSTS` has highest precedence for the destination trust file.
+- On FreeBSD, if that env var is unset, the tool follows `centralssh_known_hosts` from the same `rc.conf` / `rc.conf.d` flow as the service script.
+- Otherwise it writes to `/etc/centralssh/known_hosts`.
 - For a new host without an expected key, the tool requires interactive TOFU confirmation.
 - For a new host with expected key material, the tool auto-accepts only if at least one scanned key matches.
 - If a host already exists in `known_hosts` and presents any new key, the tool refuses to update and exits with a security alert.
@@ -601,6 +612,7 @@ centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
+centralssh_drop_to_menu="false"
 ```
 
 Important note:
@@ -616,12 +628,14 @@ The repo includes a systemd unit:
 sudo systemctl daemon-reload
 sudo systemctl enable --now centralssh
 sudo systemctl status centralssh
+sudo journalctl -u centralssh -f
 ```
 
 Important note:
 
 - The shipped unit now passes `--user-key-root /var/lib/centralssh/keys`.
 - If you want user-only keys, set `PER_USER_PER_SERVER=false` in the unit environment.
+- The shipped unit also sets `CENTRALSSH_LOG=info`, `CENTRALSSH_LOG_FORMAT=systemd`, `SyslogIdentifier=centralssh`, and routes stdout/stderr directly into journald.
 
 ## 22. Installation behavior
 

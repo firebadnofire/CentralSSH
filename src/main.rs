@@ -8,6 +8,7 @@ mod error;
 mod keys;
 mod reload;
 mod ssh;
+mod ui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +23,47 @@ use error::Result;
 use keys::ensure_user_key_root_directory;
 use reload::install_sighup_reload_notifier;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Compact,
+    Json,
+    Systemd,
+}
+
+impl LogFormat {
+    fn from_env() -> Self {
+        if let Ok(value) = std::env::var("CENTRALSSH_LOG_FORMAT") {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "compact" => return Self::Compact,
+                "json" => return Self::Json,
+                "systemd" | "journal" => return Self::Systemd,
+                _ => {}
+            }
+        }
+
+        if std::env::var_os("JOURNAL_STREAM").is_some() {
+            Self::Systemd
+        } else {
+            Self::Compact
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Json => "json",
+            Self::Systemd => "systemd",
+        }
+    }
+}
+
+fn build_env_filter() -> EnvFilter {
+    EnvFilter::try_from_env("CENTRALSSH_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+}
 
 #[derive(Debug, Parser, Clone)]
 #[command(
@@ -81,6 +123,9 @@ struct Cli {
     #[arg(long, env = "PER_USER_PER_SERVER")]
     per_user_per_server: Option<bool>,
 
+    #[arg(long, env = "CENTRALSSH_DROP_TO_MENU")]
+    drop_to_menu: Option<bool>,
+
     #[arg(
         long,
         env = "CENTRALSSH_ENFORCE_STRICT_SECURITY",
@@ -98,14 +143,45 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_thread_names(true)
-        .with_thread_ids(true)
-        .compact()
-        .init();
+    let log_format = LogFormat::from_env();
+    match log_format {
+        LogFormat::Compact => {
+            tracing_subscriber::fmt()
+                .with_env_filter(build_env_filter())
+                .with_target(false)
+                .with_thread_names(true)
+                .with_thread_ids(true)
+                .with_writer(std::io::stderr)
+                .compact()
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .with_env_filter(build_env_filter())
+                .with_target(false)
+                .with_writer(std::io::stderr)
+                .json()
+                .init();
+        }
+        LogFormat::Systemd => {
+            tracing_subscriber::fmt()
+                .with_env_filter(build_env_filter())
+                .with_target(false)
+                .with_thread_names(false)
+                .with_thread_ids(false)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .compact()
+                .init();
+        }
+    }
 
     let cli = Cli::parse();
+    info!(
+        log_format = log_format.as_str(),
+        journal_stream = std::env::var_os("JOURNAL_STREAM").is_some(),
+        "logging configured"
+    );
 
     let seed_config_path = cli
         .config
@@ -121,6 +197,7 @@ async fn run() -> Result<()> {
         cli.audit_log.clone(),
         cli.whitelist.clone(),
         cli.per_user_per_server,
+        cli.drop_to_menu,
         Some(&seed_config.settings),
     );
     ensure_user_key_root_directory(&paths.user_key_root)?;
@@ -164,6 +241,10 @@ async fn run() -> Result<()> {
     info!(
         listen = %cli.listen,
         host_key = %host_key_path.display(),
+        config = %paths.config_path.display(),
+        servers = %paths.servers_path.display(),
+        known_hosts = %paths.known_hosts_path.display(),
+        strict_security = cli.enforce_strict_security,
         "starting gateway server"
     );
 

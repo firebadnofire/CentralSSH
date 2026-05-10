@@ -13,6 +13,7 @@ CentralSSH is strictly an SSH server.
 - No custom SSH protocol extensions.
 - Accepts only standard SSH mechanisms needed for gateway flow.
 - Proxies standard SSH behavior after target selection, including shell, `exec`, subsystem/SFTP, and forwarding requests.
+- Relays post-selection session requests and data from the `russh` server callback path instead of depending on a gateway-side pseudo-shell.
 - Treats SSH channel `window-adjust` messages as normal flow control instead of session-fatal input.
 - Denies gateway-local shell, gateway-local command execution, gateway filesystem access, and agent forwarding.
 - Gateway login auth is internal only (`username/password/TOTP`), not SSH public-key auth.
@@ -82,6 +83,25 @@ sudo systemctl enable --now centralssh
 sudo systemctl status centralssh
 ```
 
+The shipped unit writes process logs to journald and defaults to:
+
+- `CENTRALSSH_LOG=info`
+- `CENTRALSSH_LOG_FORMAT=systemd`
+
+Useful overrides:
+
+```bash
+sudo systemctl edit centralssh
+```
+
+Example drop-in:
+
+```ini
+[Service]
+Environment=CENTRALSSH_LOG=debug,centralssh=debug
+Environment=CENTRALSSH_LOG_FORMAT=json
+```
+
 ## FreeBSD rc.conf Overrides
 
 Optional rc.conf keys:
@@ -95,6 +115,7 @@ centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
+centralssh_drop_to_menu="false"
 ```
 
 ## Makefile Behavior
@@ -187,11 +208,13 @@ Fields:
 - `users[].allowed_servers`: required non-empty list of server names in `servers.toml`.
 - `settings.user_key_root`: optional path override.
 - `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
+- `settings.drop_to_menu`: optional bool, default `false`. When `true`, an interactive shell channel that disconnects is returned to the server menu instead of closing the gateway connection.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.
 - `settings.enforce_password_policy`: optional bool, default `true`.
 - `settings.min_password_policy`: optional integer minimum password length, default `12`.
+- The server-selection prompt accepts `Q` to quit.
 - `kex_policy.frontend_preferred`: ordered frontend SSH KEX allowlist. Supported values today are `mlkem768x25519-sha256`, `curve25519-sha256`, and `curve25519-sha256@libssh.org`.
 - `kex_policy.frontend_require_post_quantum`: optional bool, default `false`. When `true`, CentralSSH advertises only supported post-quantum frontend KEX algorithms and classical-only clients fail during SSH negotiation. Legacy `kex_policy.require_post_quantum` is still accepted as a compatibility alias for this frontend-only setting.
 - `kex_policy.backend_preferred`: ordered gateway-to-target SSH KEX allowlist. Supported values today are the same three names as `frontend_preferred`.
@@ -236,6 +259,7 @@ CentralSSH includes an internal fail2ban-style tracker keyed primarily by remote
 Behavior:
 
 - Failures are tracked in a sliding window, not a fixed reset bucket.
+- Normal SSH auth-method discovery such as `none`, `publickey`, or disabled `password` probes does not count as a failed login.
 - `max_failures` inside `find_time` creates a ban for `ban_time`.
 - Repeated bans for the same IP use exponential backoff and stop growing at `max_ban_time`.
 - Optional tarpitting applies `delay_time` just before the ban threshold when `delay_before_ban=true`.
@@ -308,6 +332,12 @@ Behavior:
 ## Host Key Management (`cssh-keyscan`)
 
 `cssh-keyscan` fetches target host keys and updates CentralSSH known_hosts.
+
+Path resolution:
+
+- `CENTRALSSH_KNOWN_HOSTS` overrides everything.
+- On FreeBSD, if that env var is unset, the tool follows `centralssh_known_hosts` from the same `rc.conf` / `rc.conf.d` flow as the service script.
+- Otherwise it falls back to `/etc/centralssh/known_hosts`.
 
 Basic usage:
 
@@ -423,6 +453,7 @@ sudo systemctl start centralssh
 sudo systemctl stop centralssh
 sudo systemctl restart centralssh
 sudo systemctl status centralssh
+sudo journalctl -u centralssh -f
 ```
 
 ### Reload config without dropping active sessions

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +18,8 @@ use crate::crypto_policy::{is_hybrid_kex_name, is_post_quantum_kex_name};
 use crate::error::{CentralSshError, Result};
 use crate::keys::resolve_user_server_private_key_path;
 use crate::ssh::apply_client_transport_config;
+use crate::ui::render_server_menu;
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct SelectedTarget {
@@ -142,65 +145,33 @@ struct TargetClientHandler {
 }
 
 pub struct ProxySession {
+    app_state: Arc<AppState>,
     server_handle: server::Handle,
+    frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
+    session_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
     audit_context: ProxyAuditContext,
+    username: String,
+    drop_to_menu: bool,
 }
 
-#[derive(Debug)]
-enum FrontendSessionAction {
-    ForwardData {
-        extended_code: Option<u32>,
-        data: Bytes,
-    },
-    WindowAdjusted,
-    RequestPty {
-        want_reply: bool,
-        term: String,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-        terminal_modes: Vec<(russh::Pty, u32)>,
-    },
-    RequestShell {
-        want_reply: bool,
-    },
-    Exec {
-        want_reply: bool,
-        command: Vec<u8>,
-    },
-    Signal {
-        signal: Sig,
-    },
-    RequestSubsystem {
-        want_reply: bool,
-        name: String,
-    },
-    RequestX11 {
-        want_reply: bool,
-        single_connection: bool,
-        x11_authentication_protocol: String,
-        x11_authentication_cookie: String,
-        x11_screen_number: u32,
-    },
-    SetEnv {
-        want_reply: bool,
-        variable_name: String,
-        variable_value: String,
-    },
-    WindowChange {
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-    },
-    RejectAgentForward {
-        want_reply: bool,
-    },
-    Eof,
-    Close,
+#[derive(Debug, Clone)]
+pub struct ChannelPtyState {
+    pub term: String,
+    pub col_width: u32,
+    pub row_height: u32,
+    pub pix_width: u32,
+    pub pix_height: u32,
+    pub terminal_modes: Vec<(russh::Pty, u32)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionChannelState {
+    pub pty: Option<ChannelPtyState>,
+    pub shell_requested: bool,
+    pub menu_active: bool,
+    pub input_buffer: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -335,6 +306,7 @@ impl ProxySession {
         username: String,
         target: SelectedTarget,
         server_handle: server::Handle,
+        frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
     ) -> Result<Self> {
         let private_key_path = resolve_user_server_private_key_path(
             &app_state.config_store.paths.user_key_root,
@@ -405,17 +377,36 @@ impl ProxySession {
             ));
         }
 
+        info!(
+            session_id = %audit_context.session_id,
+            username = %username,
+            target_host = %target.host,
+            "backend SSH authentication succeeded"
+        );
+
         Ok(Self {
+            app_state,
             server_handle,
+            frontend_channel_state,
             target_handle: Arc::new(Mutex::new(target_handle)),
+            session_channels: Arc::new(Mutex::new(HashMap::new())),
             last_error,
             audit_context,
+            username,
+            drop_to_menu: config_snapshot.config.settings.drop_to_menu.unwrap_or(false),
         })
     }
 
     pub async fn open_session_channel(&self, frontend_channel: Channel<server::Msg>) -> Result<()> {
-        let frontend_id = frontend_channel.id();
-        let (frontend_read, _) = frontend_channel.split();
+        self.open_session_channel_by_id(frontend_channel.id()).await
+    }
+
+    pub async fn open_session_channel_by_id(&self, frontend_id: ChannelId) -> Result<()> {
+        debug!(
+            session_id = %self.audit_context.session_id,
+            frontend_channel = ?frontend_id,
+            "opening proxied session channel"
+        );
         let target_channel = {
             let handle = self.target_handle.lock().await;
             handle
@@ -425,19 +416,236 @@ impl ProxySession {
         };
         let (target_read, target_write) = target_channel.split();
         let backend = Arc::new(Mutex::new(target_write));
+        self.session_channels
+            .lock()
+            .await
+            .insert(frontend_id, backend.clone());
 
         spawn_session_bridge(
             frontend_id,
-            frontend_read,
             target_read,
-            backend,
             self.server_handle.clone(),
             self.target_handle.clone(),
+            self.session_channels.clone(),
             self.last_error.clone(),
-            self.audit_context.clone(),
+            self.app_state.clone(),
+            self.username.clone(),
+            self.drop_to_menu,
+            self.frontend_channel_state.clone(),
         );
 
         Ok(())
+    }
+
+    pub async fn request_pty(
+        &self,
+        channel: ChannelId,
+        want_reply: bool,
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        terminal_modes: &[(russh::Pty, u32)],
+    ) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        backend
+            .lock()
+            .await
+            .request_pty(
+                want_reply,
+                term,
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+                terminal_modes,
+            )
+            .await
+            .map_err(|error| {
+                CentralSshError::Ssh(format!(
+                    "failed to relay pty request term={term} cols={col_width} rows={row_height} pix_width={pix_width} pix_height={pix_height}: {error}"
+                ))
+            })
+    }
+
+    pub async fn request_shell(&self, channel: ChannelId, want_reply: bool) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        backend
+            .lock()
+            .await
+            .request_shell(want_reply)
+            .await
+            .map_err(|error| {
+                CentralSshError::Ssh(format!("failed to relay shell request: {error}"))
+            })
+    }
+
+    pub async fn exec(&self, channel: ChannelId, want_reply: bool, command: Vec<u8>) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        let command_display = String::from_utf8_lossy(command.as_slice()).to_string();
+        backend
+            .lock()
+            .await
+            .exec(want_reply, command)
+            .await
+            .map_err(|error| {
+                CentralSshError::Ssh(format!(
+                    "failed to relay exec request command={command_display}: {error}"
+                ))
+            })
+    }
+
+    pub async fn request_subsystem(
+        &self,
+        channel: ChannelId,
+        want_reply: bool,
+        name: String,
+    ) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        let subsystem_name = name.clone();
+        backend
+            .lock()
+            .await
+            .request_subsystem(want_reply, name)
+            .await
+            .map_err(|error| {
+                CentralSshError::Ssh(format!(
+                    "failed to relay subsystem request {subsystem_name}: {error}"
+                ))
+            })
+    }
+
+    pub async fn set_env(
+        &self,
+        channel: ChannelId,
+        want_reply: bool,
+        variable_name: String,
+        variable_value: String,
+    ) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        let variable_name_display = variable_name.clone();
+        let variable_value_display = variable_value.clone();
+        backend
+            .lock()
+            .await
+            .set_env(want_reply, variable_name, variable_value)
+            .await
+            .map_err(|error| {
+                CentralSshError::Ssh(format!(
+                    "failed to relay env request {}={}: {error}",
+                    variable_name_display, variable_value_display
+                ))
+            })
+    }
+
+    pub async fn window_change(
+        &self,
+        channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+    ) -> Result<()> {
+        debug!(
+            session_id = %self.audit_context.session_id,
+            username = %self.audit_context.username,
+            target_server = %self.audit_context.target_server,
+            frontend_channel = ?channel,
+            cols = col_width,
+            rows = row_height,
+            pix_width,
+            pix_height,
+            "forwarding window-change"
+        );
+        let backend = self.backend_channel(channel).await?;
+        backend
+            .lock()
+            .await
+            .window_change(col_width, row_height, pix_width, pix_height)
+            .await
+            .map_err(|error| {
+                CentralSshError::Ssh(format!(
+                    "failed to relay window-change cols={col_width} rows={row_height} pix_width={pix_width} pix_height={pix_height}: {error}"
+                ))
+            })
+    }
+
+    pub async fn signal(&self, channel: ChannelId, signal: Sig) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        let signal_display = format!("{signal:?}");
+        backend
+            .lock()
+            .await
+            .signal(signal)
+            .await
+            .map_err(|error| {
+                CentralSshError::Ssh(format!("failed to relay signal {signal_display}: {error}"))
+            })
+    }
+
+    pub async fn data(&self, channel: ChannelId, data: &[u8]) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        write_channel_data(backend, None, data)
+            .await
+            .map_err(|error| CentralSshError::Ssh(error.to_string()))
+    }
+
+    pub async fn extended_data(&self, channel: ChannelId, code: u32, data: &[u8]) -> Result<()> {
+        let backend = self.backend_channel(channel).await?;
+        write_channel_data(backend, Some(code), data)
+            .await
+            .map_err(|error| CentralSshError::Ssh(error.to_string()))
+    }
+
+    pub async fn channel_eof(&self, channel: ChannelId) -> Result<()> {
+        let Some(backend) = self.session_channels.lock().await.get(&channel).cloned() else {
+            return Ok(());
+        };
+        backend
+            .lock()
+            .await
+            .eof()
+            .await
+            .map_err(|error| CentralSshError::Ssh(error.to_string()))
+    }
+
+    pub async fn channel_close(&self, channel: ChannelId) -> Result<()> {
+        let Some(backend) = self.session_channels.lock().await.remove(&channel) else {
+            return Ok(());
+        };
+        backend
+            .lock()
+            .await
+            .close()
+            .await
+            .map_err(|error| CentralSshError::Ssh(error.to_string()))
+    }
+
+    pub async fn abort(&self, reason: String) {
+        abort_proxy_session(
+            &self.server_handle,
+            &self.target_handle,
+            &self.last_error,
+            reason,
+        )
+        .await;
+    }
+
+    async fn backend_channel(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Arc<Mutex<ChannelWriteHalf<client::Msg>>>> {
+        self.session_channels
+            .lock()
+            .await
+            .get(&channel)
+            .cloned()
+            .ok_or_else(|| {
+                CentralSshError::Ssh(format!(
+                    "missing proxied backend session channel for frontend channel {channel:?}"
+                ))
+            })
     }
 
     pub async fn open_direct_tcpip_channel(
@@ -514,34 +722,33 @@ impl Drop for ProxySession {
 
 fn spawn_session_bridge(
     frontend_id: ChannelId,
-    frontend_read: ChannelReadHalf,
     target_read: ChannelReadHalf,
-    backend: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
     server_handle: server::Handle,
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
+    session_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
-    audit_context: ProxyAuditContext,
+    app_state: Arc<AppState>,
+    username: String,
+    drop_to_menu: bool,
+    frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
 ) {
     tokio::spawn(async move {
-        let front_to_back = relay_frontend_session(
-            frontend_read,
-            backend.clone(),
-            server_handle.clone(),
-            target_handle.clone(),
-            last_error.clone(),
-            audit_context.clone(),
-        );
-        let back_to_front = relay_backend_session(
+        let close_frontend = relay_backend_session(
             frontend_id,
             target_read,
             server_handle.clone(),
             target_handle.clone(),
+            session_channels,
             last_error.clone(),
+            app_state,
+            username,
+            drop_to_menu,
+            frontend_channel_state,
         );
 
-        let _ = tokio::join!(front_to_back, back_to_front);
-
-        let _ = server_handle.close(frontend_id).await;
+        if close_frontend.await {
+            let _ = server_handle.close(frontend_id).await;
+        }
     });
 }
 
@@ -561,53 +768,18 @@ fn spawn_raw_channel_bridge(
     });
 }
 
-async fn relay_frontend_session(
-    mut frontend_read: ChannelReadHalf,
-    backend: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
-    server_handle: server::Handle,
-    target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
-    last_error: Arc<Mutex<Option<String>>>,
-    audit_context: ProxyAuditContext,
-) {
-    loop {
-        match frontend_read.wait().await {
-            Some(message) => {
-                let action = match classify_frontend_session_msg(message) {
-                    Ok(action) => action,
-                    Err(reason) => {
-                        abort_proxy_session(&server_handle, &target_handle, &last_error, reason)
-                            .await;
-                        break;
-                    }
-                };
-
-                let should_break = matches!(action, FrontendSessionAction::Close);
-                if let Err(error) =
-                    apply_frontend_session_action(action, backend.clone(), &audit_context).await
-                {
-                    abort_proxy_session(&server_handle, &target_handle, &last_error, error).await;
-                    break;
-                }
-
-                if should_break {
-                    break;
-                }
-            }
-            None => {
-                let _ = backend.lock().await.close().await;
-                break;
-            }
-        }
-    }
-}
-
 async fn relay_backend_session(
     frontend_id: ChannelId,
     mut target_read: ChannelReadHalf,
     server_handle: server::Handle,
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
+    session_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
-) {
+    app_state: Arc<AppState>,
+    username: String,
+    drop_to_menu: bool,
+    frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
+) -> bool {
     loop {
         match target_read.wait().await {
             Some(message) => {
@@ -616,7 +788,7 @@ async fn relay_backend_session(
                     Err(reason) => {
                         abort_proxy_session(&server_handle, &target_handle, &last_error, reason)
                             .await;
-                        break;
+                        return true;
                     }
                 };
 
@@ -625,19 +797,93 @@ async fn relay_backend_session(
                     apply_backend_session_action(action, frontend_id, &server_handle).await
                 {
                     abort_proxy_session(&server_handle, &target_handle, &last_error, error).await;
-                    break;
+                    return true;
                 }
 
                 if should_break {
-                    break;
+                    session_channels.lock().await.remove(&frontend_id);
+                    return !activate_menu_after_disconnect(
+                        &app_state,
+                        &server_handle,
+                        &username,
+                        frontend_id,
+                        drop_to_menu,
+                        &frontend_channel_state,
+                    )
+                    .await;
                 }
             }
             None => {
-                let _ = server_handle.close(frontend_id).await;
-                break;
+                session_channels.lock().await.remove(&frontend_id);
+                return !activate_menu_after_disconnect(
+                    &app_state,
+                    &server_handle,
+                    &username,
+                    frontend_id,
+                    drop_to_menu,
+                    &frontend_channel_state,
+                )
+                .await;
             }
         }
     }
+}
+
+async fn activate_menu_after_disconnect(
+    app_state: &Arc<AppState>,
+    server_handle: &server::Handle,
+    username: &str,
+    frontend_id: ChannelId,
+    drop_to_menu: bool,
+    frontend_channel_state: &Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
+) -> bool {
+    if !drop_to_menu {
+        return false;
+    }
+
+    {
+        let mut guard = frontend_channel_state.lock().await;
+        let Some(channel_state) = guard.get_mut(&frontend_id) else {
+            return false;
+        };
+        if !channel_state.shell_requested {
+            return false;
+        }
+        channel_state.menu_active = true;
+        channel_state.input_buffer.clear();
+    }
+
+    let snapshot = app_state.config_store.snapshot().await;
+    let Some(user) = snapshot
+        .config
+        .users
+        .iter()
+        .find(|candidate| candidate.name == username)
+    else {
+        return false;
+    };
+
+    let entries = user
+        .allowed_servers
+        .iter()
+        .filter_map(|server_name| {
+            snapshot
+                .servers
+                .servers
+                .get(server_name)
+                .map(|host| (server_name.clone(), host.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        return false;
+    }
+
+    let menu = render_server_menu(username, &entries);
+    server_handle
+        .data(frontend_id, Bytes::from(menu))
+        .await
+        .is_ok()
 }
 
 async fn relay_raw_channel<S>(
@@ -691,103 +937,6 @@ async fn relay_raw_channel<S>(
     }
 }
 
-fn classify_frontend_session_msg(
-    message: ChannelMsg,
-) -> std::result::Result<FrontendSessionAction, String> {
-    match message {
-        ChannelMsg::Data { data } => Ok(FrontendSessionAction::ForwardData {
-            extended_code: None,
-            data,
-        }),
-        ChannelMsg::WindowAdjusted { .. } => Ok(FrontendSessionAction::WindowAdjusted),
-        ChannelMsg::ExtendedData { ext, data } => Ok(FrontendSessionAction::ForwardData {
-            extended_code: Some(ext),
-            data,
-        }),
-        ChannelMsg::Eof => Ok(FrontendSessionAction::Eof),
-        ChannelMsg::Close => Ok(FrontendSessionAction::Close),
-        ChannelMsg::RequestPty {
-            want_reply,
-            term,
-            col_width,
-            row_height,
-            pix_width,
-            pix_height,
-            terminal_modes,
-        } => Ok(FrontendSessionAction::RequestPty {
-            want_reply,
-            term,
-            col_width,
-            row_height,
-            pix_width,
-            pix_height,
-            terminal_modes,
-        }),
-        ChannelMsg::RequestShell { want_reply } => {
-            Ok(FrontendSessionAction::RequestShell { want_reply })
-        }
-        ChannelMsg::Exec {
-            want_reply,
-            command,
-        } => Ok(FrontendSessionAction::Exec {
-            want_reply,
-            command,
-        }),
-        ChannelMsg::Signal { signal } => Ok(FrontendSessionAction::Signal { signal }),
-        ChannelMsg::RequestSubsystem { want_reply, name } => {
-            Ok(FrontendSessionAction::RequestSubsystem { want_reply, name })
-        }
-        ChannelMsg::RequestX11 {
-            want_reply,
-            single_connection,
-            x11_authentication_protocol,
-            x11_authentication_cookie,
-            x11_screen_number,
-        } => Ok(FrontendSessionAction::RequestX11 {
-            want_reply,
-            single_connection,
-            x11_authentication_protocol,
-            x11_authentication_cookie,
-            x11_screen_number,
-        }),
-        ChannelMsg::SetEnv {
-            want_reply,
-            variable_name,
-            variable_value,
-        } => Ok(FrontendSessionAction::SetEnv {
-            want_reply,
-            variable_name,
-            variable_value,
-        }),
-        ChannelMsg::WindowChange {
-            col_width,
-            row_height,
-            pix_width,
-            pix_height,
-        } => Ok(FrontendSessionAction::WindowChange {
-            col_width,
-            row_height,
-            pix_width,
-            pix_height,
-        }),
-        ChannelMsg::AgentForward { want_reply } => {
-            Ok(FrontendSessionAction::RejectAgentForward { want_reply })
-        }
-        unexpected @ (ChannelMsg::Open { .. }
-        | ChannelMsg::OpenFailure(_)
-        | ChannelMsg::XonXoff { .. }
-        | ChannelMsg::ExitStatus { .. }
-        | ChannelMsg::ExitSignal { .. }
-        | ChannelMsg::Success
-        | ChannelMsg::Failure) => Err(format!(
-            "unexpected frontend session channel message: {unexpected:?}"
-        )),
-        other => Err(format!(
-            "unhandled frontend session channel message: {other:?}"
-        )),
-    }
-}
-
 fn classify_backend_session_msg(
     message: ChannelMsg,
 ) -> std::result::Result<BackendSessionAction, String> {
@@ -838,133 +987,6 @@ fn classify_backend_session_msg(
         other => Err(format!(
             "unhandled target session channel message: {other:?}"
         )),
-    }
-}
-
-async fn apply_frontend_session_action(
-    action: FrontendSessionAction,
-    backend: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
-    audit_context: &ProxyAuditContext,
-) -> std::result::Result<(), String> {
-    match action {
-        FrontendSessionAction::ForwardData {
-            extended_code,
-            data,
-        } => write_channel_data(backend, extended_code, &data)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::WindowAdjusted => Ok(()),
-        FrontendSessionAction::RequestPty {
-            want_reply,
-            term,
-            col_width,
-            row_height,
-            pix_width,
-            pix_height,
-            terminal_modes,
-        } => backend
-            .lock()
-            .await
-            .request_pty(
-                want_reply,
-                &term,
-                col_width,
-                row_height,
-                pix_width,
-                pix_height,
-                &terminal_modes,
-            )
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::RequestShell { want_reply } => backend
-            .lock()
-            .await
-            .request_shell(want_reply)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::Exec {
-            want_reply,
-            command,
-        } => backend
-            .lock()
-            .await
-            .exec(want_reply, command)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::Signal { signal } => backend
-            .lock()
-            .await
-            .signal(signal)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::RequestSubsystem { want_reply, name } => backend
-            .lock()
-            .await
-            .request_subsystem(want_reply, name)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::RequestX11 {
-            want_reply,
-            single_connection,
-            x11_authentication_protocol,
-            x11_authentication_cookie,
-            x11_screen_number,
-        } => backend
-            .lock()
-            .await
-            .request_x11(
-                want_reply,
-                single_connection,
-                x11_authentication_protocol,
-                x11_authentication_cookie,
-                x11_screen_number,
-            )
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::SetEnv {
-            want_reply,
-            variable_name,
-            variable_value,
-        } => backend
-            .lock()
-            .await
-            .set_env(want_reply, variable_name, variable_value)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::WindowChange {
-            col_width,
-            row_height,
-            pix_width,
-            pix_height,
-        } => backend
-            .lock()
-            .await
-            .window_change(col_width, row_height, pix_width, pix_height)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::RejectAgentForward { want_reply } => {
-            let reason = if want_reply {
-                "agent forwarding disabled by policy".to_string()
-            } else {
-                "agent forwarding disabled by policy (no-reply request)".to_string()
-            };
-            audit_context
-                .log("agent_forward_request", AuditResult::Failure, Some(reason))
-                .await;
-            Ok(())
-        }
-        FrontendSessionAction::Eof => backend
-            .lock()
-            .await
-            .eof()
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::Close => backend
-            .lock()
-            .await
-            .close()
-            .await
-            .map_err(|error| error.to_string()),
     }
 }
 
@@ -1067,6 +1089,7 @@ async fn abort_proxy_session(
     reason: String,
 ) {
     record_error(last_error, reason.clone()).await;
+    warn!(error = %reason, "aborting proxied SSH session");
     let _ = server_handle
         .disconnect(Disconnect::ByApplication, reason.clone(), "en".to_string())
         .await;
@@ -1091,111 +1114,6 @@ mod tests {
 
     fn data(bytes: &[u8]) -> Bytes {
         Bytes::copy_from_slice(bytes)
-    }
-
-    #[test]
-    fn classify_frontend_exec_is_forwarded() {
-        let action = classify_frontend_session_msg(ChannelMsg::Exec {
-            want_reply: true,
-            command: b"printf ok".to_vec(),
-        })
-        .expect("exec action");
-
-        match action {
-            FrontendSessionAction::Exec {
-                want_reply,
-                command,
-            } => {
-                assert!(want_reply);
-                assert_eq!(command, b"printf ok");
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_frontend_subsystem_is_forwarded() {
-        let action = classify_frontend_session_msg(ChannelMsg::RequestSubsystem {
-            want_reply: true,
-            name: "sftp".to_string(),
-        })
-        .expect("subsystem action");
-
-        match action {
-            FrontendSessionAction::RequestSubsystem { want_reply, name } => {
-                assert!(want_reply);
-                assert_eq!(name, "sftp");
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_frontend_env_is_forwarded() {
-        let action = classify_frontend_session_msg(ChannelMsg::SetEnv {
-            want_reply: true,
-            variable_name: "LANG".to_string(),
-            variable_value: "C.UTF-8".to_string(),
-        })
-        .expect("env action");
-
-        match action {
-            FrontendSessionAction::SetEnv {
-                want_reply,
-                variable_name,
-                variable_value,
-            } => {
-                assert!(want_reply);
-                assert_eq!(variable_name, "LANG");
-                assert_eq!(variable_value, "C.UTF-8");
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_frontend_signal_is_forwarded() {
-        let action = classify_frontend_session_msg(ChannelMsg::Signal { signal: Sig::TERM })
-            .expect("signal action");
-
-        match action {
-            FrontendSessionAction::Signal { signal } => {
-                assert!(matches!(signal, Sig::TERM));
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_frontend_window_adjusted_is_ignored() {
-        let action = classify_frontend_session_msg(ChannelMsg::WindowAdjusted {
-            new_size: 1_047_061,
-        })
-        .expect("window-adjust action");
-
-        match action {
-            FrontendSessionAction::WindowAdjusted => {}
-            other => panic!("unexpected action: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_frontend_agent_forward_is_policy_rejection() {
-        let action = classify_frontend_session_msg(ChannelMsg::AgentForward { want_reply: true })
-            .expect("agent-forward action");
-
-        match action {
-            FrontendSessionAction::RejectAgentForward { want_reply } => {
-                assert!(want_reply);
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_frontend_impossible_message_is_hard_error() {
-        let error = classify_frontend_session_msg(ChannelMsg::Success).expect_err("hard error");
-        assert!(error.contains("unexpected frontend session channel message"));
     }
 
     #[test]
@@ -1224,12 +1142,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn channel_open_failure_is_frontend_hard_error() {
-        let error = classify_frontend_session_msg(ChannelMsg::OpenFailure(
-            russh::ChannelOpenFailure::UnknownChannelType,
-        ))
-        .expect_err("hard error");
-        assert!(error.contains("unexpected frontend session channel message"));
-    }
 }
