@@ -7,9 +7,14 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
+Environment=CENTRALSSH_LOG=info
+Environment=CENTRALSSH_LOG_FORMAT=systemd
 ExecStart=/usr/local/sbin/centralssh --listen 0.0.0.0:7788 --config /etc/centralssh/config.toml --servers /etc/centralssh/servers.toml --known-hosts /etc/centralssh/known_hosts --user-key-root /var/lib/centralssh/keys --audit-log /var/log/centralssh/audit.jsonl
 Restart=on-failure
 RestartSec=2
+SyslogIdentifier=centralssh
+StandardOutput=journal
+StandardError=journal
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

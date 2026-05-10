@@ -1248,6 +1248,8 @@ impl server::Handler for GatewayHandler {
         if let Some(decision) = self.enforce_pre_auth_policy("none").await? {
             return Ok(decision);
         }
+        // OpenSSH commonly probes `none` first to discover allowed methods.
+        // Treat that as protocol negotiation, not as a credential failure.
         self.log_event(
             "protocol_error",
             None,
@@ -1259,13 +1261,6 @@ impl server::Handler for GatewayHandler {
             None,
         )
         .await;
-        let outcome = self
-            .state
-            .abuse
-            .record_failure(self.peer_ip, None, None)
-            .await;
-        self.apply_failure_outcome(&outcome, None, None, Some("none"))
-            .await;
         Ok(Self::reject_to_keyboard_interactive())
     }
 
@@ -1277,6 +1272,8 @@ impl server::Handler for GatewayHandler {
         if let Some(decision) = self.enforce_pre_auth_policy("publickey").await? {
             return Ok(decision);
         }
+        // Clients may opportunistically try publickey before falling back to
+        // keyboard-interactive. Do not count method discovery as abuse.
         self.log_event(
             "protocol_error",
             None,
@@ -1288,13 +1285,6 @@ impl server::Handler for GatewayHandler {
             None,
         )
         .await;
-        let outcome = self
-            .state
-            .abuse
-            .record_failure(self.peer_ip, None, None)
-            .await;
-        self.apply_failure_outcome(&outcome, None, None, Some("publickey"))
-            .await;
         Ok(Self::reject_to_keyboard_interactive())
     }
 
@@ -1306,6 +1296,8 @@ impl server::Handler for GatewayHandler {
         if let Some(decision) = self.enforce_pre_auth_policy("password").await? {
             return Ok(decision);
         }
+        // Password auth is intentionally disabled in favor of
+        // keyboard-interactive. A client trying it first is not a bad password.
         self.log_event(
             "protocol_error",
             None,
@@ -1317,13 +1309,6 @@ impl server::Handler for GatewayHandler {
             None,
         )
         .await;
-        let outcome = self
-            .state
-            .abuse
-            .record_failure(self.peer_ip, None, None)
-            .await;
-        self.apply_failure_outcome(&outcome, None, None, Some("password"))
-            .await;
         Ok(Self::reject_to_keyboard_interactive())
     }
 
@@ -1363,6 +1348,7 @@ impl server::Handler for GatewayHandler {
             return Ok(Self::reject_to_keyboard_interactive());
         }
 
+        let had_existing_state = self.keyboard_auth_state.is_some();
         let Some(mut response) = response else {
             self.keyboard_auth_state = Some(KeyboardAuthState::AwaitPassword {
                 username: username.clone(),
@@ -1370,10 +1356,22 @@ impl server::Handler for GatewayHandler {
             return Ok(Self::password_prompt(&username));
         };
 
-        let response_text = response
+        let first_response = response
             .next()
-            .map(|value| String::from_utf8_lossy(value.as_ref()).to_string())
-            .unwrap_or_default();
+            .map(|value| String::from_utf8_lossy(value.as_ref()).to_string());
+
+        if !had_existing_state
+            && first_response
+                .as_deref()
+                .is_none_or(|value| value.is_empty())
+        {
+            self.keyboard_auth_state = Some(KeyboardAuthState::AwaitPassword {
+                username: username.clone(),
+            });
+            return Ok(Self::password_prompt(&username));
+        }
+
+        let response_text = first_response.unwrap_or_default();
 
         match self
             .keyboard_auth_state

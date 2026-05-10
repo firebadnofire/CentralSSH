@@ -240,6 +240,7 @@ CentralSSH only accepts keyboard-interactive SSH auth for gateway login.
 - SSH public-key auth to the gateway is rejected.
 - Plain SSH password auth to the gateway is rejected.
 - The transport auth flow is implemented entirely through keyboard-interactive prompts.
+- Normal OpenSSH auth-method discovery probes do not count toward fail2ban or password/TOTP failures.
 
 The user experience is:
 
@@ -249,6 +250,11 @@ The user experience is:
 4. If `must_change_password=true`, the user must change their password before target access.
 5. If `totp_secret=null`, the user must enroll in TOTP before target access.
 6. The user selects an authorized target.
+
+Terminal resize behavior:
+
+- PTY resize events are forwarded to the selected target as `window-change` requests.
+- A failed resize relay is logged, but it does not tear down the whole SSH session.
 
 The gateway does not allow target selection before the auth and first-login flow completes.
 
@@ -616,12 +622,14 @@ The repo includes a systemd unit:
 sudo systemctl daemon-reload
 sudo systemctl enable --now centralssh
 sudo systemctl status centralssh
+sudo journalctl -u centralssh -f
 ```
 
 Important note:
 
 - The shipped unit now passes `--user-key-root /var/lib/centralssh/keys`.
 - If you want user-only keys, set `PER_USER_PER_SERVER=false` in the unit environment.
+- The shipped unit also sets `CENTRALSSH_LOG=info`, `CENTRALSSH_LOG_FORMAT=systemd`, `SyslogIdentifier=centralssh`, and routes stdout/stderr directly into journald.
 
 ## 22. Installation behavior
 

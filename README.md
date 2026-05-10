@@ -82,6 +82,25 @@ sudo systemctl enable --now centralssh
 sudo systemctl status centralssh
 ```
 
+The shipped unit writes process logs to journald and defaults to:
+
+- `CENTRALSSH_LOG=info`
+- `CENTRALSSH_LOG_FORMAT=systemd`
+
+Useful overrides:
+
+```bash
+sudo systemctl edit centralssh
+```
+
+Example drop-in:
+
+```ini
+[Service]
+Environment=CENTRALSSH_LOG=debug,centralssh=debug
+Environment=CENTRALSSH_LOG_FORMAT=json
+```
+
 ## FreeBSD rc.conf Overrides
 
 Optional rc.conf keys:
@@ -236,6 +255,7 @@ CentralSSH includes an internal fail2ban-style tracker keyed primarily by remote
 Behavior:
 
 - Failures are tracked in a sliding window, not a fixed reset bucket.
+- Normal SSH auth-method discovery such as `none`, `publickey`, or disabled `password` probes does not count as a failed login.
 - `max_failures` inside `find_time` creates a ban for `ban_time`.
 - Repeated bans for the same IP use exponential backoff and stop growing at `max_ban_time`.
 - Optional tarpitting applies `delay_time` just before the ban threshold when `delay_before_ban=true`.
@@ -423,6 +443,7 @@ sudo systemctl start centralssh
 sudo systemctl stop centralssh
 sudo systemctl restart centralssh
 sudo systemctl status centralssh
+sudo journalctl -u centralssh -f
 ```
 
 ### Reload config without dropping active sessions

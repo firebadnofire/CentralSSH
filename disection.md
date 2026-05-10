@@ -40,6 +40,8 @@ Support files:
 Entry path in `src/main.rs`:
 
 1. Initialize `tracing_subscriber`.
+   - Log filtering is driven by `CENTRALSSH_LOG` first, then `RUST_LOG`, defaulting to `info`.
+   - Log formatting is driven by `CENTRALSSH_LOG_FORMAT`; if `JOURNAL_STREAM` is present, the default switches to a journald-friendly compact format on stderr.
 2. Parse CLI flags and env-backed overrides with `clap`.
 3. Load the seed config first so `settings` can influence downstream path resolution.
 4. Resolve effective runtime paths with `config::resolve_paths`.
@@ -250,6 +252,8 @@ Rate-limit exhaustion becomes `CentralSshError::RateLimitExceeded`.
 ## 7. Abuse tracker internals
 
 `src/abuse.rs` is a second layer above the auth token buckets. It is IP-centric and behaves like an internal fail2ban implementation.
+
+Normal SSH auth-method discovery is intentionally excluded from this tracker. Probes such as `none`, opportunistic `publickey`, or disabled `password` auth are redirected toward keyboard-interactive without being counted as failed credentials.
 
 ### 7.1 Effective settings
 

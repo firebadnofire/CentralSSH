@@ -17,6 +17,7 @@ use crate::crypto_policy::{is_hybrid_kex_name, is_post_quantum_kex_name};
 use crate::error::{CentralSshError, Result};
 use crate::keys::resolve_user_server_private_key_path;
 use crate::ssh::apply_client_transport_config;
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct SelectedTarget {
@@ -405,6 +406,13 @@ impl ProxySession {
             ));
         }
 
+        info!(
+            session_id = %audit_context.session_id,
+            username = %username,
+            target_host = %target.host,
+            "backend SSH authentication succeeded"
+        );
+
         Ok(Self {
             server_handle,
             target_handle: Arc::new(Mutex::new(target_handle)),
@@ -415,6 +423,11 @@ impl ProxySession {
 
     pub async fn open_session_channel(&self, frontend_channel: Channel<server::Msg>) -> Result<()> {
         let frontend_id = frontend_channel.id();
+        debug!(
+            session_id = %self.audit_context.session_id,
+            frontend_channel = ?frontend_id,
+            "opening proxied session channel"
+        );
         let (frontend_read, _) = frontend_channel.split();
         let target_channel = {
             let handle = self.target_handle.lock().await;
@@ -545,6 +558,10 @@ fn spawn_session_bridge(
     });
 }
 
+fn is_nonfatal_frontend_action_error(action: &FrontendSessionAction) -> bool {
+    matches!(action, FrontendSessionAction::WindowChange { .. })
+}
+
 fn spawn_raw_channel_bridge(
     frontend_channel: Channel<server::Msg>,
     target_channel: Channel<client::Msg>,
@@ -582,9 +599,27 @@ async fn relay_frontend_session(
                 };
 
                 let should_break = matches!(action, FrontendSessionAction::Close);
+                let nonfatal_error = is_nonfatal_frontend_action_error(&action);
                 if let Err(error) =
                     apply_frontend_session_action(action, backend.clone(), &audit_context).await
                 {
+                    if nonfatal_error {
+                        warn!(
+                            session_id = %audit_context.session_id,
+                            username = %audit_context.username,
+                            target_server = %audit_context.target_server,
+                            error = %error,
+                            "non-fatal frontend session relay error"
+                        );
+                        audit_context
+                            .log(
+                                "window_change_forward_failed",
+                                AuditResult::Failure,
+                                Some(error),
+                            )
+                            .await;
+                        continue;
+                    }
                     abort_proxy_session(&server_handle, &target_handle, &last_error, error).await;
                     break;
                 }
@@ -875,34 +910,51 @@ async fn apply_frontend_session_action(
                 &terminal_modes,
             )
             .await
-            .map_err(|error| error.to_string()),
+            .map_err(|error| {
+                format!(
+                    "failed to relay pty request term={term} cols={col_width} rows={row_height} pix_width={pix_width} pix_height={pix_height}: {error}"
+                )
+            }),
         FrontendSessionAction::RequestShell { want_reply } => backend
             .lock()
             .await
             .request_shell(want_reply)
             .await
-            .map_err(|error| error.to_string()),
+            .map_err(|error| format!("failed to relay shell request: {error}")),
         FrontendSessionAction::Exec {
             want_reply,
             command,
-        } => backend
-            .lock()
-            .await
-            .exec(want_reply, command)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::Signal { signal } => backend
-            .lock()
-            .await
-            .signal(signal)
-            .await
-            .map_err(|error| error.to_string()),
-        FrontendSessionAction::RequestSubsystem { want_reply, name } => backend
-            .lock()
-            .await
-            .request_subsystem(want_reply, name)
-            .await
-            .map_err(|error| error.to_string()),
+        } => {
+            let command_display = String::from_utf8_lossy(command.as_slice()).to_string();
+            backend
+                .lock()
+                .await
+                .exec(want_reply, command)
+                .await
+                .map_err(|error| {
+                    format!("failed to relay exec request command={command_display}: {error}")
+                })
+        }
+        FrontendSessionAction::Signal { signal } => {
+            let signal_display = format!("{signal:?}");
+            backend
+                .lock()
+                .await
+                .signal(signal)
+                .await
+                .map_err(|error| format!("failed to relay signal {signal_display}: {error}"))
+        }
+        FrontendSessionAction::RequestSubsystem { want_reply, name } => {
+            let subsystem_name = name.clone();
+            backend
+                .lock()
+                .await
+                .request_subsystem(want_reply, name)
+                .await
+                .map_err(|error| {
+                    format!("failed to relay subsystem request {subsystem_name}: {error}")
+                })
+        }
         FrontendSessionAction::RequestX11 {
             want_reply,
             single_connection,
@@ -920,28 +972,53 @@ async fn apply_frontend_session_action(
                 x11_screen_number,
             )
             .await
-            .map_err(|error| error.to_string()),
+            .map_err(|error| format!("failed to relay x11 request: {error}")),
         FrontendSessionAction::SetEnv {
             want_reply,
             variable_name,
             variable_value,
-        } => backend
-            .lock()
-            .await
-            .set_env(want_reply, variable_name, variable_value)
-            .await
-            .map_err(|error| error.to_string()),
+        } => {
+            let variable_name_display = variable_name.clone();
+            let variable_value_display = variable_value.clone();
+            backend
+                .lock()
+                .await
+                .set_env(want_reply, variable_name, variable_value)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to relay env request {}={}: {error}",
+                        variable_name_display, variable_value_display
+                    )
+                })
+        }
         FrontendSessionAction::WindowChange {
             col_width,
             row_height,
             pix_width,
             pix_height,
-        } => backend
-            .lock()
-            .await
-            .window_change(col_width, row_height, pix_width, pix_height)
-            .await
-            .map_err(|error| error.to_string()),
+        } => {
+            debug!(
+                session_id = %audit_context.session_id,
+                username = %audit_context.username,
+                target_server = %audit_context.target_server,
+                cols = col_width,
+                rows = row_height,
+                pix_width,
+                pix_height,
+                "forwarding window-change"
+            );
+            backend
+                .lock()
+                .await
+                .window_change(col_width, row_height, pix_width, pix_height)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to relay window-change cols={col_width} rows={row_height} pix_width={pix_width} pix_height={pix_height}: {error}"
+                    )
+                })
+        }
         FrontendSessionAction::RejectAgentForward { want_reply } => {
             let reason = if want_reply {
                 "agent forwarding disabled by policy".to_string()
@@ -1067,6 +1144,7 @@ async fn abort_proxy_session(
     reason: String,
 ) {
     record_error(last_error, reason.clone()).await;
+    warn!(error = %reason, "aborting proxied SSH session");
     let _ = server_handle
         .disconnect(Disconnect::ByApplication, reason.clone(), "en".to_string())
         .await;
@@ -1231,5 +1309,27 @@ mod tests {
         ))
         .expect_err("hard error");
         assert!(error.contains("unexpected frontend session channel message"));
+    }
+
+    #[test]
+    fn window_change_errors_are_nonfatal() {
+        assert!(is_nonfatal_frontend_action_error(
+            &FrontendSessionAction::WindowChange {
+                col_width: 120,
+                row_height: 40,
+                pix_width: 0,
+                pix_height: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn exec_errors_remain_fatal() {
+        assert!(!is_nonfatal_frontend_action_error(
+            &FrontendSessionAction::Exec {
+                want_reply: true,
+                command: b"true".to_vec(),
+            }
+        ));
     }
 }
