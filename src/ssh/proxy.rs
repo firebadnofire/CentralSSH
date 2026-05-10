@@ -169,9 +169,18 @@ pub struct ChannelPtyState {
 #[derive(Debug, Clone, Default)]
 pub struct SessionChannelState {
     pub pty: Option<ChannelPtyState>,
-    pub shell_requested: bool,
+    pub request: SessionRequest,
     pub menu_active: bool,
     pub input_buffer: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum SessionRequest {
+    #[default]
+    None,
+    Shell,
+    Exec(Vec<u8>),
+    Subsystem(String),
 }
 
 #[derive(Debug)]
@@ -792,7 +801,7 @@ async fn relay_backend_session(
                     }
                 };
 
-                let keep_frontend_for_menu = shell_channel_should_reuse_menu(
+                let keep_frontend_for_menu = channel_should_reuse_menu(
                     &frontend_channel_state,
                     frontend_id,
                     drop_to_menu,
@@ -877,7 +886,7 @@ async fn activate_menu_after_disconnect(
         let Some(channel_state) = guard.get_mut(&frontend_id) else {
             return false;
         };
-        if !channel_state.shell_requested {
+        if !channel_state.request.supports_drop_to_menu() {
             return false;
         }
         channel_state.menu_active = true;
@@ -917,7 +926,7 @@ async fn activate_menu_after_disconnect(
         .is_ok()
 }
 
-async fn shell_channel_should_reuse_menu(
+async fn channel_should_reuse_menu(
     frontend_channel_state: &Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
     frontend_id: ChannelId,
     drop_to_menu: bool,
@@ -926,15 +935,34 @@ async fn shell_channel_should_reuse_menu(
         .lock()
         .await
         .get(&frontend_id)
-        .map(|channel_state| shell_channel_state_should_reuse_menu(channel_state, drop_to_menu))
+        .map(|channel_state| channel_state_should_reuse_menu(channel_state, drop_to_menu))
         .unwrap_or(false)
 }
 
-fn shell_channel_state_should_reuse_menu(
+fn channel_state_should_reuse_menu(
     channel_state: &SessionChannelState,
     drop_to_menu: bool,
 ) -> bool {
-    drop_to_menu && channel_state.shell_requested
+    drop_to_menu && channel_state.request.supports_drop_to_menu()
+}
+
+impl SessionRequest {
+    fn supports_drop_to_menu(&self) -> bool {
+        match self {
+            Self::Shell => true,
+            Self::Subsystem(name) => name == "sftp",
+            Self::Exec(command) => command_supports_drop_to_menu(command),
+            Self::None => false,
+        }
+    }
+}
+
+fn command_supports_drop_to_menu(command: &[u8]) -> bool {
+    let command = String::from_utf8_lossy(command);
+    command
+        .split_whitespace()
+        .next()
+        .is_some_and(|program| program == "scp")
 }
 
 async fn relay_raw_channel<S>(
@@ -1194,21 +1222,39 @@ mod tests {
     }
 
     #[test]
-    fn shell_channel_menu_reuse_requires_shell_and_drop_to_menu() {
-        assert!(!shell_channel_state_should_reuse_menu(
+    fn channel_menu_reuse_requires_supported_request_and_drop_to_menu() {
+        assert!(!channel_state_should_reuse_menu(
             &SessionChannelState::default(),
             false,
         ));
-        assert!(!shell_channel_state_should_reuse_menu(
+        assert!(!channel_state_should_reuse_menu(
             &SessionChannelState::default(),
             true,
         ));
 
         let shell_channel = SessionChannelState {
-            shell_requested: true,
+            request: SessionRequest::Shell,
             ..SessionChannelState::default()
         };
-        assert!(!shell_channel_state_should_reuse_menu(&shell_channel, false));
-        assert!(shell_channel_state_should_reuse_menu(&shell_channel, true));
+        assert!(!channel_state_should_reuse_menu(&shell_channel, false));
+        assert!(channel_state_should_reuse_menu(&shell_channel, true));
+
+        let sftp_channel = SessionChannelState {
+            request: SessionRequest::Subsystem("sftp".to_string()),
+            ..SessionChannelState::default()
+        };
+        assert!(channel_state_should_reuse_menu(&sftp_channel, true));
+
+        let scp_channel = SessionChannelState {
+            request: SessionRequest::Exec(b"scp -t /tmp/file".to_vec()),
+            ..SessionChannelState::default()
+        };
+        assert!(channel_state_should_reuse_menu(&scp_channel, true));
+
+        let plain_exec_channel = SessionChannelState {
+            request: SessionRequest::Exec(b"uname -a".to_vec()),
+            ..SessionChannelState::default()
+        };
+        assert!(!channel_state_should_reuse_menu(&plain_exec_channel, true));
     }
 }

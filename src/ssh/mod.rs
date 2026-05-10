@@ -1324,11 +1324,32 @@ Use the plaintext secret or URI above.\n\n"
                         .await
                         .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
                 }
-                if replay.shell_requested {
-                    proxy_session
-                        .request_shell(channel, true)
-                        .await
-                        .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+                match replay.request {
+                    proxy::SessionRequest::Shell => {
+                        proxy_session
+                            .request_shell(channel, true)
+                            .await
+                            .map_err(|error| {
+                                russh::Error::IO(std::io::Error::other(error.to_string()))
+                            })?;
+                    }
+                    proxy::SessionRequest::Exec(command) => {
+                        proxy_session
+                            .exec(channel, true, command)
+                            .await
+                            .map_err(|error| {
+                                russh::Error::IO(std::io::Error::other(error.to_string()))
+                            })?;
+                    }
+                    proxy::SessionRequest::Subsystem(name) => {
+                        proxy_session
+                            .request_subsystem(channel, true, name)
+                            .await
+                            .map_err(|error| {
+                                russh::Error::IO(std::io::Error::other(error.to_string()))
+                            })?;
+                    }
+                    proxy::SessionRequest::None => {}
                 }
             }
         }
@@ -1780,7 +1801,7 @@ impl server::Handler for GatewayHandler {
             .await
             .entry(channel)
             .or_default()
-            .shell_requested = true;
+            .request = proxy::SessionRequest::Shell;
 
         match proxy_session.request_shell(channel, true).await {
             Ok(()) => {
@@ -1807,6 +1828,13 @@ impl server::Handler for GatewayHandler {
             return Ok(());
         };
 
+        self.session_channel_state
+            .lock()
+            .await
+            .entry(channel)
+            .or_default()
+            .request = proxy::SessionRequest::Exec(data.to_vec());
+
         match proxy_session.exec(channel, true, data.to_vec()).await {
             Ok(()) => {
                 let _ = session.channel_success(channel);
@@ -1831,6 +1859,13 @@ impl server::Handler for GatewayHandler {
             let _ = session.channel_failure(channel);
             return Ok(());
         };
+
+        self.session_channel_state
+            .lock()
+            .await
+            .entry(channel)
+            .or_default()
+            .request = proxy::SessionRequest::Subsystem(name.to_string());
 
         match proxy_session
             .request_subsystem(channel, true, name.to_string())

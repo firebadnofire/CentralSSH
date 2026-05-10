@@ -24,7 +24,7 @@ The operator should know that the repo currently contains both old and new assum
 - The top-level spec in `AGENTS.md` requires transparent SSH proxying, including `exec`, SFTP, PTY forwarding, and forwarding support.
 - The current proxy code does relay `session`, `exec`, `subsystem`, PTY, `direct-tcpip`, and remote forwarding requests.
 - Session request/data forwarding happens from the `russh` server callbacks, so post-selection SSH behavior does not depend on a gateway-local shell shim.
-- If `settings.drop_to_menu=true`, an interactive shell channel is returned to the selection menu after the target shell exits; `Q` disconnects the SSH session from either selection menu.
+- If `settings.drop_to_menu=true`, completed shell, `sftp`, and `scp` session channels are returned to the selection menu and the same request type is replayed after the next target selection; `Q` disconnects the SSH session from either selection menu.
 - The `README.md` has been updated to match this transparent proxy model.
 - Agent forwarding is still rejected by policy.
 
