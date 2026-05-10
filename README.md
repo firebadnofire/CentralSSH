@@ -329,6 +329,12 @@ Behavior:
 
 `cssh-keyscan` fetches target host keys and updates CentralSSH known_hosts.
 
+Path resolution:
+
+- `CENTRALSSH_KNOWN_HOSTS` overrides everything.
+- On FreeBSD, if that env var is unset, the tool follows `centralssh_known_hosts` from the same `rc.conf` / `rc.conf.d` flow as the service script.
+- Otherwise it falls back to `/etc/centralssh/known_hosts`.
+
 Basic usage:
 
 ```bash

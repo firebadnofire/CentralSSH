@@ -419,6 +419,9 @@ sudo cssh-keyscan 192.168.122.123 'ssh-ed25519 AAAA...'
 
 Behavior worth knowing:
 
+- `CENTRALSSH_KNOWN_HOSTS` has highest precedence for the destination trust file.
+- On FreeBSD, if that env var is unset, the tool follows `centralssh_known_hosts` from the same `rc.conf` / `rc.conf.d` flow as the service script.
+- Otherwise it writes to `/etc/centralssh/known_hosts`.
 - For a new host without an expected key, the tool requires interactive TOFU confirmation.
 - For a new host with expected key material, the tool auto-accepts only if at least one scanned key matches.
 - If a host already exists in `known_hosts` and presents any new key, the tool refuses to update and exits with a security alert.

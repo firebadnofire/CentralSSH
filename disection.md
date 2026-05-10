@@ -445,7 +445,7 @@ After a valid choice, the handler stops acting like a menu flow and switches to 
 
 If target auth fails, the proxy session is not created.
 
-`tools/cssh-keyscan` helps operators populate trust entries. It accepts raw known_hosts lines and SHA256 OpenSSH fingerprints only; MD5 fingerprints are rejected rather than supported as a compatibility fallback.
+`tools/cssh-keyscan` helps operators populate trust entries. It accepts raw known_hosts lines and SHA256 OpenSSH fingerprints only; MD5 fingerprints are rejected rather than supported as a compatibility fallback. For destination path resolution it prefers `CENTRALSSH_KNOWN_HOSTS`, then FreeBSD `centralssh_known_hosts` via the normal `rc.conf` / `rc.conf.d` load path, then `/etc/centralssh/known_hosts`.
 
 ### 11.2 Supported forwarded features
 
