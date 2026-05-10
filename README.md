@@ -208,7 +208,7 @@ Fields:
 - `users[].allowed_servers`: required non-empty list of server names in `servers.toml`.
 - `settings.user_key_root`: optional path override.
 - `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
-- `settings.drop_to_menu`: optional bool, default `false`. When `true`, a completed interactive shell returns to the server menu on the same shell channel. Completed `sftp` and `scp` channels still close normally so standard OpenSSH clients do not hang; the authenticated connection is left in a menu-pending state for the next interactive shell channel on that transport. Choosing `Q` from either selection menu disconnects the SSH session instead of restarting authentication.
+- `settings.drop_to_menu`: optional bool, default `false`. When `true`, a completed interactive shell returns to the server menu on the same shell channel. `sftp` and `scp` do not support an inline post-exit gateway menu with stock OpenSSH clients, so those channels close normally. Choosing `Q` from either selection menu disconnects the SSH session instead of restarting authentication.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.

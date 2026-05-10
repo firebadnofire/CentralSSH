@@ -950,23 +950,6 @@ impl SessionRequest {
     fn supports_inline_drop_to_menu(&self) -> bool {
         matches!(self, Self::Shell)
     }
-
-    pub fn supports_connection_menu_return(&self) -> bool {
-        match self {
-            Self::Shell => true,
-            Self::Subsystem(name) => name == "sftp",
-            Self::Exec(command) => command_supports_drop_to_menu(command),
-            Self::None => false,
-        }
-    }
-}
-
-fn command_supports_drop_to_menu(command: &[u8]) -> bool {
-    let command = String::from_utf8_lossy(command);
-    command
-        .split_whitespace()
-        .next()
-        .is_some_and(|program| program == "scp")
 }
 
 async fn relay_raw_channel<S>(
@@ -1245,32 +1228,23 @@ mod tests {
     }
 
     #[test]
-    fn connection_menu_return_supports_shell_sftp_and_scp_only() {
-        let shell_channel = SessionChannelState {
-            request: SessionRequest::Shell,
-            ..SessionChannelState::default()
-        };
-        assert!(shell_channel.request.supports_connection_menu_return());
-
+    fn non_shell_requests_do_not_reuse_menu_inline() {
         let sftp_channel = SessionChannelState {
             request: SessionRequest::Subsystem("sftp".to_string()),
             ..SessionChannelState::default()
         };
         assert!(!channel_state_should_reuse_menu(&sftp_channel, true));
-        assert!(sftp_channel.request.supports_connection_menu_return());
 
         let scp_channel = SessionChannelState {
             request: SessionRequest::Exec(b"scp -t /tmp/file".to_vec()),
             ..SessionChannelState::default()
         };
         assert!(!channel_state_should_reuse_menu(&scp_channel, true));
-        assert!(scp_channel.request.supports_connection_menu_return());
 
         let plain_exec_channel = SessionChannelState {
             request: SessionRequest::Exec(b"uname -a".to_vec()),
             ..SessionChannelState::default()
         };
         assert!(!channel_state_should_reuse_menu(&plain_exec_channel, true));
-        assert!(!plain_exec_channel.request.supports_connection_menu_return());
     }
 }
