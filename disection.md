@@ -482,7 +482,7 @@ The session proxy keeps a per-frontend-channel map of backend session write hand
 
 - `BackendSessionAction`
 
-Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, a completed shell, `sftp`, or `scp` session suppresses the terminal close sequence long enough to render the server menu back onto that same frontend channel instead of closing the gateway connection immediately.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Completed `sftp` and `scp` channels close normally and instead leave the authenticated transport in a menu-pending state for the next shell channel.
 
 ### 11.4 Raw channel bridge structure
 

@@ -28,6 +28,7 @@ use crate::crypto_policy::{
     apply_client_transport_crypto_policy, apply_server_transport_crypto_policy,
 };
 use crate::error::{CentralSshError, Result};
+use crate::ui::render_server_menu;
 
 pub mod proxy;
 
@@ -54,6 +55,7 @@ struct GatewayHandler {
     pending_target: Option<proxy::SelectedTarget>,
     proxy_session: Option<proxy::ProxySession>,
     session_channel_state: Arc<Mutex<HashMap<ChannelId, proxy::SessionChannelState>>>,
+    connection_menu_pending: bool,
     connection_logged: bool,
 }
 
@@ -117,6 +119,7 @@ impl server::Server for GatewayServer {
             pending_target: None,
             proxy_session: None,
             session_channel_state: Arc::new(Mutex::new(HashMap::new())),
+            connection_menu_pending: false,
             connection_logged: false,
         }
     }
@@ -301,6 +304,32 @@ Use the plaintext secret or URI above.\n\n"
         }
 
         Ok(entries)
+    }
+
+    async fn show_menu_on_channel(
+        &mut self,
+        channel: ChannelId,
+        username: &str,
+        session: &mut Session,
+    ) -> std::result::Result<(), russh::Error> {
+        let entries = self
+            .allowed_server_entries(username)
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+
+        {
+            let mut guard = self.session_channel_state.lock().await;
+            let Some(channel_state) = guard.get_mut(&channel) else {
+                return Ok(());
+            };
+            channel_state.menu_active = true;
+            channel_state.input_buffer.clear();
+        }
+
+        self.connection_menu_pending = false;
+        let _ = session.data(channel, bytes::Bytes::from(render_server_menu(username, &entries)));
+        let _ = session.channel_success(channel);
+        Ok(())
     }
 
     async fn log_event(
@@ -1149,6 +1178,7 @@ Use the plaintext secret or URI above.\n\n"
         username: &str,
         target: proxy::SelectedTarget,
     ) -> std::result::Result<(), russh::Error> {
+        self.connection_menu_pending = false;
         self.log_event(
             "server_selected",
             Some(username),
@@ -1674,8 +1704,12 @@ impl server::Handler for GatewayHandler {
             .entry(channel.id())
             .or_default();
         let Some(proxy_session) = &self.proxy_session else {
-            return Ok(false);
+            return Ok(self.connection_menu_pending && self.authenticated_username.is_some());
         };
+
+        if self.connection_menu_pending && self.authenticated_username.is_some() {
+            return Ok(true);
+        }
 
         match proxy_session.open_session_channel(channel).await {
             Ok(()) => Ok(true),
@@ -1728,11 +1762,6 @@ impl server::Handler for GatewayHandler {
         modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let Some(proxy_session) = &self.proxy_session else {
-            let _ = session.channel_failure(channel);
-            return Ok(());
-        };
-
         self.session_channel_state.lock().await.entry(channel).or_default().pty = Some(
             proxy::ChannelPtyState {
                 term: term.to_string(),
@@ -1743,6 +1772,20 @@ impl server::Handler for GatewayHandler {
                 terminal_modes: modes.to_vec(),
             },
         );
+
+        let Some(proxy_session) = &self.proxy_session else {
+            if self.connection_menu_pending && self.authenticated_username.is_some() {
+                let _ = session.channel_success(channel);
+                return Ok(());
+            }
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        if self.connection_menu_pending && self.authenticated_username.is_some() {
+            let _ = session.channel_success(channel);
+            return Ok(());
+        }
 
         match proxy_session
             .request_pty(
@@ -1791,17 +1834,23 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let Some(proxy_session) = &self.proxy_session else {
-            let _ = session.channel_failure(channel);
-            return Ok(());
-        };
-
         self.session_channel_state
             .lock()
             .await
             .entry(channel)
             .or_default()
             .request = proxy::SessionRequest::Shell;
+
+        if self.connection_menu_pending {
+            if let Some(username) = self.authenticated_username.clone() {
+                return self.show_menu_on_channel(channel, &username, session).await;
+            }
+        }
+
+        let Some(proxy_session) = &self.proxy_session else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
 
         match proxy_session.request_shell(channel, true).await {
             Ok(()) => {
@@ -2037,15 +2086,28 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        let menu_active = self
-            .session_channel_state
-            .lock()
-            .await
-            .get(&channel)
-            .map(|state| state.menu_active)
-            .unwrap_or(false);
-        if !menu_active {
-            self.session_channel_state.lock().await.remove(&channel);
+        let removed_state = {
+            let mut guard = self.session_channel_state.lock().await;
+            let menu_active = guard.get(&channel).map(|state| state.menu_active).unwrap_or(false);
+            if menu_active {
+                None
+            } else {
+                guard.remove(&channel)
+            }
+        };
+        if let Some(channel_state) = removed_state {
+            let drop_to_menu = self
+                .state
+                .config_store
+                .snapshot()
+                .await
+                .config
+                .settings
+                .drop_to_menu
+                .unwrap_or(false);
+            if drop_to_menu && channel_state.request.supports_connection_menu_return() {
+                self.connection_menu_pending = true;
+            }
         }
 
         let Some(proxy_session) = &self.proxy_session else {
