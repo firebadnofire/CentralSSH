@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -13,6 +14,7 @@ use qrcode::types::Color;
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig, client};
 use ssh_key::{LineEnding, PrivateKey};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use zeroize::Zeroizing;
@@ -51,6 +53,7 @@ struct GatewayHandler {
     authenticated_username: Option<String>,
     pending_target: Option<proxy::SelectedTarget>,
     proxy_session: Option<proxy::ProxySession>,
+    session_channel_state: Arc<Mutex<HashMap<ChannelId, proxy::SessionChannelState>>>,
     connection_logged: bool,
 }
 
@@ -113,6 +116,7 @@ impl server::Server for GatewayServer {
             authenticated_username: None,
             pending_target: None,
             proxy_session: None,
+            session_channel_state: Arc::new(Mutex::new(HashMap::new())),
             connection_logged: false,
         }
     }
@@ -266,7 +270,7 @@ Use the plaintext secret or URI above.\n\n"
 
         Ok(Self::keyboard_prompt(
             instructions,
-            "Enter selection: ",
+            "Enter selection (or 'Q' to quit): ",
             true,
         ))
     }
@@ -1107,6 +1111,15 @@ Use the plaintext secret or URI above.\n\n"
         selection: String,
     ) -> std::result::Result<Auth, russh::Error> {
         let username = context.user.name.clone();
+        if selection.trim().eq_ignore_ascii_case("q") {
+            self.keyboard_auth_state = None;
+            self.authenticated_username = None;
+            self.pending_target = None;
+            return Ok(Auth::Reject {
+                proceed_with_methods: None,
+                partial_success: false,
+            });
+        }
         let entries = self
             .allowed_server_entries(&username)
             .await
@@ -1131,6 +1144,199 @@ Use the plaintext secret or URI above.\n\n"
         self.authenticated_username = Some(username);
         self.keyboard_auth_state = None;
         Ok(Auth::Accept)
+    }
+
+    async fn connect_selected_target(
+        &mut self,
+        session: &mut Session,
+        username: &str,
+        target: proxy::SelectedTarget,
+    ) -> std::result::Result<(), russh::Error> {
+        self.log_event(
+            "server_selected",
+            Some(username),
+            Some(&target.name),
+            None,
+            AuditResult::Success,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        match proxy::ProxySession::connect(
+            self.state.clone(),
+            self.session_id.clone(),
+            self.peer_ip,
+            username.to_string(),
+            target.clone(),
+            session.handle(),
+            self.session_channel_state.clone(),
+        )
+        .await
+        {
+            Ok(proxy_session) => {
+                self.log_event(
+                    "proxy_start",
+                    Some(username),
+                    Some(&target.name),
+                    None,
+                    AuditResult::Success,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                self.proxy_session = Some(proxy_session);
+                Ok(())
+            }
+            Err(error) => {
+                self.log_event(
+                    "proxy_start",
+                    Some(username),
+                    Some(&target.name),
+                    None,
+                    AuditResult::Failure,
+                    Some(error.to_string()),
+                    None,
+                    None,
+                )
+                .await;
+
+                let message = format!("Failed to connect to target {}: {}", target.name, error);
+                session.disconnect(russh::Disconnect::ByApplication, &message, "en")?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_menu_channel_input(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> std::result::Result<bool, russh::Error> {
+        let Some(username) = self.authenticated_username.clone() else {
+            return Ok(false);
+        };
+
+        let mut maybe_line = None;
+        {
+            let mut guard = self.session_channel_state.lock().await;
+            let Some(channel_state) = guard.get_mut(&channel) else {
+                return Ok(false);
+            };
+            if !channel_state.menu_active {
+                return Ok(false);
+            }
+
+            for byte in data {
+                match *byte {
+                    b'\r' | b'\n' => {
+                        let _ = session.data(channel, bytes::Bytes::from_static(b"\r\n"));
+                        let line = String::from_utf8_lossy(&channel_state.input_buffer).to_string();
+                        channel_state.input_buffer.clear();
+                        maybe_line = Some(line);
+                        break;
+                    }
+                    0x08 | 0x7f => {
+                        if channel_state.input_buffer.pop().is_some() {
+                            let _ = session.data(channel, bytes::Bytes::from_static(b"\x08 \x08"));
+                        }
+                    }
+                    _ => {
+                        channel_state.input_buffer.push(*byte);
+                        let _ = session.data(channel, bytes::Bytes::copy_from_slice(&[*byte]));
+                    }
+                }
+            }
+        }
+
+        let Some(selection) = maybe_line else {
+            return Ok(true);
+        };
+
+        if selection.trim().eq_ignore_ascii_case("q") {
+            session.disconnect(russh::Disconnect::ByApplication, "user exited menu", "en")?;
+            return Ok(true);
+        }
+
+        let entries = self
+            .allowed_server_entries(&username)
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+        let index = match selection.trim().parse::<usize>() {
+            Ok(value) if value > 0 && value <= entries.len() => value - 1,
+            _ => {
+                let retry = self
+                    .selection_prompt(&username, Some("Invalid selection."))
+                    .await
+                    .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+                if let Auth::Partial { instructions, prompts, .. } = retry {
+                    let mut text = instructions.into_owned();
+                    if let Some((prompt, _)) = prompts.into_owned().into_iter().next() {
+                        text.push_str(prompt.as_ref());
+                    }
+                    let _ = session.data(channel, bytes::Bytes::from(text));
+                }
+                return Ok(true);
+            }
+        };
+
+        let (target_name, target_host) = entries[index].clone();
+        let target = proxy::SelectedTarget {
+            name: target_name,
+            host: target_host,
+        };
+
+        {
+            let mut guard = self.session_channel_state.lock().await;
+            if let Some(channel_state) = guard.get_mut(&channel) {
+                channel_state.menu_active = false;
+            }
+        }
+
+        self.connect_selected_target(session, &username, target).await?;
+        if let Some(proxy_session) = &self.proxy_session {
+            proxy_session
+                .open_session_channel_by_id(channel)
+                .await
+                .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+
+            let replay = {
+                self.session_channel_state
+                    .lock()
+                    .await
+                    .get(&channel)
+                    .cloned()
+            };
+
+            if let Some(replay) = replay {
+                if let Some(pty) = replay.pty {
+                    proxy_session
+                        .request_pty(
+                            channel,
+                            true,
+                            &pty.term,
+                            pty.col_width,
+                            pty.row_height,
+                            pty.pix_width,
+                            pty.pix_height,
+                            &pty.terminal_modes,
+                        )
+                        .await
+                        .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+                }
+                if replay.shell_requested {
+                    proxy_session
+                        .request_shell(channel, true)
+                        .await
+                        .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+                }
+            }
+        }
+
+        Ok(true)
     }
 }
 
@@ -1436,62 +1642,7 @@ impl server::Handler for GatewayHandler {
             )?;
             return Ok(());
         };
-
-        self.log_event(
-            "server_selected",
-            Some(&username),
-            Some(&target.name),
-            None,
-            AuditResult::Success,
-            None,
-            None,
-            None,
-        )
-        .await;
-
-        match proxy::ProxySession::connect(
-            self.state.clone(),
-            self.session_id.clone(),
-            self.peer_ip,
-            username.clone(),
-            target.clone(),
-            session.handle(),
-        )
-        .await
-        {
-            Ok(proxy_session) => {
-                self.log_event(
-                    "proxy_start",
-                    Some(&username),
-                    Some(&target.name),
-                    None,
-                    AuditResult::Success,
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-                self.proxy_session = Some(proxy_session);
-                Ok(())
-            }
-            Err(error) => {
-                self.log_event(
-                    "proxy_start",
-                    Some(&username),
-                    Some(&target.name),
-                    None,
-                    AuditResult::Failure,
-                    Some(error.to_string()),
-                    None,
-                    None,
-                )
-                .await;
-
-                let message = format!("Failed to connect to target {}: {}", target.name, error);
-                session.disconnect(russh::Disconnect::ByApplication, &message, "en")?;
-                Ok(())
-            }
-        }
+        self.connect_selected_target(session, &username, target).await
     }
 
     async fn channel_open_session(
@@ -1499,6 +1650,11 @@ impl server::Handler for GatewayHandler {
         channel: Channel<Msg>,
         _session: &mut Session,
     ) -> std::result::Result<bool, Self::Error> {
+        self.session_channel_state
+            .lock()
+            .await
+            .entry(channel.id())
+            .or_default();
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };
@@ -1559,6 +1715,17 @@ impl server::Handler for GatewayHandler {
             return Ok(());
         };
 
+        self.session_channel_state.lock().await.entry(channel).or_default().pty = Some(
+            proxy::ChannelPtyState {
+                term: term.to_string(),
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+                terminal_modes: modes.to_vec(),
+            },
+        );
+
         match proxy_session
             .request_pty(
                 channel, true, term, col_width, row_height, pix_width, pix_height, modes,
@@ -1610,6 +1777,13 @@ impl server::Handler for GatewayHandler {
             let _ = session.channel_failure(channel);
             return Ok(());
         };
+
+        self.session_channel_state
+            .lock()
+            .await
+            .entry(channel)
+            .or_default()
+            .shell_requested = true;
 
         match proxy_session.request_shell(channel, true).await {
             Ok(()) => {
@@ -1772,8 +1946,12 @@ impl server::Handler for GatewayHandler {
         &mut self,
         channel: ChannelId,
         data: &[u8],
-        _session: &mut Session,
+        session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        if self.handle_menu_channel_input(channel, data, session).await? {
+            return Ok(());
+        }
+
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(());
         };
@@ -1827,6 +2005,17 @@ impl server::Handler for GatewayHandler {
         channel: ChannelId,
         _session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
+        let menu_active = self
+            .session_channel_state
+            .lock()
+            .await
+            .get(&channel)
+            .map(|state| state.menu_active)
+            .unwrap_or(false);
+        if !menu_active {
+            self.session_channel_state.lock().await.remove(&channel);
+        }
+
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(());
         };

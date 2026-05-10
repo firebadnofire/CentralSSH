@@ -31,6 +31,7 @@ pub struct SettingsConfig {
     pub audit_log_path: Option<PathBuf>,
     pub whitelist_path: Option<PathBuf>,
     pub per_user_per_server: Option<bool>,
+    pub drop_to_menu: Option<bool>,
     pub enforce_password_policy: Option<bool>,
     pub min_password_policy: Option<usize>,
 }
@@ -107,6 +108,7 @@ pub struct EffectivePaths {
     pub audit_log_path: PathBuf,
     pub whitelist_path: Option<PathBuf>,
     pub per_user_per_server: bool,
+    pub drop_to_menu: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +264,7 @@ pub fn resolve_paths(
     audit_log_path: Option<PathBuf>,
     whitelist_path: Option<PathBuf>,
     per_user_per_server: Option<bool>,
+    drop_to_menu: Option<bool>,
     settings: Option<&SettingsConfig>,
 ) -> EffectivePaths {
     EffectivePaths {
@@ -281,12 +284,16 @@ pub fn resolve_paths(
         per_user_per_server: per_user_per_server
             .or_else(|| settings.and_then(|config| config.per_user_per_server))
             .unwrap_or(true),
+        drop_to_menu: drop_to_menu
+            .or_else(|| settings.and_then(|config| config.drop_to_menu))
+            .unwrap_or(false),
     }
 }
 
 fn apply_runtime_overrides(config: &mut ConfigFile, paths: &EffectivePaths) {
     config.settings.whitelist_path = paths.whitelist_path.clone();
     config.settings.per_user_per_server = Some(paths.per_user_per_server);
+    config.settings.drop_to_menu = Some(paths.drop_to_menu);
 }
 
 pub fn load_config_file(path: &Path) -> Result<ConfigFile> {
@@ -915,6 +922,7 @@ allowed_servers = ["git"]
         assert!(loaded.settings.audit_log_path.is_none());
         assert!(loaded.settings.whitelist_path.is_none());
         assert_eq!(loaded.settings.per_user_per_server, None);
+        assert_eq!(loaded.settings.drop_to_menu, None);
         assert_eq!(loaded.settings.enforce_password_policy, None);
         assert_eq!(loaded.settings.min_password_policy, None);
         assert_eq!(
@@ -953,6 +961,7 @@ known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 whitelist_path = "/etc/centralssh/whitelist.txt"
 per_user_per_server = false
+drop_to_menu = true
 enforce_password_policy = false
 min_password_policy = 20
 "#,
@@ -980,6 +989,7 @@ min_password_policy = 20
             Some(PathBuf::from("/etc/centralssh/whitelist.txt"))
         );
         assert_eq!(loaded.settings.per_user_per_server, Some(false));
+        assert_eq!(loaded.settings.drop_to_menu, Some(true));
         assert_eq!(loaded.settings.enforce_password_policy, Some(false));
         assert_eq!(loaded.settings.min_password_policy, Some(20));
     }

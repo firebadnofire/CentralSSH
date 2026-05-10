@@ -20,11 +20,12 @@ load_rc_config "$name"
 : ${centralssh_audit_log:="/var/log/centralssh/audit.jsonl"}
 : ${centralssh_whitelist:=""}
 : ${centralssh_listen:="0.0.0.0:7788"}
+: ${centralssh_drop_to_menu:="false"}
 
 pidfile="/var/run/${name}.pid"
 procname="/usr/local/sbin/centralssh"
 command="/usr/sbin/daemon"
-command_args="-p ${pidfile} -u ${centralssh_user} ${procname} --listen ${centralssh_listen} --config ${centralssh_config} --servers ${centralssh_servers} --known-hosts ${centralssh_known_hosts} --user-key-root ${centralssh_user_key_root} --audit-log ${centralssh_audit_log}"
+command_args="-p ${pidfile} -u ${centralssh_user} ${procname} --listen ${centralssh_listen} --config ${centralssh_config} --servers ${centralssh_servers} --known-hosts ${centralssh_known_hosts} --user-key-root ${centralssh_user_key_root} --audit-log ${centralssh_audit_log} --drop-to-menu ${centralssh_drop_to_menu}"
 
 if [ -n "${centralssh_whitelist}" ]; then
 	command_args="${command_args} --whitelist ${centralssh_whitelist}"

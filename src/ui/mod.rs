@@ -146,6 +146,6 @@ pub fn render_server_menu(username: &str, entries: &[(String, String)]) -> Strin
     }
 
     let _ = writeln!(out);
-    let _ = write!(out, "Enter selection (or 'q' to quit): ");
+    let _ = write!(out, "Enter selection (or 'Q' to quit): ");
     out.replace('\n', "\r\n")
 }

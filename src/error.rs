@@ -31,6 +31,15 @@ pub enum CentralSshError {
     #[error("authorization denied")]
     AuthorizationDenied,
 
+    #[error("channel closed")]
+    ChannelClosed,
+
+    #[error("input canceled")]
+    InputCanceled,
+
+    #[error("input timed out")]
+    InputTimeout,
+
     #[error("rate limit exceeded")]
     RateLimitExceeded,
 

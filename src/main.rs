@@ -8,6 +8,7 @@ mod error;
 mod keys;
 mod reload;
 mod ssh;
+mod ui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -122,6 +123,9 @@ struct Cli {
     #[arg(long, env = "PER_USER_PER_SERVER")]
     per_user_per_server: Option<bool>,
 
+    #[arg(long, env = "CENTRALSSH_DROP_TO_MENU")]
+    drop_to_menu: Option<bool>,
+
     #[arg(
         long,
         env = "CENTRALSSH_ENFORCE_STRICT_SECURITY",
@@ -193,6 +197,7 @@ async fn run() -> Result<()> {
         cli.audit_log.clone(),
         cli.whitelist.clone(),
         cli.per_user_per_server,
+        cli.drop_to_menu,
         Some(&seed_config.settings),
     );
     ensure_user_key_root_directory(&paths.user_key_root)?;

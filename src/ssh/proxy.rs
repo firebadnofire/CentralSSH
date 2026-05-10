@@ -18,6 +18,7 @@ use crate::crypto_policy::{is_hybrid_kex_name, is_post_quantum_kex_name};
 use crate::error::{CentralSshError, Result};
 use crate::keys::resolve_user_server_private_key_path;
 use crate::ssh::apply_client_transport_config;
+use crate::ui::render_server_menu;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
@@ -144,11 +145,33 @@ struct TargetClientHandler {
 }
 
 pub struct ProxySession {
+    app_state: Arc<AppState>,
     server_handle: server::Handle,
+    frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
     session_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
     audit_context: ProxyAuditContext,
+    username: String,
+    drop_to_menu: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelPtyState {
+    pub term: String,
+    pub col_width: u32,
+    pub row_height: u32,
+    pub pix_width: u32,
+    pub pix_height: u32,
+    pub terminal_modes: Vec<(russh::Pty, u32)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionChannelState {
+    pub pty: Option<ChannelPtyState>,
+    pub shell_requested: bool,
+    pub menu_active: bool,
+    pub input_buffer: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -283,6 +306,7 @@ impl ProxySession {
         username: String,
         target: SelectedTarget,
         server_handle: server::Handle,
+        frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
     ) -> Result<Self> {
         let private_key_path = resolve_user_server_private_key_path(
             &app_state.config_store.paths.user_key_root,
@@ -361,22 +385,28 @@ impl ProxySession {
         );
 
         Ok(Self {
+            app_state,
             server_handle,
+            frontend_channel_state,
             target_handle: Arc::new(Mutex::new(target_handle)),
             session_channels: Arc::new(Mutex::new(HashMap::new())),
             last_error,
             audit_context,
+            username,
+            drop_to_menu: config_snapshot.config.settings.drop_to_menu.unwrap_or(false),
         })
     }
 
     pub async fn open_session_channel(&self, frontend_channel: Channel<server::Msg>) -> Result<()> {
-        let frontend_id = frontend_channel.id();
+        self.open_session_channel_by_id(frontend_channel.id()).await
+    }
+
+    pub async fn open_session_channel_by_id(&self, frontend_id: ChannelId) -> Result<()> {
         debug!(
             session_id = %self.audit_context.session_id,
             frontend_channel = ?frontend_id,
             "opening proxied session channel"
         );
-        let _ = frontend_channel;
         let target_channel = {
             let handle = self.target_handle.lock().await;
             handle
@@ -398,6 +428,10 @@ impl ProxySession {
             self.target_handle.clone(),
             self.session_channels.clone(),
             self.last_error.clone(),
+            self.app_state.clone(),
+            self.username.clone(),
+            self.drop_to_menu,
+            self.frontend_channel_state.clone(),
         );
 
         Ok(())
@@ -693,19 +727,28 @@ fn spawn_session_bridge(
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
     session_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
+    app_state: Arc<AppState>,
+    username: String,
+    drop_to_menu: bool,
+    frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
 ) {
     tokio::spawn(async move {
-        let back_to_front = relay_backend_session(
+        let close_frontend = relay_backend_session(
             frontend_id,
             target_read,
             server_handle.clone(),
             target_handle.clone(),
             session_channels,
             last_error.clone(),
+            app_state,
+            username,
+            drop_to_menu,
+            frontend_channel_state,
         );
 
-        back_to_front.await;
-        let _ = server_handle.close(frontend_id).await;
+        if close_frontend.await {
+            let _ = server_handle.close(frontend_id).await;
+        }
     });
 }
 
@@ -732,7 +775,11 @@ async fn relay_backend_session(
     target_handle: Arc<Mutex<ClientHandle<TargetClientHandler>>>,
     session_channels: Arc<Mutex<HashMap<ChannelId, Arc<Mutex<ChannelWriteHalf<client::Msg>>>>>>,
     last_error: Arc<Mutex<Option<String>>>,
-) {
+    app_state: Arc<AppState>,
+    username: String,
+    drop_to_menu: bool,
+    frontend_channel_state: Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
+) -> bool {
     loop {
         match target_read.wait().await {
             Some(message) => {
@@ -741,7 +788,7 @@ async fn relay_backend_session(
                     Err(reason) => {
                         abort_proxy_session(&server_handle, &target_handle, &last_error, reason)
                             .await;
-                        break;
+                        return true;
                     }
                 };
 
@@ -750,21 +797,93 @@ async fn relay_backend_session(
                     apply_backend_session_action(action, frontend_id, &server_handle).await
                 {
                     abort_proxy_session(&server_handle, &target_handle, &last_error, error).await;
-                    break;
+                    return true;
                 }
 
                 if should_break {
                     session_channels.lock().await.remove(&frontend_id);
-                    break;
+                    return !activate_menu_after_disconnect(
+                        &app_state,
+                        &server_handle,
+                        &username,
+                        frontend_id,
+                        drop_to_menu,
+                        &frontend_channel_state,
+                    )
+                    .await;
                 }
             }
             None => {
                 session_channels.lock().await.remove(&frontend_id);
-                let _ = server_handle.close(frontend_id).await;
-                break;
+                return !activate_menu_after_disconnect(
+                    &app_state,
+                    &server_handle,
+                    &username,
+                    frontend_id,
+                    drop_to_menu,
+                    &frontend_channel_state,
+                )
+                .await;
             }
         }
     }
+}
+
+async fn activate_menu_after_disconnect(
+    app_state: &Arc<AppState>,
+    server_handle: &server::Handle,
+    username: &str,
+    frontend_id: ChannelId,
+    drop_to_menu: bool,
+    frontend_channel_state: &Arc<Mutex<HashMap<ChannelId, SessionChannelState>>>,
+) -> bool {
+    if !drop_to_menu {
+        return false;
+    }
+
+    {
+        let mut guard = frontend_channel_state.lock().await;
+        let Some(channel_state) = guard.get_mut(&frontend_id) else {
+            return false;
+        };
+        if !channel_state.shell_requested {
+            return false;
+        }
+        channel_state.menu_active = true;
+        channel_state.input_buffer.clear();
+    }
+
+    let snapshot = app_state.config_store.snapshot().await;
+    let Some(user) = snapshot
+        .config
+        .users
+        .iter()
+        .find(|candidate| candidate.name == username)
+    else {
+        return false;
+    };
+
+    let entries = user
+        .allowed_servers
+        .iter()
+        .filter_map(|server_name| {
+            snapshot
+                .servers
+                .servers
+                .get(server_name)
+                .map(|host| (server_name.clone(), host.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        return false;
+    }
+
+    let menu = render_server_menu(username, &entries);
+    server_handle
+        .data(frontend_id, Bytes::from(menu))
+        .await
+        .is_ok()
 }
 
 async fn relay_raw_channel<S>(
