@@ -1269,7 +1269,12 @@ Use the plaintext secret or URI above.\n\n"
                     .selection_prompt(&username, Some("Invalid selection."))
                     .await
                     .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
-                if let Auth::Partial { instructions, prompts, .. } = retry {
+                if let Auth::Partial {
+                    instructions,
+                    prompts,
+                    ..
+                } = retry
+                {
                     let mut text = instructions.into_owned();
                     if let Some((prompt, _)) = prompts.into_owned().into_iter().next() {
                         text.push_str(prompt.as_ref());
@@ -1293,7 +1298,8 @@ Use the plaintext secret or URI above.\n\n"
             }
         }
 
-        self.connect_selected_target(session, &username, target).await?;
+        self.connect_selected_target(session, &username, target)
+            .await?;
         if let Some(proxy_session) = &self.proxy_session {
             proxy_session
                 .open_session_channel_by_id(channel)
@@ -1322,7 +1328,9 @@ Use the plaintext secret or URI above.\n\n"
                             &pty.terminal_modes,
                         )
                         .await
-                        .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+                        .map_err(|error| {
+                            russh::Error::IO(std::io::Error::other(error.to_string()))
+                        })?;
                 }
                 match replay.request {
                     proxy::SessionRequest::Shell => {
@@ -1660,7 +1668,8 @@ impl server::Handler for GatewayHandler {
             )?;
             return Ok(());
         };
-        self.connect_selected_target(session, &username, target).await
+        self.connect_selected_target(session, &username, target)
+            .await
     }
 
     async fn channel_open_session(
@@ -1733,16 +1742,19 @@ impl server::Handler for GatewayHandler {
             return Ok(());
         };
 
-        self.session_channel_state.lock().await.entry(channel).or_default().pty = Some(
-            proxy::ChannelPtyState {
-                term: term.to_string(),
-                col_width,
-                row_height,
-                pix_width,
-                pix_height,
-                terminal_modes: modes.to_vec(),
-            },
-        );
+        self.session_channel_state
+            .lock()
+            .await
+            .entry(channel)
+            .or_default()
+            .pty = Some(proxy::ChannelPtyState {
+            term: term.to_string(),
+            col_width,
+            row_height,
+            pix_width,
+            pix_height,
+            terminal_modes: modes.to_vec(),
+        });
 
         match proxy_session
             .request_pty(
@@ -1980,7 +1992,10 @@ impl server::Handler for GatewayHandler {
         data: &[u8],
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
-        if self.handle_menu_channel_input(channel, data, session).await? {
+        if self
+            .handle_menu_channel_input(channel, data, session)
+            .await?
+        {
             return Ok(());
         }
 

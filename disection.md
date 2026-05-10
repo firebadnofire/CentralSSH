@@ -486,7 +486,7 @@ Backend messages are still classified into `BackendSessionAction` values and app
 
 ### 11.4 Raw channel bridge structure
 
-For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code uses a simpler raw relay:
+For `direct-tcpip`, `forwarded-tcpip`, and X11 data channels the code keeps a separate per-channel backend write-handle map and uses a simpler raw relay for backend-to-frontend traffic, so forwarding channels are not mistaken for proxied `session` channels during later callbacks:
 
 - forward `Data`
 - forward `ExtendedData`
