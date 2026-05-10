@@ -116,6 +116,7 @@ centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
 centralssh_drop_to_menu="false"
+centralssh_hide_proxy_ip="false"
 ```
 
 ## Makefile Behavior
@@ -162,6 +163,8 @@ allowed_servers = ["dns"]
 [settings]
 user_key_root = "/var/lib/centralssh/keys"
 per_user_per_server = true
+drop_to_menu = false
+hide_proxy_ip = false
 known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 whitelist_path = "/etc/centralssh/whitelist.txt"
@@ -209,6 +212,7 @@ Fields:
 - `settings.user_key_root`: optional path override.
 - `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
 - `settings.drop_to_menu`: optional bool, default `false`. When `true`, a completed interactive shell returns to the server menu on the same shell channel. `sftp` and `scp` do not support an inline post-exit gateway menu with stock OpenSSH clients, so those channels close normally. Choosing `Q` from either selection menu disconnects the SSH session instead of restarting authentication.
+- `settings.hide_proxy_ip`: optional bool, default `false`. When `true`, the logged-in server-selection menu shows only logical server names and omits the configured endpoint IP or hostname from the rendered list.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
 - `settings.whitelist_path`: optional path to a fail2ban bypass file with one IPv4 or IPv6 address per row.

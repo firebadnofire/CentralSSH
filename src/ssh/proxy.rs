@@ -1021,7 +1021,8 @@ async fn activate_menu_after_disconnect(
         return false;
     }
 
-    let menu = render_server_menu(username, &entries);
+    let hide_proxy_ip = app_state.config_store.paths.hide_proxy_ip;
+    let menu = render_server_menu(username, &entries, hide_proxy_ip);
     server_handle
         .data(frontend_id, Bytes::from(menu))
         .await

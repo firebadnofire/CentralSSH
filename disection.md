@@ -117,7 +117,7 @@ Important exception:
 - `config.toml` itself must be found before settings can be read, so its path cannot depend on settings inside the file.
 - `servers.toml` has no `settings` override inside `config.toml`; it is controlled by CLI/env or the compiled default.
 - the gateway host key is not separately configurable; it is derived from the config directory as `<config_dir>/host_ed25519`.
-- `drop_to_menu` is a runtime setting and can be overridden by CLI/env or FreeBSD rc.conf the same way `per_user_per_server` can.
+- `drop_to_menu` and `hide_proxy_ip` are runtime settings and can be overridden by CLI/env or FreeBSD rc.conf the same way `per_user_per_server` can.
 
 ### 4.2 Load and reload
 
@@ -128,6 +128,8 @@ Important exception:
 3. apply runtime overrides back into the in-memory config
 4. validate filesystem security rules
 5. validate config semantics
+
+`settings.hide_proxy_ip` is presentation-only: it changes the authenticated server-selection menu so users see only logical server names instead of `name (host)` entries.
 6. install the result as a new immutable snapshot
 
 Reload is all-or-nothing. Invalid reload input does not replace the previous active state.

@@ -257,6 +257,7 @@ Use the plaintext secret or URI above.\n\n"
                 return Err(error);
             }
         };
+        let hide_proxy_ip = self.state.config_store.paths.hide_proxy_ip;
         let mut instructions = format!("User: {username}\n");
         if let Some(message) = error_message {
             instructions.push('\n');
@@ -265,7 +266,11 @@ Use the plaintext secret or URI above.\n\n"
         }
         instructions.push_str("\nSelect a server:\n\n");
         for (index, (name, host)) in entries.iter().enumerate() {
-            instructions.push_str(&format!("{}) {} ({})\n", index + 1, name, host));
+            if hide_proxy_ip {
+                instructions.push_str(&format!("{}) {}\n", index + 1, name));
+            } else {
+                instructions.push_str(&format!("{}) {} ({})\n", index + 1, name, host));
+            }
         }
 
         Ok(Self::keyboard_prompt(
