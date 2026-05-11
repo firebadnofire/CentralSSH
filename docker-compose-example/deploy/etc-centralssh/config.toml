@@ -1,0 +1,36 @@
+[[users]]
+name = "alice"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
+must_change_password = true
+allowed_servers = ["git", "httpd"]
+
+[[users]]
+name = "bob"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
+must_change_password = true
+allowed_servers = ["dns"]
+
+[settings]
+user_key_root = "/var/lib/centralssh/keys"
+per_user_per_server = true
+drop_to_menu = false
+hide_proxy_ip = false
+known_hosts_path = "/etc/centralssh/known_hosts"
+audit_log_path = "/var/log/centralssh/audit.jsonl"
+# whitelist_path = "/etc/centralssh/whitelist.txt"
+enforce_password_policy = true
+min_password_policy = 12
+
+[kex_policy]
+frontend_preferred = [
+  "mlkem768x25519-sha256",
+  "curve25519-sha256",
+  "curve25519-sha256@libssh.org",
+]
+frontend_require_post_quantum = false
+backend_preferred = [
+  "mlkem768x25519-sha256",
+  "curve25519-sha256",
+  "curve25519-sha256@libssh.org",
+]
+backend_require_post_quantum = false

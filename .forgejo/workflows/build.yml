@@ -1,481 +1,718 @@
-name: Package Releases
+name: Release
 
 on:
   push:
-  pull_request:
+    tags:
+      - "v*"
+      - "V*"
 
 jobs:
-  linux:
+  release:
     runs-on: ubuntu-22.04
     container:
-      image: rust:1.89-bookworm
-      options: --network ci-network --user 0:0 -v /build-cache/cargo:/build-cache/cargo-home:z -v /build-cache/sccache:/build-cache/sccache:z -v /build-cache/target/centralssh/linux:/build-cache/target:z
-    env:
-      CI_PACKAGE_NAME: centralssh
-      CI_PACKAGE_VERSION: 0.0.0
-      CI_PACKAGE_COMMENT: Centralized SSH management
-      CI_PACKAGE_ORIGIN: security/centralssh
-      CI_PACKAGE_WWW: https://example.com
-      CI_PACKAGE_MAINTAINER: root@localhost
-      CI_PACKAGE_DESC: Centralized SSH management
-      CI_RELEASE_TAG: ''
+      image: docker.io/library/ubuntu:22.04
+      options: --network ci-network
+
     steps:
-      - name: Prepare checkout runtime
-        shell: sh
+      - name: Install release dependencies
+        shell: bash
         run: |
-          set -eu
-          {
-            echo 'Acquire::http::Proxy "http://apt-cacher-ng:3142";'
-            echo 'Acquire::https::Proxy "http://apt-cacher-ng:3142";'
-          } > /etc/apt/apt.conf.d/01proxy
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git jq make dpkg-dev rpm xz-utils file pkg-config clang lld python3 python3-pip
+          set -euo pipefail
 
-      - name: Check out repository
-        shell: sh
-        env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
-        run: |
-          set -eu
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
-          sha="${FORGEJO_SHA:-${GITHUB_SHA:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          remote_url="${server_url%/}/${repository}.git"
-
-          if [ -z "$server_url" ] || [ -z "$repository" ]; then
-            echo "Missing server context for checkout." >&2
-            exit 1
-          fi
-
-          git init .
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$remote_url"
-
-          if [ -n "$token" ]; then
-            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-            git_fetch() {
-              git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
-            }
-          else
-            git_fetch() {
-              git "$@"
-            }
-          fi
-
-          if [ -n "$ref" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "+${ref}:${ref}"
-            git checkout --force --detach "$ref"
-          elif [ -n "$sha" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "$sha"
-            git checkout --force --detach "$sha"
-          else
-            echo "Missing both ref and sha for checkout." >&2
-            exit 1
-          fi
-
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth=1
-
-      - name: Derive package metadata
-        shell: sh
-        run: |
-          set -eu
-          package_name="$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          package_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          package_comment="$(sed -n 's/^description = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          repo_path="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
-          repo_url="${server_url%/}/${repo_path}"
-          tag_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
-
-          {
-            echo "CI_PACKAGE_NAME=${package_name}"
-            echo "CI_PACKAGE_VERSION=${package_version}"
-            echo "CI_PACKAGE_COMMENT=${package_comment}"
-            echo "CI_PACKAGE_ORIGIN=security/${package_name}"
-            echo "CI_PACKAGE_WWW=${repo_url}"
-            echo "CI_PACKAGE_MAINTAINER=root@localhost"
-            echo "CI_PACKAGE_DESC=${package_comment}"
-            echo "CI_RELEASE_TAG=${tag_name}"
-          } >> "$GITHUB_ENV"
-
-      - name: Prepare Linux cache root
-        shell: sh
-        run: |
-          set -eu
-          install -d /build-cache /build-cache/cargo /build-cache/cargo-home /build-cache/sccache /build-cache/target /build-cache/target/centralssh /build-cache/target/centralssh/linux
-          id
-          ls -ld /build-cache /build-cache/*
-          ls -Zd /build-cache /build-cache/* || true
-          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
-          if [ "$CACHE_ROOT" != "/build-cache" ]; then
-            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
-            exit 1
-          fi
-
-      - name: Install pinned sccache
-        shell: sh
-        run: |
-          set -eu
-          id
-          ls -ld /build-cache /build-cache/*
-          ls -Zd /build-cache /build-cache/* || true
-          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
-          if [ "$CACHE_ROOT" != "/build-cache" ]; then
-            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
-            exit 1
-          fi
-          export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
-          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
-          export PATH="$CARGO_HOME/bin:$PATH"
-          ./ci/install-sccache.sh 0.10.0
-          ./ci/log-rust-cache-stats.sh
-
-      - name: Build Linux packages
-        shell: sh
-        env:
-          CI_PACKAGE_NAME: ${{ env.CI_PACKAGE_NAME }}
-          CI_PACKAGE_VERSION: ${{ env.CI_PACKAGE_VERSION }}
-          CI_PACKAGE_COMMENT: ${{ env.CI_PACKAGE_COMMENT }}
-          CI_PACKAGE_ORIGIN: ${{ env.CI_PACKAGE_ORIGIN }}
-          CI_PACKAGE_WWW: ${{ env.CI_PACKAGE_WWW }}
-          CI_PACKAGE_MAINTAINER: ${{ env.CI_PACKAGE_MAINTAINER }}
-          CI_PACKAGE_DESC: ${{ env.CI_PACKAGE_DESC }}
-        run: |
-          set -eu
-          id
-          ls -ld /build-cache /build-cache/*
-          ls -Zd /build-cache /build-cache/* || true
-          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
-          if [ "$CACHE_ROOT" != "/build-cache" ]; then
-            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
-            exit 1
-          fi
-          export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
-          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
-          export PATH="$CARGO_HOME/bin:$PATH"
-          if command -v sccache >/dev/null 2>&1; then
-            export RUSTC_WRAPPER=sccache
-          fi
-
-          mkdir -p dist
-          mkdir -p stage/linux stage/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-
-          ./ci/time-command.sh cargo build --locked --release
-          make install DESTDIR="$PWD/stage/linux" PREFIX=/usr
-
-          # --- .deb ---
-          mkdir -p stage/linux/DEBIAN
-          cat > stage/linux/DEBIAN/control <<EOF
-          Package: ${CI_PACKAGE_NAME}
-          Version: ${CI_PACKAGE_VERSION}
-          Section: admin
-          Priority: optional
-          Architecture: amd64
-          Maintainer: ${CI_PACKAGE_MAINTAINER}
-          Description: ${CI_PACKAGE_DESC}
-          EOF
-          dpkg-deb --build stage/linux "dist/${CI_PACKAGE_NAME}_${CI_PACKAGE_VERSION}_amd64.deb"
-          rm -rf stage/linux/DEBIAN
-
-          # --- .rpm ---
-          install -d "stage/rpmbuild/SOURCES"
-          tar -C stage/linux -czf "stage/rpmbuild/SOURCES/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-linux-root.tar.gz" .
-          install -d "stage/rpmbuild/SPECS"
-          cat > "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec" <<EOF
-          Name: ${CI_PACKAGE_NAME}
-          Version: ${CI_PACKAGE_VERSION}
-          Release: 1%{?dist}
-          Summary: ${CI_PACKAGE_COMMENT}
-          License: GPL-3.0-only
-          URL: ${CI_PACKAGE_WWW}
-          BuildArch: x86_64
-          Source0: ${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-linux-root.tar.gz
-
-          %description
-          ${CI_PACKAGE_DESC}
-
-          %prep
-
-          %build
-
-          %install
-          mkdir -p %{buildroot}
-          tar -C %{buildroot} -xzf %{SOURCE0}
-
-          %files
-          /usr/sbin/${CI_PACKAGE_NAME}
-          /usr/bin/cssh-keyscan
-          /etc/systemd/system/${CI_PACKAGE_NAME}.service
-          %dir /etc/centralssh
-          %dir /etc/centralssh/users
-          /etc/centralssh/config.toml
-          /etc/centralssh/servers.toml
-          /etc/centralssh/known_hosts
-          %dir /var/log/centralssh
-          /var/log/centralssh/audit.jsonl
-          EOF
-          rpmbuild --define "_topdir $PWD/stage/rpmbuild" -bb "stage/rpmbuild/SPECS/${CI_PACKAGE_NAME}.spec"
-          cp "stage/rpmbuild/RPMS/x86_64/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm" \
-             "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
-
-      - name: Log Linux cache stats
-        if: always()
-        shell: sh
-        run: |
-          set -eu
-          id
-          ls -ld /build-cache /build-cache/* 2>/dev/null || true
-          ls -Zd /build-cache /build-cache/* 2>/dev/null || true
-          CACHE_ROOT="$(./ci/select-cache-root.sh /build-cache "$PWD/.ci-cache/linux")"
-          if [ "$CACHE_ROOT" != "/build-cache" ]; then
-            echo "Expected Linux cache root /build-cache but resolved ${CACHE_ROOT}" >&2
-            exit 1
-          fi
-          export CI_CACHE_FALLBACK_ROOT="$PWD/.ci-cache/linux"
-          eval "$(./ci/cache-env.sh linux-release release x86_64-unknown-linux-gnu "$CACHE_ROOT")"
-          export PATH="$CARGO_HOME/bin:$PATH"
-          ./ci/log-rust-cache-stats.sh
-
-      - name: Validate Linux packages
-        shell: sh
-        env:
-          CI_PACKAGE_NAME: ${{ env.CI_PACKAGE_NAME }}
-          CI_PACKAGE_VERSION: ${{ env.CI_PACKAGE_VERSION }}
-        run: |
-          set -eu
-          test -f "dist/${CI_PACKAGE_NAME}_${CI_PACKAGE_VERSION}_amd64.deb"
-          test -f "dist/${CI_PACKAGE_NAME}-${CI_PACKAGE_VERSION}-1.x86_64.rpm"
-
-      - name: Publish Linux packages
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        shell: sh
-        env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
-          CI_RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          set -eu
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:-https://api.github.com}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          release_tag="${CI_RELEASE_TAG:-${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}}"
-
-          if [ -z "$api_url" ] || [ -z "$repository" ] || [ -z "$token" ]; then
-            echo "Missing release API context." >&2
-            exit 1
-          fi
-
-          auth_header="Authorization: token ${token}"
-
-          # Check if release already exists
-          release_json="$(curl -fsS -H "$auth_header" \
-            "${api_url%/}/repos/${repository}/releases/tags/${release_tag}" 2>/dev/null || true)"
-
-          if [ -z "$release_json" ]; then
-            # Create release
-            create_payload="$(jq -n --arg tag "$release_tag" --arg name "$release_tag" \
-              '{tag_name:$tag,name:$name,draft:false,prerelease:false}')"
-            release_json="$(curl -fsS -X POST -H "$auth_header" -H 'Content-Type: application/json' \
-              -d "$create_payload" "${api_url%/}/repos/${repository}/releases")"
-          fi
-
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "Failed to resolve release id." >&2
-            exit 1
-          fi
-
-          # Upload all dist assets
-          for asset_path in dist/*; do
-            [ -f "$asset_path" ] || continue
-            asset_name="$(basename "$asset_path")"
-
-            # Delete existing asset if present
-            existing_id="$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
-              '.assets[]? | select(.name == $n) | .id' 2>/dev/null | head -n1)"
-            if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
-              curl -fsS -X DELETE -H "$auth_header" \
-                "${api_url%/}/repos/${repository}/releases/${release_id}/assets/${existing_id}" >/dev/null
-            fi
-
-            # Upload
-            curl -fsS -X POST \
-              -H "$auth_header" \
-              -H 'Content-Type: application/octet-stream' \
-              --data-binary @"$asset_path" \
-              "${api_url%/}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}" \
-              || echo "Failed to upload ${asset_name}" >&2
-          done
-
-  freebsd:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Prepare QEMU host runtime
-        shell: sh
-        run: |
-          set -eu
-          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-            SUDO="sudo"
-          else
-            SUDO=""
+          apt_get="apt-get"
+          tee_cmd="tee"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+            tee_cmd="sudo tee"
           fi
 
           {
             echo 'Acquire::http::Proxy "http://apt-cacher-ng:3142";'
             echo 'Acquire::https::Proxy "http://apt-cacher-ng:3142";'
-          } > /etc/apt/apt.conf.d/01proxy
-          ${SUDO} apt-get update
-          ${SUDO} apt-get install -y --no-install-recommends \
-            ca-certificates \
-            cloud-image-utils \
-            curl \
-            genisoimage \
-            git \
-            jq \
-            openssh-client \
-            qemu-system-x86 \
-            qemu-utils \
-            xorriso \
-            xz-utils \
-            zstd
-          if [ -e /dev/kvm ]; then
-            echo "/dev/kvm is available"
-          else
-            echo "/dev/kvm is not available; FreeBSD VM will use software emulation"
-          fi
+          } | $tee_cmd /etc/apt/apt.conf.d/01proxy >/dev/null
+
+          $apt_get update
+          $apt_get install -y --no-install-recommends ca-certificates curl dpkg-dev file git jq make rpm tar
 
       - name: Check out repository
-        shell: sh
+        shell: bash
         env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
+          FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
-          set -eu
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
-          sha="${FORGEJO_SHA:-${GITHUB_SHA:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          remote_url="${server_url%/}/${repository}.git"
+          set -euo pipefail
 
-          if [ -z "$server_url" ] || [ -z "$repository" ]; then
-            echo "Missing server context for checkout." >&2
-            exit 1
-          fi
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing Forgejo server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/secure-dns-proxy"
+          remote_url="${server_url}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
-          git init .
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$remote_url"
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git -C "$repo_dir" checkout --detach "refs/tags/${tag}"
 
-          if [ -n "$token" ]; then
-            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-            git_fetch() {
-              git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
-            }
-          else
-            git_fetch() {
-              git "$@"
-            }
-          fi
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
-          if [ -n "$ref" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "+${ref}:${ref}"
-            git checkout --force --detach "$ref"
-          elif [ -n "$sha" ]; then
-            git_fetch fetch --force --tags --prune --depth=1 origin "$sha"
-            git checkout --force --detach "$sha"
-          else
-            echo "Missing both ref and sha for checkout." >&2
-            exit 1
-          fi
-
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth=1
-
-      - name: Prepare FreeBSD QEMU image
-        shell: sh
+      - name: Install Go toolchain
+        shell: bash
         run: |
-          set -eu
-          ./ci/freebsd-qemu-build.sh prepare-image
+          set -euo pipefail
 
-      - name: Boot FreeBSD VM and build package
-        shell: sh
-        run: |
-          set -eu
-          ./ci/freebsd-qemu-build.sh build
+          go_version="1.24.3"
+          go_tarball="go${go_version}.linux-amd64.tar.gz"
+          go_url="https://dl.google.com/go/${go_tarball}"
+          go_sha256="3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8"
+          tool_dir="${RUNNER_TEMP:-/tmp}/go-toolchain"
 
-      - name: Validate FreeBSD artifact
-        shell: sh
-        run: |
-          set -eu
-          test -n "$(find dist -maxdepth 1 -type f -name '*-freebsd-amd64.pkg' -print -quit)"
+          rm -rf "$tool_dir"
+          mkdir -p "$tool_dir"
+          curl --fail --silent --show-error --location "$go_url" --output "${tool_dir}/${go_tarball}"
+          printf '%s  %s\n' "$go_sha256" "${tool_dir}/${go_tarball}" | sha256sum --check --status
+          tar -C "$tool_dir" -xzf "${tool_dir}/${go_tarball}"
 
-      - name: Publish FreeBSD package on tag
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        shell: sh
+          printf '%s\n' "${tool_dir}/go/bin" >> "$GITHUB_PATH"
+          "${tool_dir}/go/bin/go" version
+
+      - name: Validate release inputs
+        shell: bash
         env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN || secrets.GITHUB_TOKEN || '' }}
-          CI_RELEASE_TAG: ${{ github.ref_name }}
+          GH_KEY: ${{ secrets.GH_KEY }}
         run: |
-          set -eu
+          set -euo pipefail
 
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:-https://api.github.com}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
-          release_tag="${CI_RELEASE_TAG:-${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}}"
+          for name in GH_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required secret: ${name}" >&2
+              if [ "$name" = "GH_KEY" ]; then
+                echo "GH_KEY must be available to this repository's workflow." >&2
+                echo "For an owner/organization repository, add it under the repository or owner/organization Actions secrets, not only under personal user settings." >&2
+              fi
+              exit 1
+            fi
+          done
 
-          if [ -z "$api_url" ] || [ -z "$repository" ] || [ -z "$token" ]; then
-            echo "Missing release API context." >&2
+          for tool in base64 curl dpkg-deb file git go jq make rpm rpmbuild sha256sum sha512sum tar; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "Missing required tool: ${tool}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build Linux release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${REPO_DIR:?Missing repository checkout directory}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+
+          make clean
+          for arch in amd64 arm64; do
+            case "$arch" in
+              amd64)
+                deb_arch="amd64"
+                rpm_arch="x86_64"
+                pet_arch="x86_64"
+                ;;
+              arm64)
+                deb_arch="arm64"
+                rpm_arch="aarch64"
+                pet_arch="aarch64"
+                ;;
+              *)
+                echo "Unsupported release architecture: ${arch}" >&2
+                exit 1
+                ;;
+            esac
+
+            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 make -B package VERSION="${tag}-linux-${arch}-systemd"
+            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 make -B openrc-package VERSION="${tag}-linux-${arch}"
+            if [ "$arch" = "amd64" ]; then
+              make -B pet VERSION="${tag}" PET_GOARCH="$arch" PET_ARCH="$pet_arch"
+            fi
+            make -B deb VERSION="${tag}" DEB_GOARCH="$arch" DEB_ARCH="$deb_arch"
+            make -B rpm VERSION="${tag}" RPM_GOARCH="$arch" RPM_ARCH="$rpm_arch"
+          done
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${REPO_DIR:?Missing repository checkout directory}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          assets_file="${RUNNER_TEMP:-/tmp}/secure-dns-proxy-release-assets.txt"
+
+          systemd_tarballs=(
+            "dist/secure-dns-proxy-${tag}-linux-amd64-systemd.tar.gz"
+            "dist/secure-dns-proxy-${tag}-linux-arm64-systemd.tar.gz"
+          )
+          openrc_tarballs=(
+            "dist/secure-dns-proxy-${tag}-linux-amd64-openrc.tar.gz"
+            "dist/secure-dns-proxy-${tag}-linux-arm64-openrc.tar.gz"
+          )
+          pet_packages=(
+            "dist/secure-dns-proxy-${tag}-puppy-x86_64.pet"
+          )
+          deb_packages=(
+            "dist/secure-dns-proxy-${tag}-debian-amd64.deb"
+            "dist/secure-dns-proxy-${tag}-debian-arm64.deb"
+          )
+          rpm_packages=(
+            "dist/secure-dns-proxy-${tag}-fedora-x86_64.rpm"
+            "dist/secure-dns-proxy-${tag}-fedora-aarch64.rpm"
+          )
+          asset_paths=(
+            "${systemd_tarballs[@]}"
+            "${openrc_tarballs[@]}"
+            "${pet_packages[@]}"
+            "${deb_packages[@]}"
+            "${rpm_packages[@]}"
+          )
+
+          require_members() {
+            local asset_path="$1"
+            local listing="$2"
+            shift 2
+            local member
+            for member in "$@"; do
+              grep -Fxq "$member" "$listing" || {
+                echo "Archive ${asset_path} is missing ${member}." >&2
+                exit 1
+              }
+            done
+          }
+
+          validate_tarball() {
+            local asset_path="$1"
+            shift
+            archive_listing="$(mktemp)"
+            if [ ! -f "$asset_path" ]; then
+              echo "Expected release tarball at ${asset_path}." >&2
+              exit 1
+            fi
+
+            tar -tzf "$asset_path" > "$archive_listing"
+            require_members "$asset_path" "$archive_listing" "$@"
+            rm -f "$archive_listing"
+          }
+
+          validate_pet() {
+            local asset_path="$1"
+            local size
+            local payload
+            local listing
+            local package_base
+            local specs_line
+            local spec_fullpkg
+            local spec_name
+            local spec_version
+            local spec_release
+            local spec_category
+            local spec_size
+            local spec_path
+            local spec_filename
+            local spec_deps
+            local spec_description
+            local expected_md5
+            local appended_md5
+            if [ ! -f "$asset_path" ]; then
+              echo "Expected PET package at ${asset_path}." >&2
+              exit 1
+            fi
+            package_base="$(basename "$asset_path" .pet)"
+            size="$(wc -c < "$asset_path")"
+            if [ "$size" -le 32 ]; then
+              echo "PET package ${asset_path} is too small to contain an MD5 trailer." >&2
+              exit 1
+            fi
+            payload="$(mktemp)"
+            listing="$(mktemp)"
+            head -c "$((size - 32))" "$asset_path" > "$payload"
+            appended_md5="$(tail -c 32 "$asset_path")"
+            expected_md5="$(md5sum "$payload" | awk '{print $1}')"
+            if [ "$expected_md5" != "$appended_md5" ]; then
+              echo "PET package ${asset_path} has an invalid MD5 trailer." >&2
+              exit 1
+            fi
+            tar -tzf "$payload" > "$listing"
+            if [ "$(sed -n '1p' "$listing")" != "${package_base}/" ]; then
+              echo "PET package ${asset_path} first archive member is '$(sed -n '1p' "$listing")', expected ${package_base}/." >&2
+              exit 1
+            fi
+            if grep -qxE '(\./?|\.)' "$listing"; then
+              echo "PET package ${asset_path} contains a root current-directory entry; Puppy may treat it as package name '.'." >&2
+              exit 1
+            fi
+            if grep -qE '(^|/)\._' "$listing"; then
+              echo "PET package ${asset_path} contains AppleDouble metadata entries." >&2
+              exit 1
+            fi
+            require_members "$asset_path" "$listing" \
+              "${package_base}/pet.specs" \
+              "${package_base}/pinstall.sh" \
+              "${package_base}/puninstall.sh" \
+              "${package_base}/etc/secure-dns-proxy/config.example.toml" \
+              "${package_base}/usr/local/bin/secure-dns-proxy" \
+              "${package_base}/usr/share/secure-dns-proxy/config.default.toml" \
+              "${package_base}/usr/share/doc/secure-dns-proxy/LICENSE"
+            specs_line="$(tar -xOzf "$payload" "${package_base}/pet.specs" | head -n 1)"
+            if printf '%s' "$specs_line" | grep -q $'\r'; then
+              echo "PET package ${asset_path} pet.specs contains CRLF line endings." >&2
+              exit 1
+            fi
+            if [ "$(awk -F'|' '{print NF}' <<< "$specs_line")" -ne 10 ]; then
+              echo "PET package ${asset_path} pet.specs must contain exactly 10 pipe-delimited fields." >&2
+              exit 1
+            fi
+            IFS='|' read -r spec_fullpkg spec_name spec_version spec_release spec_category spec_size spec_path spec_filename spec_deps spec_description _ <<< "$specs_line"
+            if [ -z "$spec_fullpkg" ] || [ "$spec_fullpkg" = "." ]; then
+              echo "PET package ${asset_path} has an invalid pet.specs package name: '${spec_fullpkg}'." >&2
+              exit 1
+            fi
+            if [ "$spec_fullpkg" != "$package_base" ]; then
+              echo "PET package ${asset_path} pet.specs name '${spec_fullpkg}' does not match '${package_base}'." >&2
+              exit 1
+            fi
+            if [ "$spec_name" != "secure-dns-proxy" ]; then
+              echo "PET package ${asset_path} pet.specs package field is '${spec_name}', expected secure-dns-proxy." >&2
+              exit 1
+            fi
+            if [ -z "$spec_version" ] || [[ "$spec_version" == v* ]] || [[ "$spec_version" == V* ]]; then
+              echo "PET package ${asset_path} pet.specs version field is '${spec_version}', expected a non-empty version without a leading v." >&2
+              exit 1
+            fi
+            if [ "$spec_filename" != "${package_base}.pet" ]; then
+              echo "PET package ${asset_path} pet.specs filename field is '${spec_filename}', expected ${package_base}.pet." >&2
+              exit 1
+            fi
+            rm -f "$payload" "$listing"
+          }
+
+          validate_deb() {
+            local asset_path="$1"
+            local listing
+            if [ ! -f "$asset_path" ]; then
+              echo "Expected Debian package at ${asset_path}." >&2
+              exit 1
+            fi
+            dpkg-deb --info "$asset_path" >/dev/null
+            listing="$(mktemp)"
+            dpkg-deb --contents "$asset_path" | awk '{print $6}' > "$listing"
+            require_members "$asset_path" "$listing" \
+              './usr/local/bin/secure-dns-proxy' \
+              './lib/systemd/system/secure-dns-proxy.service' \
+              './etc/sysctl.d/80-secure-dns-proxy.conf' \
+              './etc/secure-dns-proxy/config.example.toml' \
+              './usr/share/secure-dns-proxy/config.default.toml'
+            rm -f "$listing"
+          }
+
+          validate_rpm() {
+            local asset_path="$1"
+            local listing
+            if [ ! -f "$asset_path" ]; then
+              echo "Expected RPM package at ${asset_path}." >&2
+              exit 1
+            fi
+            rpm -qip "$asset_path" >/dev/null
+            listing="$(mktemp)"
+            rpm -qlp "$asset_path" > "$listing"
+            require_members "$asset_path" "$listing" \
+              '/usr/local/bin/secure-dns-proxy' \
+              '/usr/lib/systemd/system/secure-dns-proxy.service' \
+              '/etc/sysctl.d/80-secure-dns-proxy.conf' \
+              '/etc/secure-dns-proxy/config.example.toml' \
+              '/usr/share/secure-dns-proxy/config.default.toml'
+            rm -f "$listing"
+          }
+
+          for asset_path in "${systemd_tarballs[@]}"; do
+            validate_tarball "$asset_path" \
+              'secure-dns-proxy/Makefile' \
+              'secure-dns-proxy/README.md' \
+              'secure-dns-proxy/bin/secure-dns-proxy' \
+              'secure-dns-proxy/etc/secure-dns-proxy/config.example.toml' \
+              'secure-dns-proxy/etc/secure-dns-proxy/config.toml' \
+              'secure-dns-proxy/packaging/systemd/secure-dns-proxy.service' \
+              'secure-dns-proxy/packaging/sysctl/secure-dns-proxy.conf'
+          done
+
+          for asset_path in "${openrc_tarballs[@]}"; do
+            validate_tarball "$asset_path" \
+              'secure-dns-proxy/Makefile' \
+              'secure-dns-proxy/README.md' \
+              'secure-dns-proxy/bin/secure-dns-proxy' \
+              'secure-dns-proxy/etc/secure-dns-proxy/config.example.toml' \
+              'secure-dns-proxy/etc/secure-dns-proxy/config.toml' \
+              'secure-dns-proxy/packaging/openrc/secure-dns-proxy' \
+              'secure-dns-proxy/packaging/sysctl/secure-dns-proxy.conf'
+          done
+
+          for asset_path in "${pet_packages[@]}"; do
+            validate_pet "$asset_path"
+          done
+
+          for asset_path in "${deb_packages[@]}"; do
+            validate_deb "$asset_path"
+          done
+
+          for asset_path in "${rpm_packages[@]}"; do
+            validate_rpm "$asset_path"
+          done
+
+          : > "$assets_file"
+          for asset_path in "${asset_paths[@]}"; do
+            printf '%s\n' "${REPO_DIR}/${asset_path}" >> "$assets_file"
+          done
+
+          sha512sum "${asset_paths[@]}" > dist/sha512sums.txt
+          printf '%s\n' "${REPO_DIR}/dist/sha512sums.txt" >> "$assets_file"
+          printf 'ASSETS_FILE=%s\n' "$assets_file" >> "$GITHUB_ENV"
+
+      - name: Publish Forgejo release
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+          assets_file="${ASSETS_FILE:?Missing release asset list file}"
+          release_name="secure-dns-proxy ${tag}"
+          release_body="Automated Linux package release for ${tag}."
+
+          api_request() {
+            local method="$1"
+            local url="$2"
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          upload_asset() {
+            local release_id="$1"
+            local asset_path="$2"
+            local asset_name
+            local asset_name_encoded
+            local existing_asset_id
+
+            if [ ! -f "$asset_path" ]; then
+              echo "Expected release asset at ${asset_path}." >&2
+              exit 1
+            fi
+
+            asset_name="$(basename "$asset_path")"
+            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
+            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+
+            if [ -n "$existing_asset_id" ]; then
+              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
+            fi
+
+            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --form "attachment=@${asset_path}" >/dev/null
+          }
+
+          release_response="$(mktemp)"
+          release_status="$(curl --silent --show-error \
+            --output "$release_response" \
+            --write-out "%{http_code}" \
+            --header "Authorization: token ${token}" \
+            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+
+          if [ "$release_status" = "404" ]; then
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
+            release_json="$(api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
+          elif [ "$release_status" = "200" ]; then
+            release_json="$(cat "$release_response")"
+            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
+            release_json="$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
+          else
+            cat "$release_response" >&2
+            echo "Failed to look up release for ${tag}: HTTP ${release_status}" >&2
             exit 1
-          fi
-
-          auth_header="Authorization: token ${token}"
-          release_json="$(curl -fsS -H "$auth_header" \
-            "${api_url%/}/repos/${repository}/releases/tags/${release_tag}" 2>/dev/null || true)"
-
-          if [ -z "$release_json" ]; then
-            create_payload="$(jq -n --arg tag "$release_tag" --arg name "$release_tag" \
-              '{tag_name:$tag,name:$name,draft:false,prerelease:false}')"
-            release_json="$(curl -fsS -X POST -H "$auth_header" -H 'Content-Type: application/json' \
-              -d "$create_payload" "${api_url%/}/repos/${repository}/releases")"
           fi
 
           release_id="$(printf '%s' "$release_json" | jq -r '.id')"
           if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "Failed to resolve release id." >&2
+            echo "Release response did not include an id." >&2
             exit 1
           fi
 
-          for asset_path in dist/*; do
-            [ -f "$asset_path" ] || continue
-            asset_name="$(basename "$asset_path")"
-            existing_id="$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
-              '.assets[]? | select(.name == $n) | .id' 2>/dev/null | head -n1)"
-            if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
-              curl -fsS -X DELETE -H "$auth_header" \
-                "${api_url%/}/repos/${repository}/releases/${release_id}/assets/${existing_id}" >/dev/null
+          if [ ! -f "$assets_file" ]; then
+            echo "Expected release asset list at ${assets_file}." >&2
+            exit 1
+          fi
+
+          while IFS= read -r asset_path; do
+            if [ -z "$asset_path" ]; then
+              continue
+            fi
+            upload_asset "$release_id" "$asset_path"
+          done < "$assets_file"
+
+      - name: Migrate repository to GitHub
+        shell: bash
+        env:
+          GH_KEY: ${{ secrets.GH_KEY }}
+        run: |
+          set -euo pipefail
+
+          cd "${REPO_DIR:?Missing repository checkout directory}"
+          api_url="https://api.github.com"
+          owner="firebadnofire"
+          repo="secure-dns-proxy"
+          token="${GH_KEY:?Missing GitHub token}"
+
+          github_api_request() {
+            local method="$1"
+            local url="$2"
+            local response_file
+            local status
+            shift 2
+            response_file="$(mktemp)"
+            status="$(curl --silent --show-error \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --request "$method" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${token}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$@" \
+              "$url")"
+            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
+              cat "$response_file" >&2
+              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
+              exit 1
+            fi
+            cat "$response_file"
+          }
+
+          github_repo_status() {
+            local response_file
+            response_file="$(mktemp)"
+            curl --silent --show-error \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${token}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_url}/repos/${owner}/${repo}"
+          }
+
+          github_git_push() {
+            local remote_url="https://github.com/${owner}/${repo}.git"
+            local auth_header
+            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+            git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" \
+              push "$remote_url" "$@"
+          }
+
+          github_migrate() {
+            local repo_status
+            local owner_json
+            local owner_type
+            local create_payload
+            local branch_refspecs=()
+            local ref_name
+            local short_name
+
+            repo_status="$(github_repo_status)"
+            if [ "$repo_status" = "404" ]; then
+              owner_json="$(github_api_request GET "${api_url}/users/${owner}")"
+              owner_type="$(printf '%s' "$owner_json" | jq -r '.type')"
+              create_payload="$(jq -n \
+                --arg name "$repo" \
+                --arg description "secure-dns-proxy mirror" \
+                '{name: $name, description: $description, private: false, auto_init: false}')"
+
+              if [ "$owner_type" = "Organization" ]; then
+                github_api_request POST "${api_url}/orgs/${owner}/repos" \
+                  --header "Content-Type: application/json" \
+                  --data "$create_payload" >/dev/null
+              elif [ "$owner_type" = "User" ]; then
+                authenticated_login="$(github_api_request GET "${api_url}/user" | jq -r '.login')"
+                if [ "$authenticated_login" != "$owner" ]; then
+                  echo "Cannot create ${owner}/${repo}: GH_KEY authenticates as ${authenticated_login}, not ${owner}." >&2
+                  exit 1
+                fi
+                github_api_request POST "${api_url}/user/repos" \
+                  --header "Content-Type: application/json" \
+                  --data "$create_payload" >/dev/null
+              else
+                echo "Unsupported GitHub owner type for ${owner}: ${owner_type}" >&2
+                exit 1
+              fi
+            elif [ "$repo_status" != "200" ]; then
+              echo "Failed to check GitHub repository ${owner}/${repo}: HTTP ${repo_status}" >&2
+              exit 1
             fi
 
-            curl -fsS -X POST \
-              -H "$auth_header" \
-              -H 'Content-Type: application/octet-stream' \
-              --data-binary @"$asset_path" \
-              "${api_url%/}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}" \
-              || echo "Failed to upload ${asset_name}" >&2
-          done
+            while read -r ref_name short_name; do
+              short_name="${short_name#origin/}"
+              if [ "$short_name" = "HEAD" ]; then
+                continue
+              fi
+              branch_refspecs+=("${ref_name}:refs/heads/${short_name}")
+            done < <(git for-each-ref --format='%(refname) %(refname:short)' refs/remotes/origin)
 
-  merge:
-    runs-on: ubuntu-22.04
-    needs: [linux, freebsd]
-    if: always()
-    steps:
-      - name: Check build status
+            if [ "${#branch_refspecs[@]}" -gt 0 ]; then
+              github_git_push "${branch_refspecs[@]}"
+            else
+              echo "No remote branches were found to migrate." >&2
+              exit 1
+            fi
+
+            github_git_push "refs/tags/*:refs/tags/*"
+          }
+
+          github_migrate
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_KEY: ${{ secrets.GH_KEY }}
         run: |
-          if [ "${{ needs.linux.result }}" = "success" ] && [ "${{ needs.freebsd.result }}" = "success" ]; then
-            echo "::notice::All builds succeeded"
+          set -euo pipefail
+
+          api_url="https://api.github.com"
+          upload_url="https://uploads.github.com"
+          owner="firebadnofire"
+          repo="secure-dns-proxy"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${GH_KEY:?Missing GitHub token}"
+          assets_file="${ASSETS_FILE:?Missing release asset list file}"
+          release_name="secure-dns-proxy ${tag}"
+          release_body="Automated Linux package release for ${tag}."
+
+          github_request() {
+            local method="$1"
+            local url="$2"
+            local response_file
+            local status
+            shift 2
+            response_file="$(mktemp)"
+            status="$(curl --silent --show-error \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --request "$method" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${token}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$@" \
+              "$url")"
+            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
+              cat "$response_file" >&2
+              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
+              exit 1
+            fi
+            cat "$response_file"
+          }
+
+          upload_asset() {
+            local release_id="$1"
+            local asset_path="$2"
+            local asset_name
+            local asset_name_encoded
+            local existing_asset_id
+
+            if [ ! -f "$asset_path" ]; then
+              echo "Expected release asset at ${asset_path}." >&2
+              exit 1
+            fi
+
+            asset_name="$(basename "$asset_path")"
+            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
+            existing_asset_id="$(github_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+
+            if [ -n "$existing_asset_id" ]; then
+              github_request DELETE "${api_url}/repos/${owner}/${repo}/releases/assets/${existing_asset_id}" >/dev/null
+            fi
+
+            github_request POST "${upload_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@${asset_path}" >/dev/null
+          }
+
+          release_response="$(mktemp)"
+          release_status="$(curl --silent --show-error \
+            --output "$release_response" \
+            --write-out "%{http_code}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${token}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+
+          if [ "$release_status" = "404" ]; then
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
+            release_json="$(github_request POST "${api_url}/repos/${owner}/${repo}/releases" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
+          elif [ "$release_status" = "200" ]; then
+            release_json="$(cat "$release_response")"
+            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
+            release_json="$(github_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
           else
-            echo "::error::Build failed: linux=${{ needs.linux.result }}, freebsd=${{ needs.freebsd.result }}"
+            cat "$release_response" >&2
+            echo "Failed to look up GitHub release for ${tag}: HTTP ${release_status}" >&2
             exit 1
           fi
+
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "GitHub release response did not include an id." >&2
+            exit 1
+          fi
+
+          if [ ! -f "$assets_file" ]; then
+            echo "Expected release asset list at ${assets_file}." >&2
+            exit 1
+          fi
+
+          while IFS= read -r asset_path; do
+            if [ -z "$asset_path" ]; then
+              continue
+            fi
+            upload_asset "$release_id" "$asset_path"
+          done < "$assets_file"

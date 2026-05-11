@@ -28,3 +28,7 @@ ACCESS-DEBIAN.md
 .ci-cache/
 .ci-host-cache/
 .ci-qemu/
+
+expect-test/random.bin
+expect-test/random.bin.sha256
+expect-test/config.txt

@@ -30,6 +30,8 @@ The operator should know that the repo currently contains both old and new assum
 
 Practical conclusion: operate this build as a transparent SSH gateway in progress, not as a shell-only broker, but do not rely on the README alone for feature expectations.
 
+Container deployment guidance now lives in [container.md](/home/william/git/CentralSSH/container.md:1). Use it together with this operator guide when running CentralSSH under Docker or Podman.
+
 ## 3. Runtime layout
 
 CentralSSH uses a small set of files and directories:
