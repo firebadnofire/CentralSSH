@@ -1,0 +1,44 @@
+services:
+  centralssh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: centralssh:local
+
+    container_name: centralssh
+
+    restart: unless-stopped
+
+    ports:
+      - "${CENTRALSSH_PUBLISH_PORT:-7788}:7788"
+
+    environment:
+      CENTRALSSH_LOG: info
+      CENTRALSSH_LOG_FORMAT: json
+      CENTRALSSH_HEALTHCHECK_TARGET: 127.0.0.1:7788
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    volumes:
+      - ./deploy/etc-centralssh:/etc/centralssh
+      - ./deploy/var-lib-centralssh:/var/lib/centralssh
+      - ./deploy/var-log-centralssh:/var/log/centralssh
+
+    healthcheck:
+      test: [ "CMD", "/usr/local/bin/centralssh-healthcheck" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    stop_grace_period: 30s

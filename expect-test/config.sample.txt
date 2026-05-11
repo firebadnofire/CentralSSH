@@ -1,0 +1,10 @@
+# SSH target
+host=192.168.86.65
+port=7788
+user=alice
+
+# SFTP and SCP
+proxy_number=3
+
+# TOTP profile
+totp_profile=ssh

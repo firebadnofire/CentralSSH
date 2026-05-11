@@ -1,0 +1,11 @@
+.git
+.github
+.forgejo
+target
+tmp
+.DS_Store
+deploy
+*.log
+*.tar
+*.tgz
+*.tmp

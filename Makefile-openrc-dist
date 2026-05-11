@@ -1,0 +1,79 @@
+# Makefile for installing a secure-dns-proxy OpenRC binary release tarball
+
+PREFIX := secure-dns-proxy
+
+INSTALL_PREFIX ?= /usr/local
+OPENRC_INIT_DIR ?= /etc/init.d
+SYSCTL_DIR ?= /etc/sysctl.d
+INSTALL ?= install
+CONFIG_INSTALL_OWNER :=
+CONFIG_INSTALL_MODE := 0644
+
+ifeq ($(DESTDIR),)
+CONFIG_INSTALL_OWNER := -o $(PREFIX) -g $(PREFIX)
+CONFIG_INSTALL_MODE := 0640
+endif
+
+BIN := bin/$(PREFIX)
+DEFAULT_CONF := etc/$(PREFIX)/config.toml
+EXAMPLE_CONF := etc/$(PREFIX)/config.example.toml
+OPENRC_INIT := packaging/openrc/$(PREFIX)
+SYSCTL_CONF := packaging/sysctl/$(PREFIX).conf
+
+.PHONY: install upgrade uninstall deinstall check-files
+
+check-files:
+	@test -x "$(BIN)" || { echo "error: missing executable $(BIN)"; exit 1; }
+	@test -f "$(DEFAULT_CONF)" || { echo "error: missing $(DEFAULT_CONF)"; exit 1; }
+	@test -f "$(EXAMPLE_CONF)" || { echo "error: missing $(EXAMPLE_CONF)"; exit 1; }
+	@test -f "$(OPENRC_INIT)" || { echo "error: missing $(OPENRC_INIT)"; exit 1; }
+	@test -f "$(SYSCTL_CONF)" || { echo "error: missing $(SYSCTL_CONF)"; exit 1; }
+
+install: check-files
+ifeq ($(DESTDIR),)
+	@if ! getent group $(PREFIX) >/dev/null 2>&1; then \
+		if command -v groupadd >/dev/null 2>&1; then groupadd -r $(PREFIX); \
+		elif command -v addgroup >/dev/null 2>&1; then addgroup -S $(PREFIX); \
+		else echo "error: cannot create $(PREFIX) group; install groupadd or addgroup" >&2; exit 1; fi; \
+	fi
+	@if ! id -u $(PREFIX) >/dev/null 2>&1; then \
+		if command -v useradd >/dev/null 2>&1; then useradd -r -g $(PREFIX) -s /usr/sbin/nologin -d /nonexistent -M $(PREFIX); \
+		elif command -v adduser >/dev/null 2>&1; then adduser -S -D -H -h /nonexistent -s /sbin/nologin -G $(PREFIX) $(PREFIX); \
+		else echo "error: cannot create $(PREFIX) user; install useradd or adduser" >&2; exit 1; fi; \
+	fi
+endif
+	$(INSTALL) -d "$(DESTDIR)$(INSTALL_PREFIX)/bin"
+	$(INSTALL) -m 0755 "$(BIN)" "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)"
+ifeq ($(DESTDIR),)
+	command -v setcap >/dev/null 2>&1 && \
+	setcap 'cap_net_bind_service=+ep' "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)" || \
+	echo "setcap not available; OpenRC service may need root or an unprivileged port to bind DNS port 53"
+endif
+	$(INSTALL) -d -m 0750 $(CONFIG_INSTALL_OWNER) "$(DESTDIR)/etc/$(PREFIX)"
+	$(INSTALL) -m 0644 "$(EXAMPLE_CONF)" "$(DESTDIR)/etc/$(PREFIX)/config.example.toml"
+	[ -f "$(DESTDIR)/etc/$(PREFIX)/config.toml" ] || \
+	$(INSTALL) -m $(CONFIG_INSTALL_MODE) $(CONFIG_INSTALL_OWNER) "$(DEFAULT_CONF)" "$(DESTDIR)/etc/$(PREFIX)/config.toml"
+	$(INSTALL) -d "$(DESTDIR)$(OPENRC_INIT_DIR)"
+	$(INSTALL) -m 0755 "$(OPENRC_INIT)" "$(DESTDIR)$(OPENRC_INIT_DIR)/$(PREFIX)"
+	$(INSTALL) -d "$(DESTDIR)$(SYSCTL_DIR)"
+	$(INSTALL) -m 0644 "$(SYSCTL_CONF)" "$(DESTDIR)$(SYSCTL_DIR)/80-$(PREFIX).conf"
+
+upgrade: check-files
+	$(INSTALL) -d "$(DESTDIR)$(INSTALL_PREFIX)/bin"
+	$(INSTALL) -m 0755 "$(BIN)" "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)"
+ifeq ($(DESTDIR),)
+	command -v setcap >/dev/null 2>&1 && \
+	setcap 'cap_net_bind_service=+ep' "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)" || \
+	echo "setcap not available; OpenRC service may need root or an unprivileged port to bind DNS port 53"
+endif
+
+uninstall deinstall:
+	rm -f "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)"
+	rm -f "$(DESTDIR)/etc/$(PREFIX)/config.toml" "$(DESTDIR)/etc/$(PREFIX)/config.example.toml"
+	rmdir "$(DESTDIR)/etc/$(PREFIX)" 2>/dev/null || true
+	rm -f "$(DESTDIR)$(OPENRC_INIT_DIR)/$(PREFIX)"
+	rm -f "$(DESTDIR)$(SYSCTL_DIR)/80-$(PREFIX).conf"
+ifeq ($(DESTDIR),)
+	userdel $(PREFIX) 2>/dev/null || deluser $(PREFIX) 2>/dev/null || true
+	groupdel $(PREFIX) 2>/dev/null || delgroup $(PREFIX) 2>/dev/null || true
+endif

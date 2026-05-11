@@ -1,0 +1,146 @@
+#!/usr/bin/expect -f
+
+set timeout 30
+
+#
+# Load configuration
+#
+
+set config_file "config.txt"
+
+if {![file exists $config_file]} {
+    send_user "Missing config file: $config_file\n"
+    exit 1
+}
+
+#
+# Default values
+#
+
+array set config {
+    host ""
+    port "22"
+    user ""
+    totp_profile "ssh"
+}
+
+#
+# Parse config file
+#
+# Format:
+# key=value
+#
+
+set fd [open $config_file r]
+
+while {[gets $fd line] >= 0} {
+
+    #
+    # Trim whitespace
+    #
+
+    set line [string trim $line]
+
+    #
+    # Skip blank lines and comments
+    #
+
+    if {$line eq "" || [string match "#*" $line]} {
+        continue
+    }
+
+    #
+    # Parse key=value
+    #
+
+    if {[regexp {^([^=]+)=(.*)$} $line -> key value]} {
+
+        set key [string trim $key]
+        set value [string trim $value]
+
+        set config($key) $value
+    }
+}
+
+close $fd
+
+#
+# Validate required fields
+#
+
+foreach required {host user} {
+
+    if {$config($required) eq ""} {
+        send_user "Missing required config key: $required\n"
+        exit 1
+    }
+}
+
+#
+# Prompt for password securely
+#
+
+stty -echo
+send_user "Password: "
+expect_user -re "(.*)\n"
+stty echo
+send_user "\n"
+
+set password $expect_out(1,string)
+
+#
+# Generate TOTP
+#
+
+spawn totp-cli generate $config(totp_profile) $config(user)
+
+expect {
+    "Password: " {
+        send "$password\r"
+    }
+    timeout {
+        send_user "Timed out waiting for TOTP password prompt\n"
+        exit 1
+    }
+}
+
+expect eof
+
+set totp_output $expect_out(buffer)
+
+#
+# Extract the TOTP code
+#
+
+if {![regexp {([0-9]{6})} $totp_output -> totp]} {
+    send_user "Failed to extract TOTP code\n"
+    exit 1
+}
+
+#
+# SSH login
+#
+
+spawn ssh -p $config(port) $config(user)@$config(host)
+
+expect {
+    "*Password:*" {
+        send "$password\r"
+    }
+    timeout {
+        send_user "Timed out waiting for SSH password prompt\n"
+        exit 1
+    }
+}
+
+expect {
+    "*TOTP Code:*" {
+        send "$totp\r"
+    }
+    timeout {
+        send_user "Timed out waiting for TOTP prompt\n"
+        exit 1
+    }
+}
+
+interact

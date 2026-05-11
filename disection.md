@@ -33,6 +33,8 @@ Support files:
 - `tools/cssh-keyscan`: helper for building target host trust entries.
 - `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI and FreeBSD QEMU build helpers.
 - `packaging/`: FreeBSD rc and systemd service packaging.
+- `Dockerfile`, `compose.yaml`, `.dockerignore`, and `container/`: container build, runtime, and example deployment artifacts.
+- `container.md`: container operations guide for Docker and Podman deployments.
 - `ACCESS.md`: intentionally redacted placeholder for external access notes; live inventory must stay outside source control.
 
 ## 2. Process startup flow

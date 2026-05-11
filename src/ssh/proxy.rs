@@ -248,44 +248,27 @@ impl client::Handler for TargetClientHandler {
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
         let server_handle = self.server_handle.clone();
-        let connected_address = connected_address.to_string();
-        let originator_address = originator_address.to_string();
-        let raw_channels = self.raw_channels.clone();
-        let last_error = self.last_error.clone();
+        let frontend_channel = server_handle
+            .channel_open_forwarded_tcpip(
+                connected_address.to_string(),
+                connected_port,
+                originator_address.to_string(),
+                originator_port,
+            )
+            .await?;
+        let frontend_id = frontend_channel.id();
+        let (target_read, target_write) = target_channel.split();
 
-        tokio::spawn(async move {
-            let result = async {
-                let frontend_channel = server_handle
-                    .channel_open_forwarded_tcpip(
-                        connected_address.clone(),
-                        connected_port,
-                        originator_address.clone(),
-                        originator_port,
-                    )
-                    .await
-                    .map_err(|error| CentralSshError::Ssh(error.to_string()))?;
-                let frontend_id = frontend_channel.id();
-                let (target_read, target_write) = target_channel.split();
-
-                raw_channels
-                    .lock()
-                    .await
-                    .insert(frontend_id, Arc::new(Mutex::new(target_write)));
-                spawn_raw_backend_bridge(
-                    frontend_id,
-                    target_read,
-                    server_handle.clone(),
-                    last_error.clone(),
-                );
-
-                Ok::<(), CentralSshError>(())
-            }
-            .await;
-
-            if let Err(error) = result {
-                record_error(&last_error, error.to_string()).await;
-            }
-        });
+        self.raw_channels
+            .lock()
+            .await
+            .insert(frontend_id, Arc::new(Mutex::new(target_write)));
+        spawn_raw_backend_bridge(
+            frontend_id,
+            target_read,
+            server_handle,
+            self.last_error.clone(),
+        );
 
         Ok(())
     }
@@ -298,38 +281,22 @@ impl client::Handler for TargetClientHandler {
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
         let server_handle = self.server_handle.clone();
-        let originator_address = originator_address.to_string();
-        let raw_channels = self.raw_channels.clone();
-        let last_error = self.last_error.clone();
+        let frontend_channel = server_handle
+            .channel_open_x11(originator_address.to_string(), originator_port)
+            .await?;
+        let frontend_id = frontend_channel.id();
+        let (target_read, target_write) = target_channel.split();
 
-        tokio::spawn(async move {
-            let result = async {
-                let frontend_channel = server_handle
-                    .channel_open_x11(originator_address.clone(), originator_port)
-                    .await
-                    .map_err(|error| CentralSshError::Ssh(error.to_string()))?;
-                let frontend_id = frontend_channel.id();
-                let (target_read, target_write) = target_channel.split();
-
-                raw_channels
-                    .lock()
-                    .await
-                    .insert(frontend_id, Arc::new(Mutex::new(target_write)));
-                spawn_raw_backend_bridge(
-                    frontend_id,
-                    target_read,
-                    server_handle.clone(),
-                    last_error.clone(),
-                );
-
-                Ok::<(), CentralSshError>(())
-            }
-            .await;
-
-            if let Err(error) = result {
-                record_error(&last_error, error.to_string()).await;
-            }
-        });
+        self.raw_channels
+            .lock()
+            .await
+            .insert(frontend_id, Arc::new(Mutex::new(target_write)));
+        spawn_raw_backend_bridge(
+            frontend_id,
+            target_read,
+            server_handle,
+            self.last_error.clone(),
+        );
 
         Ok(())
     }

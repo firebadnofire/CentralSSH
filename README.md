@@ -102,6 +102,18 @@ Environment=CENTRALSSH_LOG=debug,centralssh=debug
 Environment=CENTRALSSH_LOG_FORMAT=json
 ```
 
+## Containers
+
+The repo now ships container artifacts for Docker and Podman:
+
+- `Dockerfile`
+- `.dockerignore`
+- `compose.yaml`
+- `container.md`
+
+Use [container.md](/home/william/git/CentralSSH/container.md:1) for the full container deployment guide, including bind mounts, health checks, rootless notes, and Podman compatibility guidance.
+The shipped `docker-compose-example/docker-compose.yml` accepts `CENTRALSSH_PUBLISH_PORT` via .env if the host cannot spare TCP `7788`.
+
 ## FreeBSD rc.conf Overrides
 
 Optional rc.conf keys:

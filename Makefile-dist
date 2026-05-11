@@ -1,0 +1,73 @@
+# Makefile for installing a secure-dns-proxy binary release tarball
+
+PREFIX := secure-dns-proxy
+
+INSTALL_PREFIX ?= /usr/local
+SYSTEMD_UNIT_DIR ?= /etc/systemd/system
+SYSCTL_DIR ?= /etc/sysctl.d
+INSTALL ?= install
+CONFIG_INSTALL_OWNER :=
+CONFIG_INSTALL_MODE := 0644
+
+ifeq ($(DESTDIR),)
+CONFIG_INSTALL_OWNER := -o $(PREFIX) -g $(PREFIX)
+CONFIG_INSTALL_MODE := 0640
+endif
+
+BIN := bin/$(PREFIX)
+DEFAULT_CONF := etc/$(PREFIX)/config.toml
+EXAMPLE_CONF := etc/$(PREFIX)/config.example.toml
+SYSTEMD_SERVICE := packaging/systemd/$(PREFIX).service
+SYSCTL_CONF := packaging/sysctl/$(PREFIX).conf
+
+.PHONY: install upgrade uninstall deinstall check-files
+
+check-files:
+	@test -x "$(BIN)" || { echo "error: missing executable $(BIN)"; exit 1; }
+	@test -f "$(DEFAULT_CONF)" || { echo "error: missing $(DEFAULT_CONF)"; exit 1; }
+	@test -f "$(EXAMPLE_CONF)" || { echo "error: missing $(EXAMPLE_CONF)"; exit 1; }
+	@test -f "$(SYSTEMD_SERVICE)" || { echo "error: missing $(SYSTEMD_SERVICE)"; exit 1; }
+	@test -f "$(SYSCTL_CONF)" || { echo "error: missing $(SYSCTL_CONF)"; exit 1; }
+
+install: check-files
+ifeq ($(DESTDIR),)
+	getent group $(PREFIX) >/dev/null 2>&1 || groupadd -r $(PREFIX)
+	id -u $(PREFIX) >/dev/null 2>&1 || \
+	useradd -r -g $(PREFIX) -s /usr/sbin/nologin -d /nonexistent -M $(PREFIX)
+endif
+	$(INSTALL) -d "$(DESTDIR)$(INSTALL_PREFIX)/bin"
+	$(INSTALL) -m 0755 "$(BIN)" "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)"
+ifeq ($(DESTDIR),)
+	command -v setcap >/dev/null 2>&1 && \
+	setcap 'cap_net_bind_service=+ep' "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)" || \
+	echo "setcap not available; ensure the binary can bind to privileged ports"
+endif
+	$(INSTALL) -d -m 0750 $(CONFIG_INSTALL_OWNER) "$(DESTDIR)/etc/$(PREFIX)"
+	$(INSTALL) -m 0644 "$(EXAMPLE_CONF)" "$(DESTDIR)/etc/$(PREFIX)/config.example.toml"
+	[ -f "$(DESTDIR)/etc/$(PREFIX)/config.toml" ] || \
+	$(INSTALL) -m $(CONFIG_INSTALL_MODE) $(CONFIG_INSTALL_OWNER) "$(DEFAULT_CONF)" "$(DESTDIR)/etc/$(PREFIX)/config.toml"
+	$(INSTALL) -d "$(DESTDIR)$(SYSTEMD_UNIT_DIR)"
+	$(INSTALL) -m 0644 "$(SYSTEMD_SERVICE)" "$(DESTDIR)$(SYSTEMD_UNIT_DIR)/$(PREFIX).service"
+	$(INSTALL) -d "$(DESTDIR)$(SYSCTL_DIR)"
+	$(INSTALL) -m 0644 "$(SYSCTL_CONF)" "$(DESTDIR)$(SYSCTL_DIR)/80-$(PREFIX).conf"
+	[ -z "$(DESTDIR)" ] && sysctl -q -w net.core.rmem_max=8388608 net.core.rmem_default=8388608 net.core.wmem_max=8388608 net.core.wmem_default=8388608 || true
+
+upgrade: check-files
+	$(INSTALL) -d "$(DESTDIR)$(INSTALL_PREFIX)/bin"
+	$(INSTALL) -m 0755 "$(BIN)" "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)"
+ifeq ($(DESTDIR),)
+	command -v setcap >/dev/null 2>&1 && \
+	setcap 'cap_net_bind_service=+ep' "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)" || \
+	echo "setcap not available; ensure the binary can bind to privileged ports"
+endif
+
+uninstall deinstall:
+	rm -f "$(DESTDIR)$(INSTALL_PREFIX)/bin/$(PREFIX)"
+	rm -f "$(DESTDIR)/etc/$(PREFIX)/config.toml" "$(DESTDIR)/etc/$(PREFIX)/config.example.toml"
+	rmdir "$(DESTDIR)/etc/$(PREFIX)" 2>/dev/null || true
+	rm -f "$(DESTDIR)$(SYSTEMD_UNIT_DIR)/$(PREFIX).service"
+	rm -f "$(DESTDIR)$(SYSCTL_DIR)/80-$(PREFIX).conf"
+ifeq ($(DESTDIR),)
+	userdel $(PREFIX) 2>/dev/null || true
+	groupdel $(PREFIX) 2>/dev/null || true
+endif

@@ -1,0 +1,406 @@
+#!/usr/bin/expect -f
+
+set timeout 60
+
+#
+# Load configuration
+#
+
+set config_file "config.txt"
+
+if {![file exists $config_file]} {
+    send_user "Missing config file: $config_file\n"
+    exit 1
+}
+
+#
+# Default configuration values
+#
+
+array set config {
+    host ""
+    port "22"
+    user ""
+    totp_profile "ssh"
+    proxy_number "1"
+}
+
+#
+# Parse config.txt
+#
+# Format:
+# key=value
+#
+
+set fd [open $config_file r]
+
+while {[gets $fd line] >= 0} {
+
+    set line [string trim $line]
+
+    #
+    # Skip comments and blanks
+    #
+
+    if {$line eq "" || [string match "#*" $line]} {
+        continue
+    }
+
+    #
+    # Parse key=value
+    #
+
+    if {[regexp {^([^=]+)=(.*)$} $line -> key value]} {
+
+        set key [string trim $key]
+        set value [string trim $value]
+
+        set config($key) $value
+    }
+}
+
+close $fd
+
+#
+# Validate config
+#
+
+foreach required {host user proxy_number} {
+
+    if {$config($required) eq ""} {
+        send_user "Missing required config key: $required\n"
+        exit 1
+    }
+}
+
+#
+# Secure password prompt
+#
+
+stty -echo
+send_user "Password: "
+expect_user -re "(.*)\\n"
+stty echo
+send_user "\n"
+
+set password $expect_out(1,string)
+
+#
+# Generate random test files
+#
+
+puts "Generating random.bin and random.bin.sha256..."
+
+set rc [catch {
+    exec ./generate-random-bin.sh >@stdout 2>@stderr
+} result]
+
+if {$rc != 0} {
+    send_user "Failed to generate random files\n"
+    send_user "$result\n"
+    exit 1
+}
+
+#
+# Verify files exist
+#
+
+foreach file {random.bin random.bin.sha256} {
+
+    if {![file exists $file]} {
+        send_user "Missing generated file: $file\n"
+        exit 1
+    }
+}
+
+#
+# Generate TOTP
+#
+
+spawn totp-cli generate $config(totp_profile) $config(user)
+
+expect {
+    "Password: " {
+        send "$password\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for TOTP password prompt\n"
+        exit 1
+    }
+
+    eof {
+        send_user "TOTP generator exited unexpectedly\n"
+        exit 1
+    }
+}
+
+expect eof
+
+set totp_output $expect_out(buffer)
+
+#
+# Extract TOTP code
+#
+
+if {![regexp {([0-9]{6})} $totp_output -> totp]} {
+    send_user "Failed to extract TOTP code\n"
+    exit 1
+}
+
+puts "Using TOTP: $totp"
+
+#
+# Create SFTP batch file
+#
+
+set batch_file "/tmp/sftp_batch_[pid].txt"
+
+set batch_fd [open $batch_file w]
+
+puts $batch_fd "put random.bin"
+puts $batch_fd "put random.bin.sha256"
+puts $batch_fd "bye"
+
+close $batch_fd
+
+#
+# Start SFTP session
+#
+
+puts "Uploading files via SFTP..."
+
+spawn sftp \
+    -o BatchMode=no \
+    -o PreferredAuthentications=password,keyboard-interactive \
+    -o PubkeyAuthentication=no \
+    -P $config(port) \
+    -b $batch_file \
+    $config(user)@$config(host)
+
+#
+# Password prompt
+#
+
+expect {
+    "*Password:*" {
+        send "$password\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for SSH password prompt\n"
+        file delete -force $batch_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before password prompt\n"
+        file delete -force $batch_file
+        exit 1
+    }
+}
+
+#
+# TOTP prompt
+#
+
+expect {
+    "*TOTP Code:*" {
+        send "$totp\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for TOTP prompt\n"
+        file delete -force $batch_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before TOTP prompt\n"
+        file delete -force $batch_file
+        exit 1
+    }
+}
+
+#
+# Proxy/server selection
+#
+
+expect {
+    "*Enter selection*" {
+        send "$config(proxy_number)\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for proxy selection prompt\n"
+        file delete -force $batch_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before selection prompt\n"
+        file delete -force $batch_file
+        exit 1
+    }
+}
+
+#
+# Wait for upload completion
+#
+
+expect eof
+
+file delete -force $batch_file
+
+puts "Upload complete"
+
+#
+# Remote verification over SSH
+#
+
+puts "Running remote SHA256 verification..."
+
+spawn ssh \
+    -o PreferredAuthentications=password,keyboard-interactive \
+    -o PubkeyAuthentication=no \
+    -p $config(port) \
+    $config(user)@$config(host)
+
+#
+# Password prompt
+#
+
+expect {
+    "*Password:*" {
+        send "$password\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for SSH password prompt during verification\n"
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before SSH password prompt during verification\n"
+        exit 1
+    }
+}
+
+#
+# TOTP prompt
+#
+
+expect {
+    "*TOTP Code:*" {
+        send "$totp\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for TOTP prompt during verification\n"
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before TOTP prompt during verification\n"
+        exit 1
+    }
+}
+
+#
+# Proxy selection
+#
+
+expect {
+    "*Enter selection*" {
+        send "$config(proxy_number)\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for proxy selection during verification\n"
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before proxy selection during verification\n"
+        exit 1
+    }
+}
+
+#
+# Wait for shell prompt
+#
+
+expect {
+    -re {.*[#$] $} {}
+
+    timeout {
+        send_user "Timed out waiting for shell prompt during verification\n"
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before shell prompt during verification\n"
+        exit 1
+    }
+}
+
+#
+# Run verification command
+#
+
+set verify_cmd "sha256sum -c random.bin.sha256 && rm -f random.bin random.bin.sha256"
+
+send "$verify_cmd; echo __VERIFY_DONE__\r"
+
+#
+# Wait for checksum result
+#
+
+expect {
+    "random.bin: OK" {
+        puts "SHA256 verification successful"
+        exp_continue
+    }
+
+    "__VERIFY_DONE__" {
+        #
+        # Verification completed
+        #
+    }
+
+    timeout {
+        send_user "Timed out waiting for verification completion\n"
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed during verification\n"
+        exit 1
+    }
+}
+
+#
+# Exit SSH session
+#
+
+send "exit\r"
+
+expect eof
+
+#
+# Clean local files
+#
+
+puts "Cleaning local files..."
+
+foreach file {
+    random.bin
+    random.bin.sha256
+} {
+
+    if {[file exists $file]} {
+        file delete -force $file
+    }
+}
+
+puts "All operations completed successfully"
