@@ -23,6 +23,10 @@ pub const DEFAULT_KNOWN_HOSTS_PATH: &str = "/etc/centralssh/known_hosts";
 pub const DEFAULT_USER_KEY_ROOT: &str = "/var/lib/centralssh/keys";
 pub const DEFAULT_AUDIT_LOG_PATH: &str = "/var/log/centralssh/audit.jsonl";
 pub const DEFAULT_MIN_PASSWORD_POLICY: usize = 12;
+pub const DEFAULT_ALLOW_LOCAL_FORWARDING: bool = false;
+pub const DEFAULT_ALLOW_REMOTE_FORWARDING: bool = false;
+pub const DEFAULT_ALLOW_SFTP: bool = true;
+pub const DEFAULT_ALLOW_SCP: bool = true;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SettingsConfig {
@@ -82,6 +86,46 @@ pub struct UserRecord {
     pub must_change_password: bool,
     #[serde(default)]
     pub allowed_servers: Vec<String>,
+    #[serde(flatten)]
+    pub authorization: AuthorizationPolicyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct AuthorizationPolicyConfig {
+    pub allow_local_forwarding: Option<bool>,
+    pub allow_remote_forwarding: Option<bool>,
+    pub allow_sftp: Option<bool>,
+    pub allow_scp: Option<bool>,
+}
+
+impl AuthorizationPolicyConfig {
+    pub fn has_explicit_entries(&self) -> bool {
+        self.allow_local_forwarding.is_some()
+            || self.allow_remote_forwarding.is_some()
+            || self.allow_sftp.is_some()
+            || self.allow_scp.is_some()
+    }
+
+    pub fn resolve(self) -> EffectiveAuthorizationPolicy {
+        EffectiveAuthorizationPolicy {
+            allow_local_forwarding: self
+                .allow_local_forwarding
+                .unwrap_or(DEFAULT_ALLOW_LOCAL_FORWARDING),
+            allow_remote_forwarding: self
+                .allow_remote_forwarding
+                .unwrap_or(DEFAULT_ALLOW_REMOTE_FORWARDING),
+            allow_sftp: self.allow_sftp.unwrap_or(DEFAULT_ALLOW_SFTP),
+            allow_scp: self.allow_scp.unwrap_or(DEFAULT_ALLOW_SCP),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveAuthorizationPolicy {
+    pub allow_local_forwarding: bool,
+    pub allow_remote_forwarding: bool,
+    pub allow_sftp: bool,
+    pub allow_scp: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -93,6 +137,8 @@ pub struct ConfigFile {
     pub kex_policy: KexPolicyConfig,
     #[serde(default)]
     pub fail2ban: Option<Fail2banConfig>,
+    #[serde(flatten)]
+    pub server_user_policies: HashMap<String, HashMap<String, AuthorizationPolicyConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -458,7 +504,102 @@ pub fn validate_semantics(config: &ConfigFile, servers: &ServersFile) -> Result<
         }
     }
 
+    validate_authorization_policy(config, servers)?;
+
     Ok(())
+}
+
+fn validate_authorization_policy(config: &ConfigFile, servers: &ServersFile) -> Result<()> {
+    let per_user_per_server = config.settings.per_user_per_server.unwrap_or(true);
+
+    if per_user_per_server {
+        for user in &config.users {
+            if user.authorization.has_explicit_entries() {
+                return Err(CentralSshError::InvalidConfig(format!(
+                    "user '{}' defines allow_* policy fields, but settings.per_user_per_server=true requires [server.user] policy tables only",
+                    user.name
+                )));
+            }
+        }
+
+        for (server_name, user_policies) in &config.server_user_policies {
+            if !servers.servers.contains_key(server_name) {
+                return Err(CentralSshError::InvalidConfig(format!(
+                    "authorization policy references unknown server '{}'",
+                    server_name
+                )));
+            }
+
+            if !is_valid_server_identifier(server_name) {
+                return Err(CentralSshError::InvalidConfig(format!(
+                    "authorization policy uses invalid server identifier '{}'",
+                    server_name
+                )));
+            }
+
+            for username in user_policies.keys() {
+                if !is_valid_username(username) {
+                    return Err(CentralSshError::InvalidConfig(format!(
+                        "authorization policy uses invalid user name '{}'",
+                        username
+                    )));
+                }
+
+                let user = config.users.iter().find(|candidate| candidate.name == *username).ok_or_else(
+                    || {
+                        CentralSshError::InvalidConfig(format!(
+                            "authorization policy references unknown user '{}' for server '{}'",
+                            username, server_name
+                        ))
+                    },
+                )?;
+
+                if !user.allowed_servers.iter().any(|allowed| allowed == server_name) {
+                    return Err(CentralSshError::InvalidConfig(format!(
+                        "authorization policy for '{}.{}' is invalid because user '{}' is not allowed to access server '{}'",
+                        server_name, username, username, server_name
+                    )));
+                }
+            }
+        }
+    } else if !config.server_user_policies.is_empty() {
+        return Err(CentralSshError::InvalidConfig(
+            "per-user-per-server authorization policy tables require settings.per_user_per_server=true".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn resolve_effective_authorization_policy(
+    config: &ConfigFile,
+    username: &str,
+    target_server: &str,
+    per_user_per_server: bool,
+) -> Result<EffectiveAuthorizationPolicy> {
+    let user = config
+        .users
+        .iter()
+        .find(|candidate| candidate.name == username)
+        .ok_or_else(|| {
+            CentralSshError::InvalidConfig(format!(
+                "authorization policy lookup could not find user '{}'",
+                username
+            ))
+        })?;
+
+    let policy = if per_user_per_server {
+        config
+            .server_user_policies
+            .get(target_server)
+            .and_then(|user_policies| user_policies.get(username))
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        user.authorization.clone()
+    };
+
+    Ok(policy.resolve())
 }
 
 fn validate_password_field(user: &UserRecord) -> Result<()> {
@@ -774,10 +915,12 @@ mod tests {
                 totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
                 must_change_password: true,
                 allowed_servers: vec!["git".to_string()],
+                authorization: AuthorizationPolicyConfig::default(),
             }],
             settings: SettingsConfig::default(),
             kex_policy: KexPolicyConfig::default(),
             fail2ban: None,
+            server_user_policies: HashMap::new(),
         }
     }
 
@@ -933,6 +1076,8 @@ allowed_servers = ["git"]
         assert_eq!(loaded.settings.hide_proxy_ip, None);
         assert_eq!(loaded.settings.enforce_password_policy, None);
         assert_eq!(loaded.settings.min_password_policy, None);
+        assert_eq!(loaded.users[0].authorization, AuthorizationPolicyConfig::default());
+        assert!(loaded.server_user_policies.is_empty());
         assert_eq!(
             loaded.kex_policy.frontend_preferred,
             default_frontend_preferred_kex()
@@ -956,12 +1101,16 @@ allowed_servers = ["git"]
 name = "alice"
 password = "$argon2id$v=19$m=65536,t=3,p=1$YWFhYWFhYWFhYWFhYWFhYQ$5SJ0fY5fKQh0nqS5BTPw8P7GIw6Y73Q2xU1j5V6k8To"
 allowed_servers = ["git", "httpd"]
+allow_local_forwarding = true
+allow_remote_forwarding = false
 
 [[users]]
 name = "bob"
 password = "TestOnlyBootstrapPass456!"
 must_change_password = true
 allowed_servers = ["git"]
+allow_sftp = false
+allow_scp = true
 
 [settings]
 user_key_root = "/var/lib/centralssh/keys"
@@ -980,7 +1129,11 @@ min_password_policy = 20
 
         assert_eq!(loaded.users.len(), 2);
         assert_eq!(loaded.users[0].allowed_servers, vec!["git", "httpd"]);
+        assert_eq!(loaded.users[0].authorization.allow_local_forwarding, Some(true));
+        assert_eq!(loaded.users[0].authorization.allow_remote_forwarding, Some(false));
         assert_eq!(loaded.users[1].name, "bob");
+        assert_eq!(loaded.users[1].authorization.allow_sftp, Some(false));
+        assert_eq!(loaded.users[1].authorization.allow_scp, Some(true));
         assert_eq!(
             loaded.settings.user_key_root,
             Some(PathBuf::from("/var/lib/centralssh/keys"))
@@ -1076,6 +1229,163 @@ users = [
     }
 
     #[test]
+    fn load_config_file_accepts_per_server_user_policy_tables() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = write_temp_file(
+            &tempdir,
+            "config.toml",
+            r#"
+[[users]]
+name = "alice"
+password = "BootstrapPass123!"
+must_change_password = true
+allowed_servers = ["git"]
+
+[settings]
+per_user_per_server = true
+
+[git.alice]
+allow_local_forwarding = true
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = false
+"#,
+        );
+
+        let loaded = load_config_file(&path).expect("load config");
+
+        let policy = loaded
+            .server_user_policies
+            .get("git")
+            .and_then(|by_user| by_user.get("alice"))
+            .expect("policy");
+        assert_eq!(policy.allow_local_forwarding, Some(true));
+        assert_eq!(policy.allow_remote_forwarding, Some(false));
+        assert_eq!(policy.allow_sftp, Some(true));
+        assert_eq!(policy.allow_scp, Some(false));
+    }
+
+    #[test]
+    fn validate_semantics_rejects_user_level_policy_in_per_server_mode() {
+        let mut config = valid_config();
+        config.settings.per_user_per_server = Some(true);
+        config.users[0].authorization.allow_sftp = Some(false);
+
+        let result = validate_semantics(&config, &valid_servers());
+        assert!(matches!(result, Err(CentralSshError::InvalidConfig(message)) if message.contains("settings.per_user_per_server=true")));
+    }
+
+    #[test]
+    fn validate_semantics_rejects_server_user_policy_in_user_mode() {
+        let mut config = valid_config();
+        config.settings.per_user_per_server = Some(false);
+        config
+            .server_user_policies
+            .entry("git".to_string())
+            .or_default()
+            .insert(
+                "alice".to_string(),
+                AuthorizationPolicyConfig {
+                    allow_local_forwarding: Some(true),
+                    ..AuthorizationPolicyConfig::default()
+                },
+            );
+
+        let result = validate_semantics(&config, &valid_servers());
+        assert!(matches!(result, Err(CentralSshError::InvalidConfig(message)) if message.contains("require settings.per_user_per_server=true")));
+    }
+
+    #[test]
+    fn validate_semantics_rejects_unknown_server_in_policy_table() {
+        let mut config = valid_config();
+        config.settings.per_user_per_server = Some(true);
+        config
+            .server_user_policies
+            .entry("db".to_string())
+            .or_default()
+            .insert("alice".to_string(), AuthorizationPolicyConfig::default());
+
+        let result = validate_semantics(&config, &valid_servers());
+        assert!(matches!(result, Err(CentralSshError::InvalidConfig(message)) if message.contains("unknown server 'db'")));
+    }
+
+    #[test]
+    fn validate_semantics_rejects_policy_for_disallowed_server() {
+        let mut config = valid_config();
+        config.settings.per_user_per_server = Some(true);
+        config.users[0].allowed_servers = vec!["git".to_string()];
+        config
+            .server_user_policies
+            .entry("httpd".to_string())
+            .or_default()
+            .insert("alice".to_string(), AuthorizationPolicyConfig::default());
+
+        let mut servers = valid_servers();
+        servers
+            .servers
+            .insert("httpd".to_string(), "192.0.2.11".to_string());
+
+        let result = validate_semantics(&config, &servers);
+        assert!(matches!(result, Err(CentralSshError::InvalidConfig(message)) if message.contains("not allowed to access server 'httpd'")));
+    }
+
+    #[test]
+    fn resolve_effective_authorization_policy_uses_user_policy_when_disabled() {
+        let mut config = valid_config();
+        config.settings.per_user_per_server = Some(false);
+        config.users[0].authorization = AuthorizationPolicyConfig {
+            allow_local_forwarding: Some(true),
+            allow_remote_forwarding: Some(false),
+            allow_sftp: Some(false),
+            allow_scp: Some(true),
+        };
+
+        let policy =
+            resolve_effective_authorization_policy(&config, "alice", "git", false).expect("policy");
+
+        assert_eq!(
+            policy,
+            EffectiveAuthorizationPolicy {
+                allow_local_forwarding: true,
+                allow_remote_forwarding: false,
+                allow_sftp: false,
+                allow_scp: true,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_effective_authorization_policy_uses_per_server_policy_with_defaults() {
+        let mut config = valid_config();
+        config.settings.per_user_per_server = Some(true);
+        config
+            .server_user_policies
+            .entry("git".to_string())
+            .or_default()
+            .insert(
+                "alice".to_string(),
+                AuthorizationPolicyConfig {
+                    allow_local_forwarding: Some(true),
+                    allow_scp: Some(false),
+                    ..AuthorizationPolicyConfig::default()
+                },
+            );
+
+        let policy =
+            resolve_effective_authorization_policy(&config, "alice", "git", true).expect("policy");
+
+        assert_eq!(
+            policy,
+            EffectiveAuthorizationPolicy {
+                allow_local_forwarding: true,
+                allow_remote_forwarding: false,
+                allow_sftp: true,
+                allow_scp: false,
+            }
+        );
+    }
+
+    #[test]
     fn load_servers_file_accepts_comments_hostname_and_ipv6() {
         let tempdir = TempDir::new().expect("tempdir");
         let path = write_temp_file(
@@ -1125,10 +1435,12 @@ servers = ["git"]
                 totp_secret: None,
                 must_change_password: true,
                 allowed_servers: vec!["git".to_string()],
+                authorization: AuthorizationPolicyConfig::default(),
             }],
             settings: SettingsConfig::default(),
             kex_policy: KexPolicyConfig::default(),
             fail2ban: None,
+            server_user_policies: HashMap::new(),
         };
 
         atomic_write_toml(&path, &payload).expect("write");
@@ -1138,6 +1450,7 @@ servers = ["git"]
         assert!(!encoded.contains("user_key_root"));
         assert!(!encoded.contains("per_user_per_server"));
         assert!(!encoded.contains("hide_proxy_ip"));
+        assert!(!encoded.contains("allow_local_forwarding"));
     }
 
     #[test]

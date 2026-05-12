@@ -112,6 +112,12 @@ password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
 must_change_password = true
 allowed_servers = ["git", "httpd"]
 
+[[users]]
+name = "bob"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
+must_change_password = true
+allowed_servers = ["dns"]
+
 [settings]
 user_key_root = "/var/lib/centralssh/keys"
 per_user_per_server = true
@@ -121,6 +127,24 @@ known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
 min_password_policy = 12
+
+[git.alice]
+allow_local_forwarding = true
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
+
+[httpd.alice]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = false
+
+[dns.bob]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
 
 [kex_policy]
 frontend_preferred = [
@@ -161,6 +185,7 @@ If `settings.hide_proxy_ip=true`, the authenticated selection menu shows only lo
 - `totp_secret`: optional base32 TOTP secret
 - `must_change_password`: boolean
 - `allowed_servers`: required non-empty list of keys that must exist in `servers.toml`
+- `allow_local_forwarding`, `allow_remote_forwarding`, `allow_sftp`, `allow_scp`: only valid here when `settings.per_user_per_server=false`
 
 ### Settings fields
 
@@ -170,6 +195,19 @@ If `settings.hide_proxy_ip=true`, the authenticated selection menu shows only lo
 - `audit_log_path`: optional override for audit log file
 - `enforce_password_policy`: optional boolean; defaults to `true`
 - `min_password_policy`: optional integer minimum password length; defaults to `12`
+
+### Authorization policy fields
+
+- CentralSSH resolves one effective policy for each authenticated `username + selected target`.
+- Missing policy keys use explicit defaults:
+  `allow_local_forwarding=false`, `allow_remote_forwarding=false`, `allow_sftp=true`, `allow_scp=true`.
+- When `per_user_per_server=false`, CentralSSH reads `allow_*` from `[[users]]` and rejects `[server.user]` policy tables.
+- When `per_user_per_server=true`, CentralSSH reads `allow_*` only from `[server.user]` tables and rejects user-level `allow_*` keys.
+- Per-server policy tables must reference an existing server, an existing user, and a user/server pair already present in `allowed_servers`.
+- `allow_local_forwarding=false` rejects `direct-tcpip`.
+- `allow_remote_forwarding=false` rejects `tcpip-forward` and `cancel-tcpip-forward`.
+- `allow_sftp=false` rejects `subsystem sftp`.
+- `allow_scp=false` rejects SCP `exec` requests when the command parser detects `scp` source or sink mode flags such as `-f` or `-t`.
 
 ### Fail2ban fields
 
@@ -249,6 +287,7 @@ CentralSSH only accepts keyboard-interactive SSH auth for gateway login.
 - Plain SSH password auth to the gateway is rejected.
 - The transport auth flow is implemented entirely through keyboard-interactive prompts.
 - Normal OpenSSH auth-method discovery probes do not count toward fail2ban or password/TOTP failures.
+- Authenticated policy denials for forwarding, SFTP, and SCP are logged separately and do not increment fail2ban or login-failure counters.
 
 The user experience is:
 
@@ -618,6 +657,7 @@ centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
+centralssh_per_user_per_server="true"
 centralssh_drop_to_menu="false"
 centralssh_hide_proxy_ip="false"
 ```
@@ -625,7 +665,8 @@ centralssh_hide_proxy_ip="false"
 Important note:
 
 - The rc script now defaults `centralssh_user_key_root` to `/var/lib/centralssh/keys`.
-- Set `PER_USER_PER_SERVER=false` in the service environment only if you intentionally want one outbound key per user.
+- Use `centralssh_per_user_per_server="false"` only if you intentionally want one outbound key per user and user-level `allow_*` policy fields.
+- The actual `allow_local_forwarding`, `allow_remote_forwarding`, `allow_sftp`, and `allow_scp` values remain in `config.toml`; rc.conf does not provide separate global booleans for them.
 
 ### Linux
 
@@ -733,6 +774,15 @@ Current code supports these behaviors through the proxy layer:
 - local forwarding via `direct-tcpip`
 - remote forwarding via `tcpip-forward`
 - X11 channel/request forwarding
+
+Current policy enforcement can selectively deny:
+
+- `direct-tcpip` when local forwarding is disabled
+- `tcpip-forward` and `cancel-tcpip-forward` when remote forwarding is disabled
+- `subsystem sftp` when SFTP is disabled
+- SCP-style `exec` requests when SCP is disabled
+
+Those denials happen after successful authentication at the SSH request layer, return normal SSH failure semantics, and leave fail2ban state unchanged.
 
 Current code rejects:
 

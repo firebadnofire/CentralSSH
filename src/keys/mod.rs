@@ -248,10 +248,13 @@ fn validate_existing_regular_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::TempDir;
 
-    use crate::config::{ConfigFile, KexPolicyConfig, SettingsConfig, UserRecord};
+    use crate::config::{
+        AuthorizationPolicyConfig, ConfigFile, KexPolicyConfig, SettingsConfig, UserRecord,
+    };
 
     fn valid_config() -> ConfigFile {
         ConfigFile {
@@ -261,10 +264,12 @@ mod tests {
                 totp_secret: None,
                 must_change_password: true,
                 allowed_servers: vec!["git".to_string(), "httpd".to_string()],
+                authorization: AuthorizationPolicyConfig::default(),
             }],
             settings: SettingsConfig::default(),
             kex_policy: KexPolicyConfig::default(),
             fail2ban: None,
+            server_user_policies: HashMap::new(),
         }
     }
 

@@ -1,5 +1,7 @@
 APP=centralssh
 KEYSCAN_TOOL=cssh-keyscan
+PROFILE?=release
+TARGET_TRIPLE?=
 
 PREFIX?=/usr/local
 SBINDIR?=$(PREFIX)/sbin
@@ -15,6 +17,9 @@ SYSTEMD_UNIT_DIR?=/etc/systemd/system
 CARGO?=cargo
 INSTALL?=install
 
+BIN_DIR:=$(if $(TARGET_TRIPLE),$(CARGO_TARGET_DIR)/$(TARGET_TRIPLE)/$(PROFILE),$(CARGO_TARGET_DIR)/$(PROFILE))
+APP_BIN:=$(BIN_DIR)/$(APP)
+
 .PHONY: all build clean install uninstall \
 	install-bin install-tools install-layout install-config install-service \
 	install-service-freebsd install-service-linux check-build
@@ -22,7 +27,7 @@ INSTALL?=install
 all: build
 
 build:
-	$(CARGO) build --release
+	$(CARGO) build --profile $(PROFILE) $(if $(TARGET_TRIPLE),--target $(TARGET_TRIPLE),)
 
 clean:
 	$(CARGO) clean
@@ -33,14 +38,14 @@ install: check-build install-bin install-tools install-layout install-config ins
 	@echo "systemd start: systemctl start centralssh"
 
 check-build:
-	@if [ ! -x target/release/$(APP) ]; then \
-		echo "Missing target/release/$(APP). Run 'make' first."; \
+	@if [ ! -x "$(APP_BIN)" ]; then \
+		echo "Missing $(APP_BIN). Run 'make PROFILE=$(PROFILE) $(if $(TARGET_TRIPLE),TARGET_TRIPLE=$(TARGET_TRIPLE),)' first."; \
 		exit 1; \
 	fi
 
 install-bin:
 	$(INSTALL) -d $(DESTDIR)$(SBINDIR)
-	$(INSTALL) -m 0755 target/release/$(APP) $(DESTDIR)$(SBINDIR)/$(APP)
+	$(INSTALL) -m 0755 $(APP_BIN) $(DESTDIR)$(SBINDIR)/$(APP)
 
 install-tools:
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)

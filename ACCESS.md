@@ -8,6 +8,39 @@ Treat all access information in this document as sensitive operational data.
 
 ---
 
+# Testing Guidance
+
+Docker-based testing should be preferred whenever it is reasonable and sufficient for the task.
+
+The repository already contains Docker support for the primary application. Prefer spawning disposable containers for:
+
+* Functional testing
+* Connectivity validation
+* Configuration validation
+* SSH behavior testing
+* Client interoperability checks
+* Basic regression testing
+
+When appropriate, testing environments may include:
+
+* Containers running the project itself
+* Generic Ubuntu containers (ubuntu:rolling)
+* Generic Alpine Linux containers (alpine:latest)
+* Additional lightweight Linux containers needed for interoperability testing
+
+Avoid unnecessary VM or bare-metal usage when containerized testing provides equivalent coverage.
+
+Use full VM, jail, or physical-system testing when:
+
+* Kernel behavior matters
+* Networking behavior requires it
+* SSH edge cases cannot be reproduced in containers
+* Bastille behavior is involved
+* FreeBSD-specific functionality is being validated
+* Performance or long-lived session behavior needs realistic system coverage
+
+---
+
 # Operator Access
 
 ## SSH Key
@@ -128,3 +161,4 @@ sudo bastille console testjail
 * Review firewall and PF configuration before exposing jails externally.
 * The host 192.168.86.65 is AARCH64. The host 192.168.122.195 is AMD64.
 * It is recommended to build on the current machine, then push to 192.168.86.65. This is because they share an arch, and 192.168.86.65 has a weak CPU.
+

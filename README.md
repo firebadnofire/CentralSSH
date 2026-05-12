@@ -127,9 +127,12 @@ centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
+centralssh_per_user_per_server="true"
 centralssh_drop_to_menu="false"
 centralssh_hide_proxy_ip="false"
 ```
+
+`centralssh_per_user_per_server` controls only the key-layout and policy-resolution mode override. The actual `allow_local_forwarding`, `allow_remote_forwarding`, `allow_sftp`, and `allow_scp` values remain per-user or per-server entries in `config.toml`, not rc.conf booleans.
 
 ## Makefile Behavior
 
@@ -183,6 +186,24 @@ whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = true
 min_password_policy = 12
 
+[git.alice]
+allow_local_forwarding = true
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
+
+[httpd.alice]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = false
+
+[dns.bob]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
+
 [kex_policy]
 frontend_preferred = [
   "mlkem768x25519-sha256",
@@ -221,6 +242,7 @@ Fields:
 - `users[].totp_secret`: optional base32 TOTP secret.
 - `users[].must_change_password`: boolean.
 - `users[].allowed_servers`: required non-empty list of server names in `servers.toml`.
+- `users[].allow_local_forwarding`, `users[].allow_remote_forwarding`, `users[].allow_sftp`, `users[].allow_scp`: only valid when `settings.per_user_per_server=false`.
 - `settings.user_key_root`: optional path override.
 - `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
 - `settings.drop_to_menu`: optional bool, default `false`. When `true`, a completed interactive shell returns to the server menu on the same shell channel. `sftp` and `scp` do not support an inline post-exit gateway menu with stock OpenSSH clients, so those channels close normally. Choosing `Q` from either selection menu disconnects the SSH session instead of restarting authentication.
@@ -247,6 +269,19 @@ Fields:
 - `fail2ban.state_path`: optional path for persisted abuse state, default `/var/lib/centralssh/fail2ban_state.json`.
 - `fail2ban.whitelist.ips`: optional IPv4/IPv6 CIDR list. Defaults include `127.0.0.1/32` and `::1/128`.
 
+Authorization policy:
+
+- CentralSSH resolves one effective post-auth policy for each `username + selected target`.
+- Default values for missing policy keys are explicit and deterministic:
+  `allow_local_forwarding=false`, `allow_remote_forwarding=false`, `allow_sftp=true`, `allow_scp=true`.
+- When `settings.per_user_per_server=false`, CentralSSH reads `allow_*` fields directly from each `[[users]]` entry and rejects `[server.user]` policy tables at load or reload time.
+- When `settings.per_user_per_server=true`, CentralSSH reads `allow_*` fields only from `[server.user]` tables such as `[git.alice]` and rejects user-level `allow_*` fields at load or reload time.
+- Per-server policy tables must reference an existing server, an existing user, and a user/server pair already allowed by `users[].allowed_servers`.
+- `allow_local_forwarding=false` rejects `direct-tcpip` channel opens before any backend forwarding channel is established.
+- `allow_remote_forwarding=false` rejects `tcpip-forward` and `cancel-tcpip-forward` requests before any backend listener is created or touched.
+- `allow_sftp=false` rejects `subsystem` requests where the subsystem name is exactly `sftp`.
+- `allow_scp=false` rejects SCP-style `exec` requests after conservative command parsing detects `scp` source or sink mode flags such as `-f` or `-t`. It does not treat arbitrary `exec` requests as SCP.
+
 Notes:
 
 - Outbound target SSH username is always the authenticated CentralSSH username.
@@ -255,6 +290,7 @@ Notes:
 - The frontend listener and outbound SSH client currently support `mlkem768x25519-sha256` but not `sntrup761x25519-sha512`; configuring the latter in either frontend or backend policy fails startup validation.
 - `SIGHUP` reload updates auth, authorization, and abuse-control settings, but transport KEX policy is fixed for existing listener/client configs and currently requires a process restart to change the frontend offer set.
 - No OpenSSH weak-crypto warning on the frontend means the client-to-gateway KEX was hybrid; it does not mean signatures, stored keys, or every outbound target session are post-quantum.
+- Denied forwarding, SFTP, and SCP operations are post-auth policy denials. They are audited as `denied_*` events and do not increment password/TOTP failure counters or fail2ban bans.
 
 ## PQ Validation
 
@@ -276,6 +312,7 @@ Behavior:
 
 - Failures are tracked in a sliding window, not a fixed reset bucket.
 - Normal SSH auth-method discovery such as `none`, `publickey`, or disabled `password` probes does not count as a failed login.
+- Authenticated policy denials for forwarding, SFTP, and SCP are kept separate from brute-force tracking. They are logged, but they do not poison login-failure counters or trigger fail2ban bans.
 - `max_failures` inside `find_time` creates a ban for `ban_time`.
 - Repeated bans for the same IP use exponential backoff and stop growing at `max_ban_time`.
 - Optional tarpitting applies `delay_time` just before the ban threshold when `delay_before_ban=true`.

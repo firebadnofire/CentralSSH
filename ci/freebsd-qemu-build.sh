@@ -415,9 +415,11 @@ CI_PACKAGE_MAINTAINER="root@localhost"
 CI_PACKAGE_WWW="${repo_url}"
 CI_PACKAGE_ARCH="\$(pkg config ABI)"
 CI_PACKAGE_SUFFIX="${FREEBSD_PACKAGE_SUFFIX}"
+CI_TARBALL_NAME="\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.tar.gz"
+CI_PKG_NAME="\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
 
-rm -rf stage dist
-mkdir -p stage dist
+rm -rf stage dist archive
+mkdir -p stage dist archive
 
 gmake install DESTDIR="\$PWD/stage" PREFIX=/usr/local
 
@@ -454,9 +456,42 @@ if ! pkg create -M stage/+MANIFEST -p stage/pkg-plist -r stage -o dist; then
 fi
 
 PKG_FILE="\$(find dist -type f -name '*.pkg' | head -n1)"
-cp "\$PKG_FILE" "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
-test -f "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
-pkg info -F "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg" >/dev/null
+cp "\$PKG_FILE" "dist/\${CI_PKG_NAME}"
+test -f "dist/\${CI_PKG_NAME}"
+pkg info -F "dist/\${CI_PKG_NAME}" >/dev/null
+
+mkdir -p archive/\${CI_PACKAGE_NAME}
+tar -C stage -cf - . | tar -C archive/\${CI_PACKAGE_NAME} -xf -
+tar -C archive -czf "dist/\${CI_TARBALL_NAME}" "\${CI_PACKAGE_NAME}"
+test -f "dist/\${CI_TARBALL_NAME}"
+tar -tzf "dist/\${CI_TARBALL_NAME}" >/dev/null
+
+sudo pkg add -f "dist/\${CI_PKG_NAME}"
+sudo install -d -m 0700 /etc/centralssh /var/lib/centralssh/keys /var/log/centralssh
+sudo sh -c "cat > /etc/centralssh/config.toml" <<RUNTIMECFG
+[[users]]
+name = "ci"
+password = "ValidBootstrapPassword-123!"
+must_change_password = true
+allowed_servers = ["loopback"]
+
+[settings]
+user_key_root = "/var/lib/centralssh/keys"
+per_user_per_server = true
+known_hosts_path = "/etc/centralssh/known_hosts"
+audit_log_path = "/var/log/centralssh/audit.jsonl"
+RUNTIMECFG
+sudo sh -c "cat > /etc/centralssh/servers.toml" <<RUNTIMESRV
+[servers]
+loopback = "127.0.0.1"
+RUNTIMESRV
+sudo touch /etc/centralssh/known_hosts /var/log/centralssh/audit.jsonl
+sudo chmod 0600 /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /var/log/centralssh/audit.jsonl
+sudo sysrc centralssh_enable=YES >/dev/null
+sudo sysrc centralssh_listen=127.0.0.1:47789 >/dev/null
+sudo service centralssh start
+sudo service centralssh status
+sudo service centralssh stop
 EOF
 
   chmod +x "$BUILD_SCRIPT"

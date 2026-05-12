@@ -1123,6 +1123,7 @@ mod tests {
             },
             kex_policy: crate::config::KexPolicyConfig::default(),
             fail2ban: Some(Fail2banConfig::default()),
+            server_user_policies: HashMap::new(),
         };
 
         let tracker = AbuseTracker::from_config(&config, logger)

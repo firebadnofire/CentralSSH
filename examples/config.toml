@@ -21,6 +21,31 @@ audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
 min_password_policy = 12
 
+[git.alice]
+allow_local_forwarding = true
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
+
+[httpd.alice]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = false
+
+[dns.bob]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
+
+# With per_user_per_server = false, move the allow_* fields into each [[users]] entry instead.
+# Secure defaults for missing policy keys are:
+# allow_local_forwarding = false
+# allow_remote_forwarding = false
+# allow_sftp = true
+# allow_scp = true
+
 [kex_policy]
 frontend_preferred = [
   "mlkem768x25519-sha256",

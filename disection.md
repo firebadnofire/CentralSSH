@@ -100,6 +100,8 @@ Primary structs in `src/config/mod.rs`:
 - `ConfigFile`
 - `SettingsConfig`
 - `KexPolicyConfig`
+- `AuthorizationPolicyConfig`
+- `EffectiveAuthorizationPolicy`
 - `UserRecord`
 - `ServersFile`
 - `EffectivePaths`
@@ -120,6 +122,7 @@ Important exception:
 - `servers.toml` has no `settings` override inside `config.toml`; it is controlled by CLI/env or the compiled default.
 - the gateway host key is not separately configurable; it is derived from the config directory as `<config_dir>/host_ed25519`.
 - `drop_to_menu` and `hide_proxy_ip` are runtime settings and can be overridden by CLI/env or FreeBSD rc.conf the same way `per_user_per_server` can.
+- the FreeBSD rc script forwards `centralssh_per_user_per_server` to `--per-user-per-server`; per-user `allow_*` values still come only from `config.toml`
 
 ### 4.2 Load and reload
 
@@ -150,6 +153,10 @@ Reload is all-or-nothing. Invalid reload input does not replace the previous act
 - valid TOTP secret parseability
 - at least one allowed server per user
 - every allowed server must exist in `servers.toml`
+- unambiguous authorization policy mode selection
+- user-level `allow_*` fields only when `settings.per_user_per_server = false`
+- `[server.user]` authorization policy tables only when `settings.per_user_per_server = true`
+- policy-table server and user references must exist and match `allowed_servers`
 - configured frontend KEX names must be supported by the pinned SSH library stack
 - fail2ban config must be parseable if present
 - password policy minimum must be `<= 256`
@@ -164,6 +171,15 @@ Bootstrap password fields are allowed only when:
 Otherwise the password must already be an Argon2id string.
 
 The packaged example intentionally uses a rejected placeholder so operators must replace it before startup. Previously documented sample values such as `TemporaryPassword123!` and `AnotherTempPass123!` are also rejected.
+
+Authorization policy defaults are explicit in code:
+
+- `allow_local_forwarding = false`
+- `allow_remote_forwarding = false`
+- `allow_sftp = true`
+- `allow_scp = true`
+
+`resolve_effective_authorization_policy()` computes one deterministic policy for the authenticated `username + selected target` pair. The implementation does not merge user-level and per-server policy sources.
 
 ### 4.4 Atomic mutation
 
@@ -390,6 +406,7 @@ On startup:
 - keyboard auth state
 - authenticated username
 - pending selected target
+- active resolved authorization policy for the selected target
 - active `ProxySession`
 - whether `connection_opened` was already audited
 
@@ -414,7 +431,8 @@ The current gateway login flow is:
 6. if TOTP is missing, generate a secret, display secret plus `otpauth://` URI, and require a valid verification code
 7. persist any credential changes through `ConfigStore`
 8. show the allowed target menu
-9. on selection, create an outbound `ProxySession`
+9. on selection, resolve the target-specific authorization policy
+10. create an outbound `ProxySession`
 
 Important implementation detail:
 
@@ -474,6 +492,10 @@ The current proxy code explicitly supports:
 Current explicit policy rejection:
 
 - agent forwarding requests are not relayed and are logged as failures
+- `direct-tcpip` is rejected when local forwarding is disabled
+- `tcpip-forward` and `cancel-tcpip-forward` are rejected when remote forwarding is disabled
+- `subsystem sftp` is rejected when SFTP is disabled
+- SCP-style `exec` requests are rejected when SCP is disabled
 
 ### 11.3 Session bridge structure
 
@@ -483,6 +505,14 @@ For session channels the proxy now splits responsibility across the `russh` serv
 - frontend client -> target session requests and data are forwarded immediately from the server handler callbacks in `src/ssh/mod.rs`
 
 The session proxy keeps a per-frontend-channel map of backend session write handles so callback-driven events can be forwarded without waiting for a synthetic frontend read loop.
+
+Policy enforcement for session requests happens in `src/ssh/mod.rs` before the corresponding backend relay call:
+
+- `exec_request()` runs conservative SCP detection on the exact exec payload and fails the request with normal SSH failure semantics when SCP is disabled
+- `subsystem_request()` rejects `sftp` before the subsystem request is proxied when SFTP is disabled
+- `channel_open_direct_tcpip()`, `tcpip_forward()`, and `cancel_tcpip_forward()` reject forwarding before any backend channel or listener is created when policy forbids it
+
+These denials are post-auth authorization events. They are audited as `denied_local_forward`, `denied_remote_forward`, `denied_sftp`, or `denied_scp`, and they do not call into the pre-auth fail2ban or password/TOTP failure paths.
 
 - `BackendSessionAction`
 
