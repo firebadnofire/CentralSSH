@@ -415,6 +415,25 @@ Use the plaintext secret or URI above.\n\n"
             .await;
     }
 
+    fn denied_protocol_message(protocol: &str) -> String {
+        format!("{protocol}: access denied")
+    }
+
+    fn deny_protocol_and_disconnect(
+        &self,
+        session: &mut Session,
+        channel: ChannelId,
+        protocol: &str,
+    ) -> std::result::Result<(), russh::Error> {
+        let _ = session.channel_failure(channel);
+        session.disconnect(
+            russh::Disconnect::ByApplication,
+            &Self::denied_protocol_message(protocol),
+            "en",
+        )?;
+        Ok(())
+    }
+
     async fn resolve_target_policy(
         &self,
         username: &str,
@@ -1952,8 +1971,7 @@ impl server::Handler for GatewayHandler {
                 &format!("scp disabled by authorization policy ({scp_mode})"),
             )
             .await;
-            let _ = session.channel_failure(channel);
-            return Ok(());
+            return self.deny_protocol_and_disconnect(session, channel, "SCP");
         }
 
         match proxy_session.exec(channel, true, data.to_vec()).await {
@@ -2000,8 +2018,7 @@ impl server::Handler for GatewayHandler {
                 "sftp disabled by authorization policy",
             )
             .await;
-            let _ = session.channel_failure(channel);
-            return Ok(());
+            return self.deny_protocol_and_disconnect(session, channel, "SFTP");
         }
 
         match proxy_session
@@ -2667,6 +2684,18 @@ mod tests {
         assert_eq!(classify_scp_exec_request(b"scp /tmp/file"), None);
         assert_eq!(classify_scp_exec_request(b"sh -c 'scp -t /tmp/file'"), None);
         assert_eq!(classify_scp_exec_request(b""), None);
+    }
+
+    #[test]
+    fn denied_protocol_message_is_user_facing() {
+        assert_eq!(
+            GatewayHandler::denied_protocol_message("SFTP"),
+            "SFTP: access denied"
+        );
+        assert_eq!(
+            GatewayHandler::denied_protocol_message("SCP"),
+            "SCP: access denied"
+        );
     }
 
     #[test]

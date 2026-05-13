@@ -512,6 +512,8 @@ Policy enforcement for session requests happens in `src/ssh/mod.rs` before the c
 - `subsystem_request()` rejects `sftp` before the subsystem request is proxied when SFTP is disabled
 - `channel_open_direct_tcpip()`, `tcpip_forward()`, and `cancel_tcpip_forward()` reject forwarding before any backend channel or listener is created when policy forbids it
 
+For denied SFTP and SCP, the handler now follows the request failure with a disconnect reason string in the form `<PROTOCOL>: access denied`, so stock clients get an explicit post-auth denial message instead of only a generic subsystem or exec failure.
+
 These denials are post-auth authorization events. They are audited as `denied_local_forward`, `denied_remote_forward`, `denied_sftp`, or `denied_scp`, and they do not call into the pre-auth fail2ban or password/TOTP failure paths.
 
 - `BackendSessionAction`
