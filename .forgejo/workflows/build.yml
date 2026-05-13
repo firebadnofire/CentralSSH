@@ -446,7 +446,12 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           chmod +x ./ci/build-freebsd-native.sh
-          ./ci/build-freebsd-native.sh "$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)" amd64
+          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+          [ -n "$version" ] || {
+            echo "failed to resolve Cargo.toml version" >&2
+            exit 1
+          }
+          ./ci/build-freebsd-native.sh "$version" amd64
 
   freebsd-aarch64:
     runs-on: freebsd
@@ -603,4 +608,9 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           chmod +x ./ci/build-freebsd-native.sh
-          ./ci/build-freebsd-native.sh "$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)" aarch64
+          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+          [ -n "$version" ] || {
+            echo "failed to resolve Cargo.toml version" >&2
+            exit 1
+          }
+          ./ci/build-freebsd-native.sh "$version" aarch64
