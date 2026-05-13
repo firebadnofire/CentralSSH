@@ -44,6 +44,16 @@ archive_root="$work_root/archive/$app_name"
 rpm_topdir="$work_root/rpmbuild"
 source_root="$work_root/rpm-source/${app_name}-${version}"
 rpm_target_platform="${rpm_arch}-unknown-linux"
+rpm_strip_args=
+
+if [ "$arch" = "arm64" ]; then
+  rpm_strip_args="
+  --define __strip /bin/true
+  --define __objdump /bin/true
+  --define __brp_strip /bin/true
+  --define __brp_strip_comment_note /bin/true
+  --define __brp_strip_static_archive /bin/true"
+fi
 
 rm -rf "$work_root"
 mkdir -p "$dist_dir" "$staging_root" "$archive_root"
@@ -155,6 +165,7 @@ rpmbuild \
   --define "_topdir $rpm_topdir" \
   --define "_build_id_links none" \
   --target "$rpm_target_platform" \
+  $rpm_strip_args \
   -bb "$rpm_topdir/SPECS/${app_name}.spec"
 
 rpm_built=$(find "$rpm_topdir/RPMS" -type f -name '*.rpm' | head -n 1)

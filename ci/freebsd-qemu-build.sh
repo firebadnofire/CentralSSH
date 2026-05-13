@@ -345,6 +345,20 @@ wait_for_guest_settle() {
   return 1
 }
 
+reboot_guest_after_provisioning() {
+  run_ssh 'sudo shutdown -r now' >/dev/null 2>&1 || true
+  i=1
+  while [ "$i" -le 60 ]; do
+    if ! run_ssh 'true' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+    i=$((i + 1))
+  done
+  wait_for_ssh
+  wait_for_guest_settle
+}
+
 guest_debug_available() {
   run_ssh 'echo guest-debug-ready' >/dev/null 2>&1
 }
@@ -696,8 +710,8 @@ case "$command_name" in
     wait_for_ssh
     set_step "waiting for guest provisioning"
     wait_for_guest_provisioning
-    set_step "waiting for guest boot to settle"
-    wait_for_guest_settle
+    set_step "rebooting guest after provisioning"
+    reboot_guest_after_provisioning
     set_step "generating guest build script"
     create_guest_build_script
     set_step "transferring repository"

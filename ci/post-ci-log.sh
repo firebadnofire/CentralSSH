@@ -6,6 +6,11 @@ context=${1:-ci}
 status=${2:-error}
 log_file=${3:-}
 
+filter_log() {
+  grep -Ev '^(    Updating crates\.io index| Downloading crates \.\.\.|  Downloaded |   Compiling )' |
+    tail -n 250
+}
+
 payload_file=$(mktemp)
 cleanup() {
   rm -f "$payload_file"
@@ -22,9 +27,9 @@ trap cleanup EXIT INT TERM
   printf 'runner=%s\n' "${RUNNER_NAME:-unknown}"
   printf '\n'
   if [ -n "$log_file" ] && [ -f "$log_file" ]; then
-    cat "$log_file"
+    filter_log < "$log_file"
   else
-    cat
+    filter_log
   fi
 } > "$payload_file"
 

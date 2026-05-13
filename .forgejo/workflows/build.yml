@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-install-deps.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -55,7 +55,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-checkout.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -78,7 +78,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-rust-toolchain.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-rust"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-rust"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
           sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -108,7 +108,6 @@ jobs:
           exec > >(tee -a "$log_file") 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/validate-version" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
-          cargo metadata --format-version 1 --locked >/dev/null
           repo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
           ref_type="${FORGEJO_REF_TYPE:-${GITHUB_REF_TYPE:-}}"
@@ -150,7 +149,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-install-deps.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -180,7 +179,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-checkout.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -203,7 +202,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-rust-toolchain.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-rust"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-rust"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
           sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -232,7 +231,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-install-deps.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -261,7 +260,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-checkout.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -284,7 +283,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-rust-toolchain.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-rust"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-rust"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
           sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -306,8 +305,7 @@ jobs:
           ./ci/validate-linux-packages.sh "$version" arm64
 
   freebsd-amd64:
-    runs-on: ubuntu-22.04
-    needs: linux-build-test
+    runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -315,21 +313,13 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-install-deps.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
-          apt_get="apt-get"
-          if command -v sudo >/dev/null 2>&1; then
-            apt_get="sudo apt-get"
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          sudo_cmd=
+          if [ "$(id -u)" -ne 0 ]; then
+            sudo_cmd=sudo
           fi
-          $apt_get update
-          $apt_get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            genisoimage \
-            git \
-            openssh-client \
-            qemu-system-x86 \
-            qemu-utils \
-            xz-utils
+          $sudo_cmd pkg update -f
+          $sudo_cmd pkg install -y ca_root_nss curl git gmake jq rustup-init
 
       - name: Check out repository
         shell: bash
@@ -339,7 +329,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-checkout.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -364,12 +354,16 @@ jobs:
           exec > >(tee -a "$log_file") 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-amd64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
-          chmod +x ./ci/freebsd-qemu-build.sh
-          ./ci/freebsd-qemu-build.sh build amd64
+          if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
+            fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
+            sh /tmp/rustup.sh -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN"
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          chmod +x ./ci/build-freebsd-native.sh
+          ./ci/build-freebsd-native.sh "$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)" amd64
 
   freebsd-aarch64:
     runs-on: ubuntu-22.04
-    needs: linux-build-test
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -377,7 +371,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -402,7 +396,7 @@ jobs:
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-checkout.log"
           exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
