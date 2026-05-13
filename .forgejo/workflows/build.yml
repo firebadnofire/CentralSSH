@@ -303,11 +303,52 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-install-deps.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/install-deps"; fi' EXIT
+          echo "PATH=$PATH"
+          uname -a || true
+          for cmd in sh pkg curl fetch git gmake sudo nc; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd=$(command -v "$cmd")"
+            else
+              echo "$cmd=missing"
+            fi
+          done
           sudo_cmd=
           if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
             sudo_cmd="sudo -n"
           fi
+          echo "uid=$(id -u)"
+          echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
             $sudo_cmd pkg install -y ca_root_nss curl git gmake
@@ -327,7 +368,20 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-checkout.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/checkout"; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -353,7 +407,7 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-amd64/build-and-validate" error "$log_file"; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then if [ -x ./ci/post-ci-log.sh ]; then ./ci/post-ci-log.sh "freebsd-amd64/build-and-validate" error "$log_file"; fi; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
             fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
@@ -375,11 +429,52 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/install-deps"; fi' EXIT
+          echo "PATH=$PATH"
+          uname -a || true
+          for cmd in sh pkg curl fetch git gmake sudo nc; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd=$(command -v "$cmd")"
+            else
+              echo "$cmd=missing"
+            fi
+          done
           sudo_cmd=
           if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
             sudo_cmd="sudo -n"
           fi
+          echo "uid=$(id -u)"
+          echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
             $sudo_cmd pkg install -y ca_root_nss curl git gmake
@@ -399,7 +494,20 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-checkout.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/checkout"; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -425,7 +533,7 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-aarch64/build-and-validate" error "$log_file"; fi' EXIT
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then if [ -x ./ci/post-ci-log.sh ]; then ./ci/post-ci-log.sh "freebsd-aarch64/build-and-validate" error "$log_file"; fi; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
             fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
