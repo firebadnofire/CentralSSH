@@ -295,11 +295,12 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: bash
+        shell: sh
         run: |
-          set -euo pipefail
+          set -eu
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-install-deps.log"
-          exec > >(tee -a "$log_file") 2>&1
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           sudo_cmd=
           if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
@@ -314,13 +315,14 @@ jobs:
           command -v gmake >/dev/null 2>&1
 
       - name: Check out repository
-        shell: bash
+        shell: sh
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
-          set -euo pipefail
+          set -eu
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-checkout.log"
-          exec > >(tee -a "$log_file") 2>&1
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
@@ -339,11 +341,12 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD amd64 artifacts
-        shell: bash
+        shell: sh
         run: |
-          set -euo pipefail
+          set -eu
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64.log"
-          exec > >(tee -a "$log_file") 2>&1
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-amd64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
@@ -358,11 +361,12 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: bash
+        shell: sh
         run: |
-          set -euo pipefail
+          set -eu
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
-          exec > >(tee -a "$log_file") 2>&1
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           sudo_cmd=
           if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
@@ -377,13 +381,14 @@ jobs:
           command -v gmake >/dev/null 2>&1
 
       - name: Check out repository
-        shell: bash
+        shell: sh
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
-          set -euo pipefail
+          set -eu
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-checkout.log"
-          exec > >(tee -a "$log_file") 2>&1
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
@@ -402,11 +407,12 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD aarch64 artifacts
-        shell: bash
+        shell: sh
         run: |
-          set -euo pipefail
+          set -eu
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64.log"
-          exec > >(tee -a "$log_file") 2>&1
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-aarch64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
