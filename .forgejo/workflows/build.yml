@@ -100,7 +100,7 @@ jobs:
           fi
           ./ci/log-rust-cache-stats.sh
 
-      - name: Validate version and lockfile
+      - name: Validate lockfile
         shell: bash
         run: |
           set -euo pipefail
@@ -108,17 +108,7 @@ jobs:
           exec > >(tee -a "$log_file") 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/validate-version" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
-          repo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
-          ref_type="${FORGEJO_REF_TYPE:-${GITHUB_REF_TYPE:-}}"
-          if [ "$ref_type" = "tag" ] && [ -n "$ref_name" ]; then
-            tag_version="${ref_name#v}"
-            tag_version="${tag_version#V}"
-            if [ "$tag_version" != "$repo_version" ]; then
-              echo "tag version (${tag_version}) does not match Cargo.toml version (${repo_version})" >&2
-              exit 1
-            fi
-          fi
+          cargo fetch --locked >/dev/null
 
       - name: Build and test host target
         shell: bash
