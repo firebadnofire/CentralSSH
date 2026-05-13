@@ -707,6 +707,7 @@ The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plu
 - Linux packaging produces `centralssh-<version>-linux-amd64-systemd.tar.gz`, `centralssh-<version>-linux-arm64-systemd.tar.gz`, matching `.deb` packages, and matching `.rpm` packages.
 - FreeBSD packaging runs in a real QEMU guest and produces `centralssh-<version>-freebsd-amd64.pkg`, `centralssh-<version>-freebsd-amd64.tar.gz`, `centralssh-<version>-freebsd-aarch64.pkg`, and `centralssh-<version>-freebsd-aarch64.tar.gz`.
 - The FreeBSD helper brings up SSH first, then waits separately for guest provisioning to complete before uploading the build payload. That split makes package-bootstrap failures observable instead of looking like a generic "SSH never came up" timeout.
+- Failing CI steps upload their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits.
 
 ## 23. Recommended production setup
 

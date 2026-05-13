@@ -317,6 +317,34 @@ wait_for_guest_provisioning() {
   return 1
 }
 
+wait_for_guest_settle() {
+  consecutive_ok=0
+  last_boot_marker=
+  i=1
+  while [ "$i" -le 120 ]; do
+    boot_marker=$(run_ssh "test -f '${CLOUDINIT_READY_FILE}' && sysctl -n kern.boottime" 2>/dev/null || true)
+    if [ -n "$boot_marker" ]; then
+      if [ "$boot_marker" = "$last_boot_marker" ]; then
+        consecutive_ok=$((consecutive_ok + 1))
+      else
+        last_boot_marker=$boot_marker
+        consecutive_ok=1
+      fi
+      if [ "$consecutive_ok" -ge 3 ]; then
+        echo "Guest boot state has settled"
+        return 0
+      fi
+    else
+      consecutive_ok=0
+      last_boot_marker=
+    fi
+    sleep 5
+    i=$((i + 1))
+  done
+  echo "Timed out waiting for FreeBSD guest boot state to settle" >&2
+  return 1
+}
+
 guest_debug_available() {
   run_ssh 'echo guest-debug-ready' >/dev/null 2>&1
 }
@@ -551,7 +579,7 @@ boot_vm_aarch64() {
     -drive file="$OVERLAY_QCOW2",if=virtio,format=qcow2 \
     -drive file="$SEED_ISO",if=virtio,media=cdrom,readonly=on,format=raw \
     -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
-    -device virtio-net-pci,netdev=net0 \
+    -device virtio-net-device,netdev=net0 \
     -nographic \
     -serial mon:stdio \
     -pidfile "$QEMU_PID_FILE" \
@@ -668,6 +696,8 @@ case "$command_name" in
     wait_for_ssh
     set_step "waiting for guest provisioning"
     wait_for_guest_provisioning
+    set_step "waiting for guest boot to settle"
+    wait_for_guest_settle
     set_step "generating guest build script"
     create_guest_build_script
     set_step "transferring repository"

@@ -177,6 +177,8 @@ EOF
   trap - EXIT INT TERM
 
   if command -v systemd-analyze >/dev/null 2>&1; then
-    systemd-analyze verify "$install_root/etc/systemd/system/centralssh.service" >/dev/null
+    if systemd-analyze --help 2>/dev/null | grep -q -- '--root='; then
+      systemd-analyze verify --root="$install_root" /etc/systemd/system/centralssh.service >/dev/null
+    fi
   fi
 fi

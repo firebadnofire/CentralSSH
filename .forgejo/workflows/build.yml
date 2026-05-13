@@ -12,6 +12,7 @@ on:
 env:
   RUST_TOOLCHAIN: "1.95.0"
   RUSTUP_INIT_URL: "https://sh.rustup.rs"
+  CI_LOG_ENDPOINT: "http://192.168.86.41:9000/ingest"
 
 jobs:
   linux-build-test:
@@ -21,6 +22,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -49,6 +53,9 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -69,6 +76,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-rust-toolchain.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-rust"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
           sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -79,6 +89,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-cache.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/configure-cache" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           eval "$(./ci/cache-env.sh linux-build-test release x86_64-unknown-linux-gnu /build-cache)"
           ./ci/install-sccache.sh
@@ -91,6 +104,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-validate.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/validate-version" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           cargo metadata --format-version 1 --locked >/dev/null
           repo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
@@ -109,6 +125,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/build-and-test" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           export PATH="$HOME/.cargo/bin:$PATH"
           eval "$(./ci/cache-env.sh linux-build-test release x86_64-unknown-linux-gnu /build-cache)"
@@ -129,6 +148,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -156,6 +178,9 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -176,6 +201,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-rust-toolchain.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-rust"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
           sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -185,6 +213,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-amd64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           export PATH="$HOME/.cargo/bin:$PATH"
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
@@ -199,6 +230,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -225,6 +259,9 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -245,6 +282,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-rust-toolchain.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-rust"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
           sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -254,6 +294,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-arm64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           export PATH="$HOME/.cargo/bin:$PATH"
           export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
@@ -270,6 +313,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -291,6 +337,9 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -311,6 +360,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-amd64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           chmod +x ./ci/freebsd-qemu-build.sh
           ./ci/freebsd-qemu-build.sh build amd64
@@ -323,6 +375,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/install-deps"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
@@ -345,6 +400,9 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/checkout"; cat "$log_file"; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
@@ -365,6 +423,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-aarch64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           chmod +x ./ci/freebsd-qemu-build.sh
           ./ci/freebsd-qemu-build.sh build aarch64

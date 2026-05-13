@@ -43,6 +43,7 @@ staging_root="$work_root/stage"
 archive_root="$work_root/archive/$app_name"
 rpm_topdir="$work_root/rpmbuild"
 source_root="$work_root/rpm-source/${app_name}-${version}"
+rpm_target_platform="${rpm_arch}-unknown-linux"
 
 rm -rf "$work_root"
 mkdir -p "$dist_dir" "$staging_root" "$archive_root"
@@ -127,7 +128,6 @@ Version:        $version
 Release:        1
 Summary:        OpenSSH-compatible hardened SSH gateway
 License:        GPL-3.0-only
-BuildArch:      $rpm_arch
 Source0:        %{name}-%{version}.tar.gz
 AutoReqProv:    no
 
@@ -154,6 +154,7 @@ EOF
 rpmbuild \
   --define "_topdir $rpm_topdir" \
   --define "_build_id_links none" \
+  --target "$rpm_target_platform" \
   -bb "$rpm_topdir/SPECS/${app_name}.spec"
 
 rpm_built=$(find "$rpm_topdir/RPMS" -type f -name '*.rpm' | head -n 1)

@@ -165,6 +165,7 @@ sudo make install
 - `freebsd-aarch64`: the same FreeBSD VM flow for `aarch64`.
 
 The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, and validation are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
+When a CI step fails, the workflow now ships the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87) so runner-local failures are preserved outside the ephemeral job log.
 
 ## Configuration
 
