@@ -59,6 +59,9 @@ init_paths() {
   resolve_arch_settings
   FREEBSD_QEMU_MEM=${FREEBSD_QEMU_MEM:-4096}
   FREEBSD_QEMU_CPUS=${FREEBSD_QEMU_CPUS:-4}
+  FREEBSD_SSH_WAIT_TIMEOUT=${FREEBSD_SSH_WAIT_TIMEOUT:-120}
+  FREEBSD_GUEST_PROVISION_TIMEOUT=${FREEBSD_GUEST_PROVISION_TIMEOUT:-600}
+  FREEBSD_GUEST_SETTLE_TIMEOUT=${FREEBSD_GUEST_SETTLE_TIMEOUT:-600}
   SSH_USER=${FREEBSD_VM_USER:-ci}
   SSH_HOST=127.0.0.1
 
@@ -93,6 +96,7 @@ init_paths() {
   export REPO_ARCHIVE CACHE_ARCHIVE SSH_HOST SSH_PORT SSH_USER REMOTE_HOME
   export FREEBSD_VERSION FREEBSD_ARCH FREEBSD_IMAGE_URL FREEBSD_CHECKSUM_URL
   export FREEBSD_IMAGE_SOURCE_FILENAME FREEBSD_QEMU_MEM FREEBSD_QEMU_CPUS
+  export FREEBSD_SSH_WAIT_TIMEOUT FREEBSD_GUEST_PROVISION_TIMEOUT FREEBSD_GUEST_SETTLE_TIMEOUT
   export FREEBSD_QEMU_SYSTEM FREEBSD_PACKAGE_SUFFIX CHECKSUM_FILE
 }
 
@@ -281,8 +285,13 @@ run_ssh() {
 }
 
 wait_for_ssh() {
+  max_attempts=$((FREEBSD_SSH_WAIT_TIMEOUT / 2))
+  if [ "$max_attempts" -lt 1 ]; then
+    max_attempts=1
+  fi
+
   i=1
-  while [ "$i" -le 180 ]; do
+  while [ "$i" -le "$max_attempts" ]; do
     if run_ssh "test -f '${CLOUDINIT_SSH_READY_FILE}' && echo ready" >/dev/null 2>&1; then
       echo "SSH is ready on port ${SSH_PORT}"
       return 0
@@ -291,17 +300,30 @@ wait_for_ssh() {
       echo "FreeBSD cloud-init provisioning failed; readiness marker was not created" >&2
       return 1
     fi
+    if [ -f "$QEMU_PID_FILE" ]; then
+      qemu_pid=$(cat "$QEMU_PID_FILE" 2>/dev/null || true)
+      if [ -n "${qemu_pid:-}" ] && ! kill -0 "$qemu_pid" 2>/dev/null; then
+        echo "QEMU exited before FreeBSD SSH became ready" >&2
+        tail -n 200 "$QEMU_LOG" >&2 || true
+        return 1
+      fi
+    fi
     sleep 2
     i=$((i + 1))
   done
-  echo "Timed out waiting for FreeBSD SSH" >&2
+  echo "Timed out waiting for FreeBSD SSH after ${FREEBSD_SSH_WAIT_TIMEOUT}s" >&2
   tail -n 200 "$QEMU_LOG" >&2 || true
   return 1
 }
 
 wait_for_guest_provisioning() {
+  max_attempts=$((FREEBSD_GUEST_PROVISION_TIMEOUT / 2))
+  if [ "$max_attempts" -lt 1 ]; then
+    max_attempts=1
+  fi
+
   i=1
-  while [ "$i" -le 300 ]; do
+  while [ "$i" -le "$max_attempts" ]; do
     if run_ssh "test -f '${CLOUDINIT_READY_FILE}' && test ! -f '${CLOUDINIT_FAILED_FILE}' && command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready" >/dev/null 2>&1; then
       echo "Guest provisioning completed"
       return 0
@@ -313,15 +335,20 @@ wait_for_guest_provisioning() {
     sleep 2
     i=$((i + 1))
   done
-  echo "Timed out waiting for FreeBSD guest provisioning to finish" >&2
+  echo "Timed out waiting for FreeBSD guest provisioning to finish after ${FREEBSD_GUEST_PROVISION_TIMEOUT}s" >&2
   return 1
 }
 
 wait_for_guest_settle() {
+  max_attempts=$((FREEBSD_GUEST_SETTLE_TIMEOUT / 5))
+  if [ "$max_attempts" -lt 1 ]; then
+    max_attempts=1
+  fi
+
   consecutive_ok=0
   last_boot_marker=
   i=1
-  while [ "$i" -le 120 ]; do
+  while [ "$i" -le "$max_attempts" ]; do
     boot_marker=$(run_ssh "test -f '${CLOUDINIT_READY_FILE}' && sysctl -n kern.boottime" 2>/dev/null || true)
     if [ -n "$boot_marker" ]; then
       if [ "$boot_marker" = "$last_boot_marker" ]; then
@@ -341,7 +368,7 @@ wait_for_guest_settle() {
     sleep 5
     i=$((i + 1))
   done
-  echo "Timed out waiting for FreeBSD guest boot state to settle" >&2
+  echo "Timed out waiting for FreeBSD guest boot state to settle after ${FREEBSD_GUEST_SETTLE_TIMEOUT}s" >&2
   return 1
 }
 

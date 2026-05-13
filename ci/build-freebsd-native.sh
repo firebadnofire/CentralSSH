@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "usage: $0 <version> <amd64>" >&2
+  echo "usage: $0 <version> <amd64|aarch64>" >&2
   exit 1
 }
 
@@ -10,25 +10,45 @@ version=${1:-}
 arch=${2:-}
 [ -n "$version" ] || usage
 [ -n "$arch" ] || usage
-[ "$arch" = "amd64" ] || {
-  echo "unsupported native FreeBSD architecture: $arch" >&2
-  exit 1
-}
 
 repo_root=${REPO_ROOT:-$PWD}
 dist_dir=${DIST_DIR:-"$repo_root/dist"}
 work_root=${WORK_ROOT:-"$repo_root/.ci-packaging/freebsd-$arch"}
 cache_root=$(./ci/select-cache-root.sh /build-cache "$repo_root/.ci-host-cache")
+host_pkg_abi=$(pkg config ABI)
+privileged_runtime=0
 sudo_cmd=
-if [ "$(id -u)" -ne 0 ]; then
-  sudo_cmd=sudo
+
+if [ "$(id -u)" -eq 0 ]; then
+  privileged_runtime=1
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  sudo_cmd="sudo -n"
+  privileged_runtime=1
 fi
 
-eval "$(./ci/cache-env.sh freebsd-native release x86_64-unknown-freebsd "$cache_root")"
+case "$arch" in
+  amd64)
+    target_triple=x86_64-unknown-freebsd
+    pkg_suffix=freebsd-amd64
+    pkg_arch=$host_pkg_abi
+    runtime_validation=1
+    ;;
+  aarch64)
+    target_triple=aarch64-unknown-freebsd
+    pkg_suffix=freebsd-aarch64
+    pkg_arch=$(printf '%s\n' "$host_pkg_abi" | awk -F: 'BEGIN { OFS=":" } { $NF = "aarch64"; print }')
+    runtime_validation=0
+    ;;
+  *)
+    echo "unsupported native FreeBSD architecture: $arch" >&2
+    exit 1
+    ;;
+esac
+
+eval "$(./ci/cache-env.sh freebsd-native release "$target_triple" "$cache_root")"
 export PATH="${CARGO_HOME}/bin:$PATH"
 
 app_name=centralssh
-pkg_suffix=freebsd-amd64
 pkg_file="$dist_dir/${app_name}-${version}-${pkg_suffix}.pkg"
 tarball="$dist_dir/${app_name}-${version}-${pkg_suffix}.tar.gz"
 stage_root="$work_root/stage"
@@ -41,8 +61,14 @@ rm -rf "$work_root"
 mkdir -p "$dist_dir" "$stage_root" "$archive_root" "$runtime_root"
 
 cargo fetch --locked
-cargo build --locked --release
-gmake install DESTDIR="$stage_root" PREFIX=/usr/local
+rustup target add "$target_triple"
+cargo build --locked --release --target "$target_triple"
+gmake install \
+  DESTDIR="$stage_root" \
+  PREFIX=/usr/local \
+  TARGET_TRIPLE="$target_triple" \
+  PROFILE=release \
+  CARGO_TARGET_DIR="$CARGO_TARGET_DIR"
 
 mkdir -p "$stage_root/etc/centralssh/users" "$stage_root/var/log/centralssh"
 touch "$stage_root/etc/centralssh/known_hosts" "$stage_root/var/log/centralssh/audit.jsonl"
@@ -59,7 +85,7 @@ comment: "OpenSSH-compatible hardened SSH gateway"
 maintainer: "root@localhost"
 www: "https://example.invalid/${app_name}"
 prefix: /
-arch: $(pkg config ABI)
+arch: ${pkg_arch}
 desc: |
   OpenSSH-compatible hardened SSH gateway
 EOF
@@ -103,35 +129,43 @@ touch "$runtime_etc/known_hosts" "$runtime_log/audit.jsonl"
 chmod 700 "$runtime_etc" "$runtime_log" "$runtime_keys"
 chmod 600 "$runtime_etc/config.toml" "$runtime_etc/servers.toml" "$runtime_etc/known_hosts" "$runtime_log/audit.jsonl"
 
-$sudo_cmd pkg add -f "$pkg_file"
-trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 service centralssh onestop >/dev/null 2>&1 || true' EXIT INT TERM
-$sudo_cmd env \
-  centralssh_enable=YES \
-  centralssh_config="$runtime_etc/config.toml" \
-  centralssh_servers="$runtime_etc/servers.toml" \
-  centralssh_known_hosts="$runtime_etc/known_hosts" \
-  centralssh_user_key_root="$runtime_keys" \
-  centralssh_audit_log="$runtime_log/audit.jsonl" \
-  centralssh_listen=127.0.0.1:47789 \
-  service centralssh onestart
-$sudo_cmd env \
-  centralssh_enable=YES \
-  centralssh_config="$runtime_etc/config.toml" \
-  centralssh_servers="$runtime_etc/servers.toml" \
-  centralssh_known_hosts="$runtime_etc/known_hosts" \
-  centralssh_user_key_root="$runtime_keys" \
-  centralssh_audit_log="$runtime_log/audit.jsonl" \
-  centralssh_listen=127.0.0.1:47789 \
-  service centralssh onestatus
-$sudo_cmd env \
-  centralssh_enable=YES \
-  centralssh_config="$runtime_etc/config.toml" \
-  centralssh_servers="$runtime_etc/servers.toml" \
-  centralssh_known_hosts="$runtime_etc/known_hosts" \
-  centralssh_user_key_root="$runtime_keys" \
-  centralssh_audit_log="$runtime_log/audit.jsonl" \
-  centralssh_listen=127.0.0.1:47789 \
-  service centralssh onestop
-trap - EXIT INT TERM
+if [ "$runtime_validation" -eq 1 ]; then
+  if [ "$privileged_runtime" -eq 1 ]; then
+    $sudo_cmd pkg add -f "$pkg_file"
+    trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 service centralssh onestop >/dev/null 2>&1 || true' EXIT INT TERM
+    $sudo_cmd env \
+      centralssh_enable=YES \
+      centralssh_config="$runtime_etc/config.toml" \
+      centralssh_servers="$runtime_etc/servers.toml" \
+      centralssh_known_hosts="$runtime_etc/known_hosts" \
+      centralssh_user_key_root="$runtime_keys" \
+      centralssh_audit_log="$runtime_log/audit.jsonl" \
+      centralssh_listen=127.0.0.1:47789 \
+      service centralssh onestart
+    $sudo_cmd env \
+      centralssh_enable=YES \
+      centralssh_config="$runtime_etc/config.toml" \
+      centralssh_servers="$runtime_etc/servers.toml" \
+      centralssh_known_hosts="$runtime_etc/known_hosts" \
+      centralssh_user_key_root="$runtime_keys" \
+      centralssh_audit_log="$runtime_log/audit.jsonl" \
+      centralssh_listen=127.0.0.1:47789 \
+      service centralssh onestatus
+    $sudo_cmd env \
+      centralssh_enable=YES \
+      centralssh_config="$runtime_etc/config.toml" \
+      centralssh_servers="$runtime_etc/servers.toml" \
+      centralssh_known_hosts="$runtime_etc/known_hosts" \
+      centralssh_user_key_root="$runtime_keys" \
+      centralssh_audit_log="$runtime_log/audit.jsonl" \
+      centralssh_listen=127.0.0.1:47789 \
+      service centralssh onestop
+    trap - EXIT INT TERM
+  else
+    echo "Skipping privileged FreeBSD amd64 runtime validation because non-interactive root access is unavailable" >&2
+  fi
+else
+  echo "Skipping runtime validation for cross-compiled FreeBSD ${arch} artifact" >&2
+fi
 
 printf '%s\n%s\n' "$pkg_file" "$tarball"

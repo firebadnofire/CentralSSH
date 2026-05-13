@@ -701,13 +701,13 @@ It does not fully provision per-user per-server outbound keys for you.
 
 ## 22.1 CI pipeline
 
-The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plus FreeBSD-only matrix from `CI.md`.
+The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plus FreeBSD-only matrix from `CI.md` and is triggered only by version-tag pushes.
 
 - Linux host validation runs `cargo test --locked` and a locked release build.
 - Linux packaging produces `centralssh-<version>-linux-amd64-systemd.tar.gz`, `centralssh-<version>-linux-arm64-systemd.tar.gz`, matching `.deb` packages, and matching `.rpm` packages.
 - FreeBSD amd64 packaging now runs on the native `freebsd` runner and produces `centralssh-<version>-freebsd-amd64.pkg` and `centralssh-<version>-freebsd-amd64.tar.gz`.
-- FreeBSD aarch64 packaging still runs in a real QEMU guest on the Linux runner and produces `centralssh-<version>-freebsd-aarch64.pkg` and `centralssh-<version>-freebsd-aarch64.tar.gz`.
-- The FreeBSD helper brings up SSH first, then waits separately for guest provisioning to complete before uploading the build payload. That split makes package-bootstrap failures observable instead of looking like a generic "SSH never came up" timeout.
+- FreeBSD aarch64 packaging now also runs on the native `freebsd` runner as a cross-build and produces `centralssh-<version>-freebsd-aarch64.pkg` and `centralssh-<version>-freebsd-aarch64.tar.gz`.
+- Native FreeBSD jobs never block on an interactive `sudo` prompt anymore. If non-interactive root access is unavailable, the pipeline skips the privileged amd64 runtime service check instead of hanging.
 - Linux and FreeBSD jobs run in parallel on their native runner classes unless an individual Linux packaging job explicitly depends on the locked host validation pass.
 - Failing CI steps upload a filtered tail of their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits.
 

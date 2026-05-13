@@ -1,10 +1,7 @@
 name: centralssh-build
 
 on:
-  pull_request:
   push:
-    branches:
-      - "**"
     tags:
       - "v*"
       - "V*"
@@ -305,11 +302,16 @@ jobs:
           exec > >(tee -a "$log_file") 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-amd64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           sudo_cmd=
-          if [ "$(id -u)" -ne 0 ]; then
-            sudo_cmd=sudo
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+            sudo_cmd="sudo -n"
           fi
-          $sudo_cmd pkg update -f
-          $sudo_cmd pkg install -y ca_root_nss curl git gmake jq rustup-init
+          if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+            $sudo_cmd pkg update -f
+            $sudo_cmd pkg install -y ca_root_nss curl git gmake
+          fi
+          command -v curl >/dev/null 2>&1
+          command -v git >/dev/null 2>&1
+          command -v gmake >/dev/null 2>&1
 
       - name: Check out repository
         shell: bash
@@ -353,7 +355,7 @@ jobs:
           ./ci/build-freebsd-native.sh "$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)" amd64
 
   freebsd-aarch64:
-    runs-on: ubuntu-22.04
+    runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -362,21 +364,17 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
           exec > >(tee -a "$log_file") 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "freebsd-aarch64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
-          apt_get="apt-get"
-          if command -v sudo >/dev/null 2>&1; then
-            apt_get="sudo apt-get"
+          sudo_cmd=
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+            sudo_cmd="sudo -n"
           fi
-          $apt_get update
-          $apt_get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            genisoimage \
-            git \
-            openssh-client \
-            qemu-efi-aarch64 \
-            qemu-system-arm \
-            qemu-utils \
-            xz-utils
+          if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+            $sudo_cmd pkg update -f
+            $sudo_cmd pkg install -y ca_root_nss curl git gmake
+          fi
+          command -v curl >/dev/null 2>&1
+          command -v git >/dev/null 2>&1
+          command -v gmake >/dev/null 2>&1
 
       - name: Check out repository
         shell: bash
@@ -411,5 +409,10 @@ jobs:
           exec > >(tee -a "$log_file") 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-aarch64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
-          chmod +x ./ci/freebsd-qemu-build.sh
-          ./ci/freebsd-qemu-build.sh build aarch64
+          if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
+            fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
+            sh /tmp/rustup.sh -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN"
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          chmod +x ./ci/build-freebsd-native.sh
+          ./ci/build-freebsd-native.sh "$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)" aarch64

@@ -156,13 +156,13 @@ sudo make install
 
 ## Forgejo CI
 
-`.forgejo/workflows/build.yml` now runs the project-specific CentralSSH build matrix described in `CI.md` for Linux and FreeBSD only.
+`.forgejo/workflows/build.yml` now runs the project-specific CentralSSH build matrix described in `CI.md` for Linux and FreeBSD only, and it triggers only on version-tag pushes.
 
 - `linux-build-test`: locked host build plus unit tests.
 - `linux-packages-amd64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation and Linux runtime smoke checks.
 - `linux-packages-arm64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation.
-- `freebsd-amd64`: native FreeBSD runner build that emits `.pkg` and `.tar.gz`, then installs and service-checks the package on the FreeBSD runner itself.
-- `freebsd-aarch64`: Linux-hosted QEMU build for `aarch64` that keeps real FreeBSD guest packaging and validation.
+- `freebsd-amd64`: native FreeBSD runner build that emits `.pkg` and `.tar.gz`, then installs and service-checks the package on the FreeBSD runner itself when non-interactive root access is available.
+- `freebsd-aarch64`: native FreeBSD runner cross-build that emits `aarch64` `.pkg` and `.tar.gz` artifacts without the unstable Linux-hosted QEMU boot path.
 
 The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, and validation are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
 When a CI step fails, the workflow now ships a filtered tail of the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87) so runner-local failures are preserved outside the ephemeral job log without flooding the endpoint with routine Cargo download chatter.
