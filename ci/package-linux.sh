@@ -14,6 +14,7 @@ arch=${2:-}
 repo_root=${REPO_ROOT:-$PWD}
 dist_dir=${DIST_DIR:-"$repo_root/dist"}
 work_root=${WORK_ROOT:-"$repo_root/.ci-packaging/linux-$arch"}
+target_root=${CARGO_TARGET_DIR:-"$repo_root/target"}
 
 case "$arch" in
   amd64)
@@ -33,7 +34,7 @@ case "$arch" in
 esac
 
 app_name=centralssh
-release_bin="$repo_root/target/$target_triple/release/$app_name"
+release_bin="$target_root/$target_triple/release/$app_name"
 release_tool="$repo_root/tools/cssh-keyscan"
 tarball="$dist_dir/${app_name}-${version}-linux-${arch}-systemd.tar.gz"
 deb_file="$dist_dir/${app_name}-${version}-debian-${deb_arch}.deb"
@@ -44,7 +45,14 @@ rpm_topdir="$work_root/rpmbuild"
 source_root="$work_root/rpm-source/${app_name}-${version}"
 
 rm -rf "$work_root"
-mkdir -p "$dist_dir" "$staging_root" "$archive_root" "$rpm_topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+mkdir -p "$dist_dir" "$staging_root" "$archive_root"
+mkdir -p \
+  "$rpm_topdir/BUILD" \
+  "$rpm_topdir/BUILDROOT" \
+  "$rpm_topdir/RPMS" \
+  "$rpm_topdir/SOURCES" \
+  "$rpm_topdir/SPECS" \
+  "$rpm_topdir/SRPMS"
 
 cargo build --locked --release --target "$target_triple"
 test -x "$release_bin"

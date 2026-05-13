@@ -21,8 +21,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends \
             ca-certificates \
             curl \
             gcc \
@@ -124,8 +128,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends \
             ca-certificates \
             curl \
             gcc \
@@ -189,8 +197,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends \
             ca-certificates \
             curl \
             gcc \
@@ -255,8 +267,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends \
             ca-certificates \
             curl \
             genisoimage \
@@ -305,8 +321,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends \
             ca-certificates \
             curl \
             genisoimage \
