@@ -294,7 +294,7 @@ Authorization policy:
 - `allow_remote_forwarding=false` rejects `tcpip-forward` and `cancel-tcpip-forward` requests before any backend listener is created or touched.
 - `allow_sftp=false` rejects `subsystem` requests where the subsystem name is exactly `sftp`.
 - `allow_scp=false` rejects SCP-style `exec` requests after conservative command parsing detects `scp` source or sink mode flags such as `-f` or `-t`. It does not treat arbitrary `exec` requests as SCP.
-- When SFTP or SCP is denied after successful authentication and target selection, CentralSSH disconnects with a user-facing message such as `SFTP: access denied` or `SCP: access denied` instead of leaving the client with only a generic channel failure.
+- When SFTP or SCP is denied after successful authentication and target selection, CentralSSH accepts the request long enough to emit explicit stderr text such as `sftp: access denied` or `scp: access denied`, then exits the channel nonzero instead of leaving the client with only a generic channel failure.
 
 Notes:
 

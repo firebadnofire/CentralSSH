@@ -147,45 +147,45 @@ impl GatewayHandler {
         }
     }
 
-    fn password_prompt(username: &str) -> Auth {
-        Self::keyboard_prompt(format!("User: {username}\n"), "Password: ", false)
+    fn password_prompt(_username: &str) -> Auth {
+        Self::keyboard_prompt(String::new(), "Password: ", false)
     }
 
-    fn new_password_prompt(username: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("User: {username}\n");
+    fn new_password_prompt(_username: &str, message: Option<&str>) -> Auth {
+        let mut instructions = String::new();
         if let Some(message) = message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str("\nPassword change required before target access.\n");
         Self::keyboard_prompt(instructions, "New password: ", false)
     }
 
-    fn confirm_password_prompt(username: &str) -> Auth {
+    fn confirm_password_prompt(_username: &str) -> Auth {
         Self::keyboard_prompt(
-            format!("User: {username}\n\nConfirm your new password.\n"),
+            "Confirm your new password.\n".to_string(),
             "Confirm password: ",
             false,
         )
     }
 
-    fn totp_prompt(username: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("User: {username}\n");
+    fn totp_prompt(_username: &str, message: Option<&str>) -> Auth {
+        let mut instructions = String::new();
         if let Some(message) = message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str("\nEnter the current TOTP code.\n");
         Self::keyboard_prompt(instructions, "TOTP Code: ", false)
     }
 
-    fn enrollment_prompt(username: &str, secret: &str, url: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("User: {username}\n");
+    fn enrollment_prompt(_username: &str, secret: &str, url: &str, message: Option<&str>) -> Auth {
+        let mut instructions = String::new();
         if let Some(message) = message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str(
@@ -263,10 +263,10 @@ Use the plaintext secret or URI above.\n\n"
             }
         };
         let hide_proxy_ip = self.state.config_store.paths.hide_proxy_ip;
-        let mut instructions = format!("User: {username}\n");
+        let mut instructions = String::new();
         if let Some(message) = error_message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str("\nSelect a server:\n\n");
@@ -416,21 +416,24 @@ Use the plaintext secret or URI above.\n\n"
     }
 
     fn denied_protocol_message(protocol: &str) -> String {
-        format!("{protocol}: access denied")
+        format!("{}: access denied", protocol.to_ascii_lowercase())
     }
 
-    fn deny_protocol_and_disconnect(
+    fn deny_protocol_and_close(
         &self,
         session: &mut Session,
         channel: ChannelId,
         protocol: &str,
     ) -> std::result::Result<(), russh::Error> {
-        let _ = session.channel_failure(channel);
-        session.disconnect(
-            russh::Disconnect::ByApplication,
-            &Self::denied_protocol_message(protocol),
-            "en",
+        session.channel_success(channel)?;
+        session.extended_data(
+            channel,
+            1,
+            bytes::Bytes::from(format!("{}\n", Self::denied_protocol_message(protocol))),
         )?;
+        session.exit_status_request(channel, 1)?;
+        session.eof(channel)?;
+        session.close(channel)?;
         Ok(())
     }
 
@@ -1971,7 +1974,7 @@ impl server::Handler for GatewayHandler {
                 &format!("scp disabled by authorization policy ({scp_mode})"),
             )
             .await;
-            return self.deny_protocol_and_disconnect(session, channel, "SCP");
+            return self.deny_protocol_and_close(session, channel, "scp");
         }
 
         match proxy_session.exec(channel, true, data.to_vec()).await {
@@ -2018,7 +2021,7 @@ impl server::Handler for GatewayHandler {
                 "sftp disabled by authorization policy",
             )
             .await;
-            return self.deny_protocol_and_disconnect(session, channel, "SFTP");
+            return self.deny_protocol_and_close(session, channel, "sftp");
         }
 
         match proxy_session
@@ -2690,12 +2693,20 @@ mod tests {
     fn denied_protocol_message_is_user_facing() {
         assert_eq!(
             GatewayHandler::denied_protocol_message("SFTP"),
-            "SFTP: access denied"
+            "sftp: access denied"
         );
         assert_eq!(
             GatewayHandler::denied_protocol_message("SCP"),
-            "SCP: access denied"
+            "scp: access denied"
         );
+    }
+
+    #[test]
+    fn password_prompt_omits_redundant_user_label() {
+        let Auth::Partial { instructions, .. } = GatewayHandler::password_prompt("alice") else {
+            panic!("expected partial auth prompt");
+        };
+        assert!(instructions.is_empty());
     }
 
     #[test]
