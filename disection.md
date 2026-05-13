@@ -31,7 +31,7 @@ Support files:
 - `Makefile`: build/install entrypoints and packaging install behavior.
 - `examples/*.toml`: sample runtime configuration.
 - `tools/cssh-keyscan`: helper for building target host trust entries.
-- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI and FreeBSD QEMU build helpers.
+- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI for Linux amd64 or arm64 packaging plus FreeBSD amd64 or aarch64 QEMU guest packaging and validation helpers.
 - `packaging/`: FreeBSD rc and systemd service packaging.
 - `Dockerfile`, `compose.yaml`, `.dockerignore`, and `container/`: container build, runtime, and example deployment artifacts.
 - `container.md`: container operations guide for Docker and Podman deployments.

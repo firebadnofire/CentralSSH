@@ -60,6 +60,73 @@ A production release pipeline should prove that:
 
 ---
 
+# Centralized CI logging
+
+CI systems should support centralized remote log ingestion where practical.
+
+Centralized logs are useful for:
+
+* preserving logs after runner destruction
+* debugging ephemeral VM failures
+* long-running integration testing
+* preserving runtime validation output
+* retaining logs beyond CI platform retention windows
+* debugging agentic coding workflows
+
+The recommended logging architecture is intentionally lightweight.
+
+Preferred topology:
+
+```text
+CI runner
+→ Vector HTTP ingestion
+→ structured JSON logs
+→ append-only log storage
+```
+
+Current internal logging endpoint:
+
+```text
+http://192.168.86.41:9000/ingest
+```
+
+The logging endpoint is intended for trusted internal infrastructure on the local LAN, all known runners exist on the same trusted LAN.
+
+Agentic coding systems operating inside CI environments should use the centralized logging endpoint whenever possible.
+
+This is especially important for:
+
+* long-running autonomous repair loops
+* iterative compile/test/fix workflows
+* VM-based integration testing
+* ephemeral runner debugging
+* preserving interactive runtime validation output
+
+Recommended upload pattern:
+
+```sh
+make test 2>&1 | curl \
+  --data-binary @- \
+  http://192.168.86.41:9000/ingest
+```
+
+Structured logging is preferred over plain text where practical.
+
+Do not expose internal logging endpoints publicly unless authentication, transport security, rate limiting, and retention policies are implemented appropriately.
+
+CI logs should be treated as potentially sensitive operational data because they may contain:
+
+* stack traces
+* environment details
+* build metadata
+* tokens
+* credentials
+* deployment information
+
+The logging system should prioritize simplicity, durability, and operational debugging usefulness over unnecessary complexity.
+
+The logging system should also log real runs of the CI system, clearly marked in the logs.
+
 # Runner model
 
 The globally available runners are not all the same kind of environment.

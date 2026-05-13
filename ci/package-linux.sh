@@ -61,6 +61,7 @@ test -x "$release_tool"
 make install \
   DESTDIR="$staging_root" \
   PREFIX=/usr/local \
+  CARGO_TARGET_DIR="$target_root" \
   TARGET_TRIPLE="$target_triple" \
   PROFILE=release \
   SYSTEMD_UNIT_DIR=/etc/systemd/system

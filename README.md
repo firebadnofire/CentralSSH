@@ -154,6 +154,18 @@ sudo make install
 - Installs FreeBSD rc script on FreeBSD.
 - Installs systemd unit on non-FreeBSD hosts.
 
+## Forgejo CI
+
+`.forgejo/workflows/build.yml` now runs the project-specific CentralSSH build matrix described in `CI.md` for Linux and FreeBSD only.
+
+- `linux-build-test`: locked host build plus unit tests.
+- `linux-packages-amd64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation and Linux runtime smoke checks.
+- `linux-packages-arm64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation.
+- `freebsd-amd64`: real FreeBSD VM build that emits `.pkg` and `.tar.gz`, then installs and service-checks the package inside the guest.
+- `freebsd-aarch64`: the same FreeBSD VM flow for `aarch64`.
+
+The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, and validation are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
+
 ## Configuration
 
 CentralSSH reads config from TOML files.

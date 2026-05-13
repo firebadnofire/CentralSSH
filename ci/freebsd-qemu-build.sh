@@ -10,6 +10,7 @@ command_name=${1:-}
 [ -n "$command_name" ] || usage
 FREEBSD_ARCH=${FREEBSD_ARCH:-${2:-amd64}}
 CURRENT_STEP=initializing
+CLOUDINIT_SSH_READY_FILE=/var/tmp/centralssh-sshd-ready
 CLOUDINIT_READY_FILE=/var/tmp/centralssh-cloudinit-ready
 CLOUDINIT_FAILED_FILE=/var/tmp/centralssh-cloudinit-failed
 
@@ -232,12 +233,13 @@ write_files:
     content: |
       #!/bin/sh
       set -eu
-      rm -f "${CLOUDINIT_READY_FILE}" "${CLOUDINIT_FAILED_FILE}"
+      rm -f "${CLOUDINIT_SSH_READY_FILE}" "${CLOUDINIT_READY_FILE}" "${CLOUDINIT_FAILED_FILE}"
       trap 'rc=\$?; if [ "\$rc" -ne 0 ]; then echo "\$rc" > "${CLOUDINIT_FAILED_FILE}"; fi; exit "\$rc"' EXIT
-      pkg bootstrap -yf
-      pkg install -y sudo ca_root_nss
       sysrc sshd_enable=YES
       service sshd start || service sshd restart
+      touch "${CLOUDINIT_SSH_READY_FILE}"
+      pkg bootstrap -yf
+      pkg install -y sudo ca_root_nss
       touch "${CLOUDINIT_READY_FILE}"
 runcmd:
   - /var/tmp/centralssh-cloudinit-provision.sh
@@ -280,8 +282,8 @@ run_ssh() {
 
 wait_for_ssh() {
   i=1
-  while [ "$i" -le 150 ]; do
-    if run_ssh "test -f '${CLOUDINIT_READY_FILE}' && test ! -f '${CLOUDINIT_FAILED_FILE}' && command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready" >/dev/null 2>&1; then
+  while [ "$i" -le 180 ]; do
+    if run_ssh "test -f '${CLOUDINIT_SSH_READY_FILE}' && echo ready" >/dev/null 2>&1; then
       echo "SSH is ready on port ${SSH_PORT}"
       return 0
     fi
@@ -294,6 +296,24 @@ wait_for_ssh() {
   done
   echo "Timed out waiting for FreeBSD SSH" >&2
   tail -n 200 "$QEMU_LOG" >&2 || true
+  return 1
+}
+
+wait_for_guest_provisioning() {
+  i=1
+  while [ "$i" -le 300 ]; do
+    if run_ssh "test -f '${CLOUDINIT_READY_FILE}' && test ! -f '${CLOUDINIT_FAILED_FILE}' && command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready" >/dev/null 2>&1; then
+      echo "Guest provisioning completed"
+      return 0
+    fi
+    if run_ssh "test -f '${CLOUDINIT_FAILED_FILE}'" >/dev/null 2>&1; then
+      echo "FreeBSD cloud-init provisioning failed after SSH became available" >&2
+      return 1
+    fi
+    sleep 2
+    i=$((i + 1))
+  done
+  echo "Timed out waiting for FreeBSD guest provisioning to finish" >&2
   return 1
 }
 
@@ -312,7 +332,7 @@ dump_guest_debug() {
   echo "---- guest pkg state ----" >&2
   run_ssh "pkg -vv || sudo pkg -vv" >&2 || true
   echo "---- guest cloud-init markers ----" >&2
-  run_ssh "ls -l '${CLOUDINIT_READY_FILE}' '${CLOUDINIT_FAILED_FILE}' 2>/dev/null || true" >&2 || true
+  run_ssh "ls -l '${CLOUDINIT_SSH_READY_FILE}' '${CLOUDINIT_READY_FILE}' '${CLOUDINIT_FAILED_FILE}' 2>/dev/null || true" >&2 || true
   echo "---- guest cloud-init.log ----" >&2
   run_ssh "sudo tail -n 200 /var/log/cloud-init.log" >&2 || true
   echo "---- guest cloud-init-output.log ----" >&2
@@ -644,8 +664,10 @@ case "$command_name" in
     trap cleanup EXIT INT TERM
     set_step "booting FreeBSD VM"
     boot_vm
-    set_step "waiting for cloud-init readiness"
+    set_step "waiting for SSH readiness"
     wait_for_ssh
+    set_step "waiting for guest provisioning"
+    wait_for_guest_provisioning
     set_step "generating guest build script"
     create_guest_build_script
     set_step "transferring repository"

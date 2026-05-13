@@ -699,6 +699,15 @@ Important note:
 
 It does not fully provision per-user per-server outbound keys for you.
 
+## 22.1 CI pipeline
+
+The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plus FreeBSD-only matrix from `CI.md`.
+
+- Linux host validation runs `cargo test --locked` and a locked release build.
+- Linux packaging produces `centralssh-<version>-linux-amd64-systemd.tar.gz`, `centralssh-<version>-linux-arm64-systemd.tar.gz`, matching `.deb` packages, and matching `.rpm` packages.
+- FreeBSD packaging runs in a real QEMU guest and produces `centralssh-<version>-freebsd-amd64.pkg`, `centralssh-<version>-freebsd-amd64.tar.gz`, `centralssh-<version>-freebsd-aarch64.pkg`, and `centralssh-<version>-freebsd-aarch64.tar.gz`.
+- The FreeBSD helper brings up SSH first, then waits separately for guest provisioning to complete before uploading the build payload. That split makes package-bootstrap failures observable instead of looking like a generic "SSH never came up" timeout.
+
 ## 23. Recommended production setup
 
 1. Build and install CentralSSH.
