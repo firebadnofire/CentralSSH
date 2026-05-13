@@ -16,6 +16,8 @@ dist_dir=${DIST_DIR:-"$repo_root/dist"}
 work_root=${WORK_ROOT:-"$repo_root/.ci-packaging/freebsd-$arch"}
 cache_root=$(./ci/select-cache-root.sh /build-cache "$repo_root/.ci-host-cache")
 host_pkg_abi=$(pkg config ABI)
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+export PATH
 privileged_runtime=0
 sudo_cmd=
 

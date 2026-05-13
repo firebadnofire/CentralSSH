@@ -298,6 +298,8 @@ jobs:
         shell: sh
         run: |
           set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-install-deps.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
@@ -320,6 +322,8 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-checkout.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
@@ -344,6 +348,8 @@ jobs:
         shell: sh
         run: |
           set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
@@ -364,6 +370,8 @@ jobs:
         shell: sh
         run: |
           set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
@@ -386,6 +394,8 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-checkout.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
@@ -410,6 +420,8 @@ jobs:
         shell: sh
         run: |
           set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
