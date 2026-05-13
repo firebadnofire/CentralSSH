@@ -65,15 +65,25 @@ mkdir -p "$dist_dir" "$stage_root" "$archive_root" "$runtime_root"
 cargo fetch --locked
 rustup target add "$target_triple"
 cargo build --locked --release --target "$target_triple"
-gmake install \
-  DESTDIR="$stage_root" \
-  PREFIX=/usr/local \
-  TARGET_TRIPLE="$target_triple" \
-  PROFILE=release \
-  CARGO_TARGET_DIR="$CARGO_TARGET_DIR"
 
-mkdir -p "$stage_root/etc/centralssh/users" "$stage_root/var/log/centralssh"
-touch "$stage_root/etc/centralssh/known_hosts" "$stage_root/var/log/centralssh/audit.jsonl"
+install -d "$stage_root/usr/local/sbin"
+install -m 0755 "$CARGO_TARGET_DIR/$target_triple/release/centralssh" "$stage_root/usr/local/sbin/centralssh"
+install -d "$stage_root/usr/local/bin"
+install -m 0755 "$repo_root/tools/cssh-keyscan" "$stage_root/usr/local/bin/cssh-keyscan"
+install -d -m 0700 "$stage_root/etc/centralssh/users"
+install -d -m 0700 "$stage_root/var/log/centralssh"
+install -d -m 0700 "$stage_root/etc/centralssh"
+install -m 0600 "$repo_root/examples/config.toml" "$stage_root/etc/centralssh/config.toml"
+install -m 0600 "$repo_root/examples/servers.toml" "$stage_root/etc/centralssh/servers.toml"
+if [ ! -f "$stage_root/etc/centralssh/known_hosts" ]; then
+  install -m 0600 /dev/null "$stage_root/etc/centralssh/known_hosts"
+fi
+if [ ! -f "$stage_root/var/log/centralssh/audit.jsonl" ]; then
+  install -m 0600 /dev/null "$stage_root/var/log/centralssh/audit.jsonl"
+fi
+install -d "$stage_root/usr/local/etc/rc.d"
+install -m 0555 "$repo_root/packaging/freebsd/centralssh" "$stage_root/usr/local/etc/rc.d/centralssh"
+
 chmod 0700 "$stage_root/etc/centralssh/users" "$stage_root/var/log/centralssh"
 
 find "$stage_root" -type f | sed "s|^$stage_root/||" | LC_ALL=C sort > "$plist_path"

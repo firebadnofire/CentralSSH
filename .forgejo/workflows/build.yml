@@ -295,7 +295,7 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: sh
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -351,14 +351,13 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git gmake
+            $sudo_cmd pkg install -y ca_root_nss curl git
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
-          command -v gmake >/dev/null 2>&1
 
       - name: Check out repository
-        shell: sh
+        shell: bash
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -399,7 +398,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD amd64 artifacts
-        shell: sh
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -421,7 +420,7 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: sh
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -477,14 +476,13 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git gmake
+            $sudo_cmd pkg install -y ca_root_nss curl git
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
-          command -v gmake >/dev/null 2>&1
 
       - name: Check out repository
-        shell: sh
+        shell: bash
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -525,7 +523,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD aarch64 artifacts
-        shell: sh
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
