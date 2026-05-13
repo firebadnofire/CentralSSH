@@ -295,7 +295,7 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: /usr/local/bin/bash
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -357,7 +357,7 @@ jobs:
           command -v git >/dev/null 2>&1
 
       - name: Check out repository
-        shell: /usr/local/bin/bash
+        shell: bash
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -398,7 +398,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD amd64 artifacts
-        shell: /usr/local/bin/bash
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -452,7 +452,7 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: /usr/local/bin/bash
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -514,7 +514,7 @@ jobs:
           command -v git >/dev/null 2>&1
 
       - name: Check out repository
-        shell: /usr/local/bin/bash
+        shell: bash
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -555,7 +555,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD aarch64 artifacts
-        shell: /usr/local/bin/bash
+        shell: bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
