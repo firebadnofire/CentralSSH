@@ -16,6 +16,7 @@ dist_dir=${DIST_DIR:-"$repo_root/dist"}
 work_root=${WORK_ROOT:-"$repo_root/.ci-packaging/freebsd-$arch"}
 cache_root=$(./ci/select-cache-root.sh /build-cache "$repo_root/.ci-host-cache")
 host_pkg_abi=$(pkg config ABI)
+runner_cargo_home=${HOME}/.cargo
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 export PATH
 privileged_runtime=0
@@ -34,12 +35,16 @@ case "$arch" in
     pkg_suffix=freebsd-amd64
     pkg_arch=$host_pkg_abi
     runtime_validation=1
+    cargo_toolchain=
+    cargo_build_std=
     ;;
   aarch64)
     target_triple=aarch64-unknown-freebsd
     pkg_suffix=freebsd-aarch64
     pkg_arch=$(printf '%s\n' "$host_pkg_abi" | awk -F: 'BEGIN { OFS=":" } { $NF = "aarch64"; print }')
     runtime_validation=0
+    cargo_toolchain=+nightly
+    cargo_build_std=-Zbuild-std=std,panic_abort
     ;;
   *)
     echo "unsupported native FreeBSD architecture: $arch" >&2
@@ -48,6 +53,9 @@ case "$arch" in
 esac
 
 eval "$(./ci/cache-env.sh freebsd-native release "$target_triple" "$cache_root")"
+if [ "$arch" = "aarch64" ] && [ -x "$runner_cargo_home/bin/rustup" ]; then
+  CARGO_HOME=$runner_cargo_home
+fi
 export PATH="${CARGO_HOME}/bin:$PATH"
 
 app_name=centralssh
@@ -59,12 +67,25 @@ runtime_root="$work_root/runtime"
 manifest_path="$work_root/+MANIFEST"
 plist_path="$work_root/pkg-plist"
 
-rm -rf "$work_root"
+if [ -e "$work_root" ]; then
+  if ! rm -rf "$work_root" 2>/dev/null; then
+    $sudo_cmd rm -rf "$work_root"
+  fi
+fi
 mkdir -p "$dist_dir" "$stage_root" "$archive_root" "$runtime_root"
 
-cargo fetch --locked
-rustup target add "$target_triple"
-cargo build --locked --release --target "$target_triple"
+if [ "$arch" = "aarch64" ]; then
+  rustup toolchain install nightly --profile minimal
+  rustup component add rust-src --toolchain nightly
+  export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=/usr/local/freebsd-sysroot/aarch64/bin/cc
+  export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_AR=/usr/bin/llvm-ar
+  export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_RANLIB=/usr/bin/llvm-ranlib
+else
+  rustup target add "$target_triple"
+fi
+
+cargo ${cargo_toolchain:+$cargo_toolchain} fetch --locked
+cargo ${cargo_toolchain:+$cargo_toolchain} build ${cargo_build_std:+$cargo_build_std} --locked --release --target "$target_triple"
 
 install -d "$stage_root/usr/local/sbin"
 install -m 0755 "$CARGO_TARGET_DIR/$target_triple/release/centralssh" "$stage_root/usr/local/sbin/centralssh"
@@ -119,6 +140,7 @@ tar -tzf "$tarball" >/dev/null
 runtime_etc="$runtime_root/etc-centralssh"
 runtime_log="$runtime_root/var-log-centralssh"
 runtime_keys="$runtime_root/var-lib-centralssh-keys"
+rc_script="/usr/local/etc/rc.d/centralssh"
 mkdir -p "$runtime_etc" "$runtime_log" "$runtime_keys"
 cat > "$runtime_etc/config.toml" <<EOF
 [[users]]
@@ -141,10 +163,14 @@ touch "$runtime_etc/known_hosts" "$runtime_log/audit.jsonl"
 chmod 700 "$runtime_etc" "$runtime_log" "$runtime_keys"
 chmod 600 "$runtime_etc/config.toml" "$runtime_etc/servers.toml" "$runtime_etc/known_hosts" "$runtime_log/audit.jsonl"
 
+if [ "$privileged_runtime" -eq 1 ]; then
+  $sudo_cmd chown -R root:wheel "$runtime_root"
+fi
+
 if [ "$runtime_validation" -eq 1 ]; then
   if [ "$privileged_runtime" -eq 1 ]; then
     $sudo_cmd pkg add -f "$pkg_file"
-    trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 service centralssh onestop >/dev/null 2>&1 || true' EXIT INT TERM
+    trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 "$rc_script" onestop >/dev/null 2>&1 || true' EXIT INT TERM
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -153,7 +179,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
-      service centralssh onestart
+      "$rc_script" onestart
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -162,7 +188,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
-      service centralssh onestatus
+      "$rc_script" onestatus
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -171,7 +197,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
-      service centralssh onestop
+      "$rc_script" onestop
     trap - EXIT INT TERM
   else
     echo "Skipping privileged FreeBSD amd64 runtime validation because non-interactive root access is unavailable" >&2

@@ -295,7 +295,7 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: bash
+        shell: /usr/local/bin/bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -351,13 +351,13 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
 
       - name: Check out repository
-        shell: bash
+        shell: /usr/local/bin/bash
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -398,7 +398,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD amd64 artifacts
-        shell: bash
+        shell: /usr/local/bin/bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -406,7 +406,39 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then if [ -x ./ci/post-ci-log.sh ]; then ./ci/post-ci-log.sh "freebsd-amd64/build-and-validate" error "$log_file"; fi; fi' EXIT
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if [ -x ./ci/post-ci-log.sh ]; then
+              ./ci/post-ci-log.sh "$context" error "$log_file" >/dev/null 2>&1 || true
+            elif command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/build-and-validate"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
             fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
@@ -420,7 +452,7 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: bash
+        shell: /usr/local/bin/bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -482,7 +514,7 @@ jobs:
           command -v git >/dev/null 2>&1
 
       - name: Check out repository
-        shell: bash
+        shell: /usr/local/bin/bash
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -523,7 +555,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD aarch64 artifacts
-        shell: bash
+        shell: /usr/local/bin/bash
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -531,7 +563,39 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64.log"
           : > "$log_file"
           exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then if [ -x ./ci/post-ci-log.sh ]; then ./ci/post-ci-log.sh "freebsd-aarch64/build-and-validate" error "$log_file"; fi; fi' EXIT
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if [ -x ./ci/post-ci-log.sh ]; then
+              ./ci/post-ci-log.sh "$context" error "$log_file" >/dev/null 2>&1 || true
+            elif command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/build-and-validate"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
             fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
