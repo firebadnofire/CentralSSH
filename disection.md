@@ -486,7 +486,7 @@ The session proxy keeps a per-frontend-channel map of backend session write hand
 
 - `BackendSessionAction`
 
-Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Stock OpenSSH `sftp` and `scp` clients exit when their subsystem or exec channel closes, so those channels close normally instead of attempting an inline gateway menu.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Stock OpenSSH `sftp` and `scp` clients exit when their subsystem or exec channel closes, so those channels close normally instead of attempting an inline gateway menu. That inline menu now consumes cursor-control escape sequences instead of echoing them back into the selection prompt, so arrow keys do not visibly move the cursor across the line.
 
 ### 11.4 Raw channel bridge structure
 
@@ -511,7 +511,7 @@ On fatal relay failure it:
 2. disconnects the target SSH client connection
 3. logs `proxy_end` as failure
 
-If the session drops cleanly, `Drop` on `ProxySession` logs `proxy_end` as success.
+Per-channel request denials such as a rejected subsystem request are relayed as channel failure plus channel close, not escalated into a whole-connection disconnect by themselves. If the session drops cleanly, `Drop` on `ProxySession` logs `proxy_end` as success.
 
 ## 12. Reload behavior
 

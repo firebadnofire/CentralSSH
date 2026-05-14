@@ -224,6 +224,7 @@ Fields:
 - `settings.user_key_root`: optional path override.
 - `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
 - `settings.drop_to_menu`: optional bool, default `false`. When `true`, a completed interactive shell returns to the server menu on the same shell channel. `sftp` and `scp` do not support an inline post-exit gateway menu with stock OpenSSH clients, so those channels close normally. Choosing `Q` from either selection menu disconnects the SSH session instead of restarting authentication.
+- The inline post-shell menu ignores cursor-control escape sequences such as arrow keys instead of echoing them into the selection line.
 - `settings.hide_proxy_ip`: optional bool, default `false`. When `true`, the logged-in server-selection menu shows only logical server names and omits the configured endpoint IP or hostname from the rendered list.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.

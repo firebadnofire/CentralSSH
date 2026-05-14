@@ -174,6 +174,15 @@ pub struct SessionChannelState {
     pub request: SessionRequest,
     pub menu_active: bool,
     pub input_buffer: Vec<u8>,
+    pub menu_escape_state: MenuEscapeState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MenuEscapeState {
+    #[default]
+    None,
+    SawEscape,
+    SawCsi,
 }
 
 #[derive(Debug, Clone, Default)]
