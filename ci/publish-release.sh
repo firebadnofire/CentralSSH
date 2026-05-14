@@ -2,12 +2,19 @@
 set -eu
 umask 022
 
+usage() {
+  echo "usage: $0 <artifact>..." >&2
+  exit 1
+}
+
+[ "$#" -gt 0 ] || usage
+
 repository=${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}
 tag=${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}
 api_url=${FORGEJO_API_URL:-${GITHUB_API_URL:-}}
 token=${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}
-work_dir=${RELEASE_WORK_DIR:-${RUNNER_TEMP:-/tmp}/centralssh-release-publish}
 repo_root=${REPO_ROOT:-$PWD}
+work_dir=${RELEASE_WORK_DIR:-${RUNNER_TEMP:-/tmp}/centralssh-release-publish}
 
 [ -n "$repository" ] || {
   echo "missing repository name for release publication" >&2
@@ -34,33 +41,23 @@ release_tag=${RELEASE_TAG:-}
   printf 'release publication tag mismatch: env_tag=%s validated_tag=%s\n' "$tag" "$release_tag" >&2
   exit 1
 }
-printf 'release publication: tag=%s version=%s\n' "$tag" "$version"
 
 owner=${repository%%/*}
 repo=${repository#*/}
-dist_dir="$work_dir/dist"
-expected_file="$work_dir/expected-assets.txt"
-assets_file="$work_dir/release-assets.txt"
+release_name="CentralSSH ${tag}"
+release_body="Automated CentralSSH release for ${tag}. See sha256sums for checksums."
+draft_payload=$(jq -n \
+  --arg tag "$tag" \
+  --arg name "$release_name" \
+  --arg body "$release_body" \
+  '{tag_name: $tag, name: $name, body: $body, draft: true, prerelease: false, hide_archive_links: false}')
+publish_payload=$(jq -n \
+  --arg tag "$tag" \
+  --arg name "$release_name" \
+  --arg body "$release_body" \
+  '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')
 
-rm -rf "$work_dir"
-mkdir -p "$dist_dir"
-
-cat > "$expected_file" <<EOF
-centralssh-${version}-linux-amd64-systemd.tar.gz
-centralssh-${version}-debian-amd64.deb
-centralssh-${version}-fedora-x86_64.rpm
-centralssh-${version}-linux-arm64-systemd.tar.gz
-centralssh-${version}-debian-arm64.deb
-centralssh-${version}-fedora-aarch64.rpm
-centralssh-${version}-freebsd-amd64.pkg
-centralssh-${version}-freebsd-amd64.tar.gz
-centralssh-${version}-freebsd-aarch64.pkg
-centralssh-${version}-freebsd-aarch64.tar.gz
-EOF
-
-log_cmd() {
-  printf '+ %s\n' "$*" >&2
-}
+printf 'release publication: tag=%s version=%s\n' "$tag" "$version"
 
 api_request() {
   method=$1
@@ -68,7 +65,7 @@ api_request() {
   shift 2
   response_file=$(mktemp)
   http_code_file=$(mktemp)
-  log_cmd "curl --fail-with-body --silent --show-error --request $method $url"
+  printf '+ curl --fail-with-body --silent --show-error --request %s %s\n' "$method" "$url" >&2
   if curl --fail-with-body --silent --show-error \
     --request "$method" \
     --header "Authorization: token ${token}" \
@@ -93,20 +90,22 @@ api_request() {
   exit "$curl_rc"
 }
 
-release_name="CentralSSH ${tag}"
-release_body="Automated CentralSSH release for ${tag}. See sha256sums for checksums."
-public_payload=$(jq -n \
-  --arg tag "$tag" \
-  --arg name "$release_name" \
-  --arg body "$release_body" \
-  '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')
-
 release_json=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
   | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')
 
 if [ -z "$release_json" ]; then
-  echo "failed to find staged Forgejo release for $tag" >&2
-  exit 1
+  release_json=$(api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
+    --header "Content-Type: application/json" \
+    --data "$draft_payload")
+else
+  release_id=$(printf '%s' "$release_json" | jq -r '.id')
+  [ -n "$release_id" ] && [ "$release_id" != "null" ] || {
+    echo "failed to resolve existing release id for $tag" >&2
+    exit 1
+  }
+  release_json=$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
+    --header "Content-Type: application/json" \
+    --data "$draft_payload")
 fi
 
 release_id=$(printf '%s' "$release_json" | jq -r '.id')
@@ -115,90 +114,54 @@ release_id=$(printf '%s' "$release_json" | jq -r '.id')
   exit 1
 }
 
-release_assets="$work_dir/release-assets.json"
-api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" > "$release_assets"
+release_assets=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets")
 
-refresh_release_assets() {
-  api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" > "$release_assets"
-}
-
-download_asset_via_browser() {
-  browser_url=$1
-  output_path=$2
-
-  log_cmd "curl --fail --silent --show-error --location ${browser_url} (basic auth x-access-token)"
-  curl --fail --silent --show-error --location \
-    --user "x-access-token:${token}" \
-    --output "$output_path" \
-    "$browser_url"
-}
-
-download_asset() {
-  asset_name=$1
-  browser_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
-  expected_size=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .size' "$release_assets" | sed -n '1p')
-
-  [ -n "$browser_url" ] && [ "$browser_url" != "null" ] || {
-    echo "missing staged release asset: $asset_name" >&2
-    exit 1
-  }
-  [ -n "$expected_size" ] && [ "$expected_size" != "null" ] || {
-    echo "missing staged release size metadata: $asset_name" >&2
-    exit 1
-  }
-
-  output_path="$dist_dir/$asset_name"
-  download_asset_via_browser "$browser_url" "$output_path"
-
-  actual_size=$(wc -c < "$output_path" | tr -d ' ')
-  if [ "$actual_size" != "$expected_size" ]; then
-    printf 'downloaded asset size mismatch for %s: expected=%s actual=%s; refreshing asset metadata and retrying once\n' \
-      "$asset_name" "$expected_size" "$actual_size" >&2
-    rm -f "$output_path"
-    refresh_release_assets
-    browser_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
-    expected_size=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .size' "$release_assets" | sed -n '1p')
-    [ -n "$browser_url" ] && [ "$browser_url" != "null" ] || {
-      echo "missing staged release browser URL after refresh: $asset_name" >&2
-      exit 1
-    }
-    [ -n "$expected_size" ] && [ "$expected_size" != "null" ] || {
-      echo "missing staged release size metadata after refresh: $asset_name" >&2
-      exit 1
-    }
-    download_asset_via_browser "$browser_url" "$output_path"
-    actual_size=$(wc -c < "$output_path" | tr -d ' ')
-    [ "$actual_size" = "$expected_size" ] || {
-      printf 'downloaded asset size mismatch for %s after retry: expected=%s actual=%s url=%s\n' \
-        "$asset_name" "$expected_size" "$actual_size" "$browser_url" >&2
-      exit 1
-    }
+upload_asset() {
+  asset_path=$1
+  asset_name=$(basename "$asset_path")
+  asset_name_encoded=$(jq -nr --arg v "$asset_name" '$v|@uri')
+  existing_asset_id=$(printf '%s' "$release_assets" \
+    | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+    | sed -n '1p')
+  if [ -n "$existing_asset_id" ]; then
+    api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
+    release_assets=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets")
   fi
-
-  printf '%s\n' "$dist_dir/$asset_name" >> "$assets_file"
+  api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+    --form "attachment=@${asset_path}" >/dev/null
+  release_assets=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets")
 }
 
-: > "$assets_file"
-while IFS= read -r asset_name; do
-  download_asset "$asset_name"
-done < "$expected_file"
+artifact_count=0
+checksum_file="$work_dir/sha256sums"
+rm -rf "$work_dir"
+mkdir -p "$work_dir"
+: > "$checksum_file"
 
-(
-  cd "$dist_dir"
-  while IFS= read -r asset_name; do
-    sha256sum "$asset_name"
-  done < "$expected_file"
-) > "$dist_dir/sha256sums"
+for artifact_path in "$@"; do
+  [ -f "$artifact_path" ] || {
+    echo "release artifact does not exist: $artifact_path" >&2
+    exit 1
+  }
+  asset_name=$(basename "$artifact_path")
+  case "$asset_name" in
+    centralssh-"$version"-*)
+      ;;
+    *)
+      printf 'release artifact version mismatch: expected prefix centralssh-%s- got %s\n' \
+        "$version" "$asset_name" >&2
+      exit 1
+      ;;
+  esac
+  sha256sum "$artifact_path" >> "$checksum_file"
+  upload_asset "$artifact_path"
+  artifact_count=$((artifact_count + 1))
+done
 
-sha_asset_id=$(jq -r '.[] | select(.name == "sha256sums") | .id' "$release_assets" | sed -n '1p')
-if [ -n "$sha_asset_id" ]; then
-  api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${sha_asset_id}" >/dev/null
-fi
-api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=sha256sums" \
-  --form "attachment=@${dist_dir}/sha256sums" >/dev/null
+upload_asset "$checksum_file"
 
 api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
   --header "Content-Type: application/json" \
-  --data "$public_payload" >/dev/null
+  --data "$publish_payload" >/dev/null
 
-printf 'published release %s with %s artifacts plus sha256sums\n' "$tag" "$(wc -l < "$expected_file" | tr -d ' ')"
+printf 'published release %s with %s artifacts plus sha256sums\n' "$tag" "$artifact_count"
