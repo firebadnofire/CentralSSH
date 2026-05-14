@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "v*"
-      - "V*"
 
 env:
   RUST_TOOLCHAIN: "1.95.0"
@@ -907,13 +906,16 @@ jobs:
             exit 1
           fi
 
+          refs_file="$(mktemp)"
+          git for-each-ref --format='%(refname) %(refname:short)' refs/remotes/origin > "$refs_file"
+
           while read -r ref_name short_name; do
             short_name="${short_name#origin/}"
             [ "$short_name" = "HEAD" ] && continue
             branch_refspecs="${branch_refspecs:+$branch_refspecs }${ref_name}:refs/heads/${short_name}"
-          done <<EOF
-$(git for-each-ref --format='%(refname) %(refname:short)' refs/remotes/origin)
-EOF
+          done < "$refs_file"
+
+          rm -f "$refs_file"
 
           if [ -z "${branch_refspecs:-}" ]; then
             echo "No remote branches were found to sync." >&2
