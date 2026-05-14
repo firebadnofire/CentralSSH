@@ -106,7 +106,7 @@ struct Cli {
     #[arg(long, env = "CENTRALSSH_LISTEN", default_value = DEFAULT_LISTEN)]
     listen: String,
 
-    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    #[arg(short = 'v', long = "version", action = ArgAction::SetTrue)]
     version_flag: bool,
 
     #[arg(long, env = "CENTRALSSH_CONFIG")]
@@ -153,6 +153,12 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    let cli = Cli::parse();
+    if cli.version_flag {
+        println!("centralssh {}", version::VERSION);
+        return Ok(());
+    }
+
     let log_format = LogFormat::from_env();
     match log_format {
         LogFormat::Compact => {
@@ -186,7 +192,6 @@ async fn run() -> Result<()> {
         }
     }
 
-    let cli = Cli::parse();
     info!(
         log_format = log_format.as_str(),
         journal_stream = std::env::var_os("JOURNAL_STREAM").is_some(),

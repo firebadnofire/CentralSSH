@@ -113,6 +113,18 @@ if [ "$run_runtime_validation" -eq 1 ]; then
     make install DESTDIR="$install_root"
   )
 
+  expected_version="$version"
+  if [ -n "${CENTRALSSH_DIST_BUILD:-}" ] || [ -n "${CI:-}" ]; then
+    expected_version="${version}-distrb"
+  fi
+  for flag in --version -v; do
+    version_output=$("$install_root/usr/local/sbin/centralssh" "$flag")
+    [ "$version_output" = "centralssh $expected_version" ] || {
+      printf 'unexpected %s output: %s\n' "$flag" "$version_output" >&2
+      exit 1
+    }
+  done
+
   cat > "$runtime_root/etc/centralssh/config.toml" <<EOF
 [[users]]
 name = "ci"
