@@ -165,7 +165,7 @@ sudo make install
 - `freebsd-aarch64`: native FreeBSD runner cross-build that emits `aarch64` `.pkg` and `.tar.gz` artifacts without the unstable Linux-hosted QEMU boot path. The cross path uses the FreeBSD `aarch64` sysroot plus `cargo +nightly -Z build-std`.
 
 The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, and validation are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
-Tagged runs create only a draft Forgejo release during packaging; the workflow publishes the real release only after every required Linux and FreeBSD pipeline finishes successfully.
+Tagged runs create only a draft Forgejo release during packaging; all artifact upload jobs wait for that staged release, and the workflow publishes the real release only after every required Linux and FreeBSD pipeline finishes successfully.
 When a CI step fails, including release orchestration and artifact upload steps, the workflow now ships a filtered tail of the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87) so runner-local failures are preserved outside the ephemeral job log without flooding the endpoint with routine Cargo download chatter.
 
 ## Configuration
