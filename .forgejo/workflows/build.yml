@@ -376,9 +376,9 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: bash
+        shell: sh
         run: |
-          set -eu
+          set -eux
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
           export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-install-deps.log"
@@ -431,17 +431,21 @@ jobs:
           echo "uid=$(id -u)"
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+            echo "starting pkg update"
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq node npm || \
-              $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq node20 npm-node20
+            echo "starting pkg install"
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
+            echo "validating node runtime"
+            $sudo_cmd pkg install -y node || $sudo_cmd pkg install -y node20
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
           command -v node >/dev/null 2>&1
           node --version
+          command -v npm >/dev/null 2>&1 && npm --version || true
 
       - name: Check out repository
-        shell: bash
+        shell: sh
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -482,7 +486,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD amd64 artifacts
-        shell: bash
+        shell: sh
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -553,9 +557,9 @@ jobs:
     runs-on: freebsd
     steps:
       - name: Install FreeBSD build dependencies
-        shell: bash
+        shell: sh
         run: |
-          set -eu
+          set -eux
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
           export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
@@ -608,17 +612,21 @@ jobs:
           echo "uid=$(id -u)"
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+            echo "starting pkg update"
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git jq node npm || \
-              $sudo_cmd pkg install -y ca_root_nss curl git jq node20 npm-node20
+            echo "starting pkg install"
+            $sudo_cmd pkg install -y ca_root_nss curl git jq
+            echo "validating node runtime"
+            $sudo_cmd pkg install -y node || $sudo_cmd pkg install -y node20
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
           command -v node >/dev/null 2>&1
           node --version
+          command -v npm >/dev/null 2>&1 && npm --version || true
 
       - name: Check out repository
-        shell: bash
+        shell: sh
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
@@ -659,7 +667,7 @@ jobs:
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Build and validate FreeBSD aarch64 artifacts
-        shell: bash
+        shell: sh
         env:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
