@@ -4,11 +4,13 @@ on:
   push:
     tags:
       - "v*"
+      - "V*"
 
 env:
   RUST_TOOLCHAIN: "1.95.0"
   RUSTUP_INIT_URL: "https://sh.rustup.rs"
   CI_LOG_ENDPOINT: "http://192.168.86.41:9000/ingest"
+  RELEASE_STAGING_ROOT: "/build-cache/centralssh-release-staging"
 
 jobs:
   linux-build-test:
@@ -125,72 +127,9 @@ jobs:
           make -n install >/dev/null
           ./ci/log-rust-cache-stats.sh
 
-  release-setup:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Install release setup dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          log_file="${RUNNER_TEMP:-/tmp}/release-setup-install-deps.log"
-          exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "release-setup/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
-          apt_get="apt-get"
-          if command -v sudo >/dev/null 2>&1; then
-            apt_get="sudo apt-get"
-          fi
-          $apt_get update
-          $apt_get install -y --no-install-recommends ca-certificates curl jq
-
-      - name: Ensure Forgejo draft release exists
-        shell: bash
-        env:
-          FORGEJO_TOKEN: ${{ forgejo.token }}
-        run: |
-          set -euo pipefail
-          log_file="${RUNNER_TEMP:-/tmp}/release-setup-ensure-release.log"
-          exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "release-setup/ensure-draft-release"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-          release_name="CentralSSH ${tag}"
-          release_body="Automated CentralSSH draft release for ${tag}."
-
-          api_request() {
-            local method="$1"
-            local url="$2"
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
-            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
-
-          if [ -z "$release_json" ]; then
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: true, prerelease: false, hide_archive_links: false}')"
-            api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload" >/dev/null
-          fi
-
   linux-packages-amd64:
     runs-on: ubuntu-22.04
-    needs:
-      - linux-build-test
-      - release-setup
+    needs: linux-build-test
     steps:
       - name: Install host dependencies
         shell: bash
@@ -211,7 +150,6 @@ jobs:
             g++ \
             libc6-dev-arm64-cross \
             git \
-            jq \
             make \
             netcat-openbsd \
             pkg-config \
@@ -270,69 +208,14 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           ./ci/package-linux.sh "$version" amd64
           ./ci/validate-linux-packages.sh "$version" amd64
-
-      - name: Upload Linux amd64 artifacts
-        shell: bash
-        env:
-          FORGEJO_TOKEN: ${{ forgejo.token }}
-        run: |
-          set -euo pipefail
-          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-upload.log"
-          exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-amd64/upload-artifacts" error "$log_file"; fi' EXIT
-          cd "${REPO_DIR:?Missing checkout}"
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-
-          api_request() {
-            local method="$1"
-            local url="$2"
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
-            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          [ -n "$release_id" ] && [ "$release_id" != "null" ]
-
-          upload_asset() {
-            local asset_path="$1"
-            local asset_name
-            local asset_name_encoded
-            local existing_asset_id
-            asset_name="$(basename "$asset_path")"
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-            if [ -n "$existing_asset_id" ]; then
-              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
-            fi
-            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --form "attachment=@${asset_path}" >/dev/null
-          }
-
-          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) | sort |
-          while IFS= read -r asset_path; do
-            [ -n "$asset_path" ] || continue
-            upload_asset "$asset_path"
-          done
+          ./ci/stage-release-artifacts.sh linux-packages-amd64 \
+            "dist/centralssh-${version}-linux-amd64-systemd.tar.gz" \
+            "dist/centralssh-${version}-debian-amd64.deb" \
+            "dist/centralssh-${version}-fedora-x86_64.rpm"
 
   linux-packages-arm64:
     runs-on: ubuntu-22.04
-    needs:
-      - linux-build-test
-      - release-setup
+    needs: linux-build-test
     steps:
       - name: Install host dependencies
         shell: bash
@@ -354,7 +237,6 @@ jobs:
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             git \
-            jq \
             make \
             pkg-config \
             rpm \
@@ -413,217 +295,13 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           ./ci/package-linux.sh "$version" arm64
           ./ci/validate-linux-packages.sh "$version" arm64
-
-      - name: Upload Linux arm64 artifacts
-        shell: bash
-        env:
-          FORGEJO_TOKEN: ${{ forgejo.token }}
-        run: |
-          set -euo pipefail
-          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-upload.log"
-          exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-arm64/upload-artifacts" error "$log_file"; fi' EXIT
-          cd "${REPO_DIR:?Missing checkout}"
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-
-          api_request() {
-            local method="$1"
-            local url="$2"
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
-            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          [ -n "$release_id" ] && [ "$release_id" != "null" ]
-
-          upload_asset() {
-            local asset_path="$1"
-            local asset_name
-            local asset_name_encoded
-            local existing_asset_id
-            asset_name="$(basename "$asset_path")"
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-            if [ -n "$existing_asset_id" ]; then
-              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
-            fi
-            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --form "attachment=@${asset_path}" >/dev/null
-          }
-
-          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) | sort |
-          while IFS= read -r asset_path; do
-            [ -n "$asset_path" ] || continue
-            upload_asset "$asset_path"
-          done
-
-  freebsd-build-test:
-    runs-on: freebsd
-    steps:
-      - name: Install FreeBSD test dependencies
-        shell: bash
-        run: |
-          set -eu
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
-          export PATH
-          log_file="${RUNNER_TEMP:-/tmp}/freebsd-build-test-install-deps.log"
-          : > "$log_file"
-          exec >>"$log_file" 2>&1
-          post_log() {
-            context=$1
-            payload_file=$(mktemp)
-            host_and_path=${CI_LOG_ENDPOINT#http://}
-            host_port=${host_and_path%%/*}
-            request_path=/${host_and_path#*/}
-            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
-            host=${host_port%%:*}
-            port=${host_port#*:}
-            [ "$port" != "$host_port" ] || port=80
-            {
-              printf 'context=%s\n' "$context"
-              printf 'status=error\n\n'
-              tail -n 250 "$log_file"
-            } > "$payload_file"
-            if command -v curl >/dev/null 2>&1; then
-              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
-            elif command -v nc >/dev/null 2>&1; then
-              content_length=$(wc -c < "$payload_file" | tr -d ' ')
-              {
-                printf 'POST %s HTTP/1.1\r\n' "$request_path"
-                printf 'Host: %s\r\n' "$host"
-                printf 'Content-Type: text/plain; charset=utf-8\r\n'
-                printf 'Content-Length: %s\r\n' "$content_length"
-                printf 'Connection: close\r\n\r\n'
-                cat "$payload_file"
-              } | nc "$host" "$port" >/dev/null 2>&1 || true
-            fi
-            rm -f "$payload_file"
-          }
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-build-test/install-deps"; fi' EXIT
-          sudo_cmd=
-          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-            sudo_cmd="sudo -n"
-          fi
-          if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
-            $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git
-          fi
-          command -v curl >/dev/null 2>&1
-          command -v git >/dev/null 2>&1
-
-      - name: Check out repository
-        shell: bash
-        env:
-          FORGEJO_TOKEN: ${{ forgejo.token }}
-        run: |
-          set -eu
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
-          export PATH
-          log_file="${RUNNER_TEMP:-/tmp}/freebsd-build-test-checkout.log"
-          : > "$log_file"
-          exec >>"$log_file" 2>&1
-          post_log() {
-            context=$1
-            payload_file=$(mktemp)
-            {
-              printf 'context=%s\n' "$context"
-              printf 'status=error\n\n'
-              tail -n 250 "$log_file"
-            } > "$payload_file"
-            if command -v curl >/dev/null 2>&1; then
-              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
-            fi
-            rm -f "$payload_file"
-          }
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-build-test/checkout"; fi' EXIT
-
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
-          remote_url="${server_url%/}/${repository}.git"
-          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-
-          rm -rf "$repo_dir"
-          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
-            clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" checkout --detach "$commit_sha"
-
-          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
-
-      - name: Build and test FreeBSD host target
-        shell: bash
-        run: |
-          set -eu
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
-          export PATH
-          log_file="${RUNNER_TEMP:-/tmp}/freebsd-build-test.log"
-          : > "$log_file"
-          exec >>"$log_file" 2>&1
-          post_log() {
-            context=$1
-            payload_file=$(mktemp)
-            host_and_path=${CI_LOG_ENDPOINT#http://}
-            host_port=${host_and_path%%/*}
-            request_path=/${host_and_path#*/}
-            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
-            host=${host_port%%:*}
-            port=${host_port#*:}
-            [ "$port" != "$host_port" ] || port=80
-            {
-              printf 'context=%s\n' "$context"
-              printf 'status=error\n\n'
-              tail -n 250 "$log_file"
-            } > "$payload_file"
-            if [ -x ./ci/post-ci-log.sh ]; then
-              ./ci/post-ci-log.sh "$context" error "$log_file" >/dev/null 2>&1 || true
-            elif command -v curl >/dev/null 2>&1; then
-              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
-            elif command -v nc >/dev/null 2>&1; then
-              content_length=$(wc -c < "$payload_file" | tr -d ' ')
-              {
-                printf 'POST %s HTTP/1.1\r\n' "$request_path"
-                printf 'Host: %s\r\n' "$host"
-                printf 'Content-Type: text/plain; charset=utf-8\r\n'
-                printf 'Content-Length: %s\r\n' "$content_length"
-                printf 'Connection: close\r\n\r\n'
-                cat "$payload_file"
-              } | nc "$host" "$port" >/dev/null 2>&1 || true
-            fi
-            rm -f "$payload_file"
-          }
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-build-test/build-and-test"; fi' EXIT
-          cd "${REPO_DIR:?Missing checkout}"
-          if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
-            fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
-            sh /tmp/rustup.sh -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN"
-          fi
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo fetch --locked
-          cargo test --locked
-          cargo build --locked --release
-          make -n install >/dev/null
+          ./ci/stage-release-artifacts.sh linux-packages-arm64 \
+            "dist/centralssh-${version}-linux-arm64-systemd.tar.gz" \
+            "dist/centralssh-${version}-debian-arm64.deb" \
+            "dist/centralssh-${version}-fedora-aarch64.rpm"
 
   freebsd-amd64:
     runs-on: freebsd
-    needs:
-      - freebsd-build-test
-      - release-setup
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -667,7 +345,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake jq sudo nc; do
+          for cmd in sh pkg curl fetch git gmake sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -682,11 +360,10 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
-          command -v jq >/dev/null 2>&1
 
       - name: Check out repository
         shell: bash
@@ -784,71 +461,12 @@ jobs:
             exit 1
           }
           ./ci/build-freebsd-native.sh "$version" amd64
-
-      - name: Upload FreeBSD amd64 artifacts
-        shell: bash
-        env:
-          FORGEJO_TOKEN: ${{ forgejo.token }}
-        run: |
-          set -eu
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
-          export PATH
-          log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-upload.log"
-          : > "$log_file"
-          exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-amd64/upload-artifacts" error "$log_file"; fi' EXIT
-          cd "${REPO_DIR:?Missing checkout}"
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-
-          api_request() {
-            method=$1
-            url=$2
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          releases_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases")"
-          release_id="$(printf '%s' "$releases_json" | jq -r --arg tag "$tag" 'map(select(.tag_name == $tag)) | first | .id // empty')"
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "Failed to resolve staged release id for tag ${tag} from ${api_url}/repos/${owner}/${repo}/releases" >&2
-            exit 1
-          fi
-
-          upload_asset() {
-            asset_path=$1
-            asset_name=$(basename "$asset_path")
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-            if [ -n "$existing_asset_id" ]; then
-              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
-            fi
-            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --form "attachment=@${asset_path}" >/dev/null
-          }
-
-          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.pkg' \) | sort |
-          while IFS= read -r asset_path; do
-            [ -n "$asset_path" ] || continue
-            upload_asset "$asset_path"
-          done
+          ./ci/stage-release-artifacts.sh freebsd-amd64 \
+            "dist/centralssh-${version}-freebsd-amd64.pkg" \
+            "dist/centralssh-${version}-freebsd-amd64.tar.gz"
 
   freebsd-aarch64:
     runs-on: freebsd
-    needs:
-      - freebsd-build-test
-      - release-setup
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -892,7 +510,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake jq sudo nc; do
+          for cmd in sh pkg curl fetch git gmake sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -907,11 +525,10 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git jq
+            $sudo_cmd pkg install -y ca_root_nss curl git
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
-          command -v jq >/dev/null 2>&1
 
       - name: Check out repository
         shell: bash
@@ -1009,69 +626,12 @@ jobs:
             exit 1
           }
           ./ci/build-freebsd-native.sh "$version" aarch64
-
-      - name: Upload FreeBSD aarch64 artifacts
-        shell: bash
-        env:
-          FORGEJO_TOKEN: ${{ forgejo.token }}
-        run: |
-          set -eu
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
-          export PATH
-          log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-upload.log"
-          : > "$log_file"
-          exec >>"$log_file" 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "freebsd-aarch64/upload-artifacts" error "$log_file"; fi' EXIT
-          cd "${REPO_DIR:?Missing checkout}"
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-
-          api_request() {
-            method=$1
-            url=$2
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          releases_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases")"
-          release_id="$(printf '%s' "$releases_json" | jq -r --arg tag "$tag" 'map(select(.tag_name == $tag)) | first | .id // empty')"
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "Failed to resolve staged release id for tag ${tag} from ${api_url}/repos/${owner}/${repo}/releases" >&2
-            exit 1
-          fi
-
-          upload_asset() {
-            asset_path=$1
-            asset_name=$(basename "$asset_path")
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-            if [ -n "$existing_asset_id" ]; then
-              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
-            fi
-            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --form "attachment=@${asset_path}" >/dev/null
-          }
-
-          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.pkg' \) | sort |
-          while IFS= read -r asset_path; do
-            [ -n "$asset_path" ] || continue
-            upload_asset "$asset_path"
-          done
+          ./ci/stage-release-artifacts.sh freebsd-aarch64 \
+            "dist/centralssh-${version}-freebsd-aarch64.pkg" \
+            "dist/centralssh-${version}-freebsd-aarch64.tar.gz"
 
   release-publish:
     runs-on: ubuntu-22.04
-    if: ${{ needs.linux-packages-amd64.result == 'success' && needs.linux-packages-arm64.result == 'success' && needs.freebsd-amd64.result == 'success' && needs.freebsd-aarch64.result == 'success' }}
     needs:
       - linux-packages-amd64
       - linux-packages-arm64
@@ -1114,81 +674,8 @@ jobs:
           git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
           git -C "$repo_dir" checkout --detach "$commit_sha"
-          git -C "$repo_dir" -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
-            fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
-
-      - name: Prepare release assets
-        shell: bash
-        env:
-          FORGEJO_TOKEN: ${{ forgejo.token }}
-        run: |
-          set -euo pipefail
-          log_file="${RUNNER_TEMP:-/tmp}/release-publish-prepare-assets.log"
-          exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "release-publish/prepare-assets" error "$log_file"; fi' EXIT
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-          assets_file="${RUNNER_TEMP:-/tmp}/centralssh-release-assets.txt"
-
-          mkdir -p dist
-
-          api_request() {
-            local method="$1"
-            local url="$2"
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
-            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          [ -n "$release_id" ] && [ "$release_id" != "null" ]
-
-          api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-            | jq -r '.[] | [.name, (.browser_download_url // .download_url // empty)] | @tsv' \
-            | while IFS="$(printf '\t')" read -r asset_name asset_url; do
-                [ -n "$asset_name" ] || continue
-                [ "$asset_name" = "sha256sums.txt" ] && continue
-                [ -n "$asset_url" ] || {
-                  echo "Release asset ${asset_name} did not expose a download URL." >&2
-                  exit 1
-                }
-                curl --fail --silent --show-error --location \
-                  --header "Authorization: token ${token}" \
-                  --output "dist/${asset_name}" \
-                  "$asset_url"
-              done
-
-          find dist -maxdepth 1 -type f | sort > "$assets_file"
-          if [ ! -s "$assets_file" ]; then
-            echo "No release artifacts were downloaded from Forgejo." >&2
-            exit 1
-          fi
-
-          grep -v '/sha256sums.txt$' "$assets_file" > "${assets_file}.without-sha"
-          if [ ! -s "${assets_file}.without-sha" ]; then
-            echo "No release artifacts were found for checksum generation." >&2
-            exit 1
-          fi
-
-          (
-            cd dist
-            xargs -r sha256sum < <(sed 's#^dist/##' "${assets_file}.without-sha")
-          ) > dist/sha256sums.txt
-
-          printf '%s\n' "$(pwd)/dist/sha256sums.txt" >> "$assets_file"
-          printf 'ASSETS_FILE=%s\n' "$assets_file" >> "$GITHUB_ENV"
 
       - name: Publish Forgejo release
         shell: bash
@@ -1199,289 +686,5 @@ jobs:
           log_file="${RUNNER_TEMP:-/tmp}/release-publish-forgejo.log"
           exec > >(tee -a "$log_file") 2>&1
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "release-publish/forgejo-release" error "$log_file"; fi' EXIT
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-          assets_file="${ASSETS_FILE:?Missing release asset list file}"
-          release_name="CentralSSH ${tag}"
-          release_body="Automated CentralSSH release for ${tag}. See sha256sums.txt for checksums."
-
-          api_request() {
-            local method="$1"
-            local url="$2"
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          upload_asset() {
-            local release_id="$1"
-            local asset_path="$2"
-            local asset_name
-            local asset_name_encoded
-            local existing_asset_id
-
-            asset_name="$(basename "$asset_path")"
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-
-            if [ -n "$existing_asset_id" ]; then
-              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
-            fi
-
-            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --form "attachment=@${asset_path}" >/dev/null
-          }
-
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
-            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
-          if [ -z "$release_json" ]; then
-            echo "Failed to find staged Forgejo release for ${tag} before publish." >&2
-            exit 1
-          fi
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          release_payload="$(jq -n \
-            --arg tag "$tag" \
-            --arg name "$release_name" \
-            --arg body "$release_body" \
-            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
-          release_json="$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
-            --header "Content-Type: application/json" \
-            --data "$release_payload")"
-
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          [ -n "$release_id" ] && [ "$release_id" != "null" ]
-
-          while IFS= read -r asset_path; do
-            [ -n "$asset_path" ] || continue
-            upload_asset "$release_id" "$asset_path"
-          done < "$assets_file"
-
-      - name: Sync repository to GitHub
-        shell: bash
-        env:
-          GH_KEY: ${{ secrets.GH_KEY }}
-        run: |
-          set -euo pipefail
-          log_file="${RUNNER_TEMP:-/tmp}/release-publish-github-sync.log"
-          exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "release-publish/github-sync" error "$log_file"; fi' EXIT
-
-          cd "${REPO_DIR:?Missing repository checkout directory}"
-          api_url="https://api.github.com"
-          owner="firebadnofire"
-          repo="centralssh"
-          token="${GH_KEY:?Missing GitHub token}"
-
-          github_api_request() {
-            local method="$1"
-            local url="$2"
-            local response_file
-            local status
-            shift 2
-            response_file="$(mktemp)"
-            status="$(curl --silent --show-error \
-              --output "$response_file" \
-              --write-out "%{http_code}" \
-              --request "$method" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${token}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$@" \
-              "$url")"
-            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
-              cat "$response_file" >&2
-              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
-              exit 1
-            fi
-            cat "$response_file"
-          }
-
-          github_repo_status() {
-            local response_file
-            response_file="$(mktemp)"
-            curl --silent --show-error \
-              --output "$response_file" \
-              --write-out "%{http_code}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${token}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "${api_url}/repos/${owner}/${repo}"
-          }
-
-          github_git_push() {
-            local remote_url="https://github.com/${owner}/${repo}.git"
-            local auth_header
-            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-            git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" \
-              push "$remote_url" "$@"
-          }
-
-          repo_status="$(github_repo_status)"
-          if [ "$repo_status" = "404" ]; then
-            owner_json="$(github_api_request GET "${api_url}/users/${owner}")"
-            owner_type="$(printf '%s' "$owner_json" | jq -r '.type')"
-            create_payload="$(jq -n \
-              --arg name "$repo" \
-              --arg description "CentralSSH mirror" \
-              '{name: $name, description: $description, private: false, auto_init: false}')"
-
-            if [ "$owner_type" = "Organization" ]; then
-              github_api_request POST "${api_url}/orgs/${owner}/repos" \
-                --header "Content-Type: application/json" \
-                --data "$create_payload" >/dev/null
-            elif [ "$owner_type" = "User" ]; then
-              authenticated_login="$(github_api_request GET "${api_url}/user" | jq -r '.login')"
-              if [ "$authenticated_login" != "$owner" ]; then
-                echo "Cannot create ${owner}/${repo}: GH_KEY authenticates as ${authenticated_login}, not ${owner}." >&2
-                exit 1
-              fi
-              github_api_request POST "${api_url}/user/repos" \
-                --header "Content-Type: application/json" \
-                --data "$create_payload" >/dev/null
-            else
-              echo "Unsupported GitHub owner type for ${owner}: ${owner_type}" >&2
-              exit 1
-            fi
-          elif [ "$repo_status" != "200" ]; then
-            echo "Failed to check GitHub repository ${owner}/${repo}: HTTP ${repo_status}" >&2
-            exit 1
-          fi
-
-          refs_file="$(mktemp)"
-          git for-each-ref --format='%(refname) %(refname:short)' refs/remotes/origin > "$refs_file"
-
-          while read -r ref_name short_name; do
-            short_name="${short_name#origin/}"
-            [ "$short_name" = "HEAD" ] && continue
-            branch_refspecs="${branch_refspecs:+$branch_refspecs }${ref_name}:refs/heads/${short_name}"
-          done < "$refs_file"
-
-          rm -f "$refs_file"
-
-          if [ -z "${branch_refspecs:-}" ]; then
-            echo "No remote branches were found to sync." >&2
-            exit 1
-          fi
-
-          # shellcheck disable=SC2086
-          github_git_push $branch_refspecs
-          github_git_push "refs/tags/*:refs/tags/*"
-
-      - name: Publish GitHub release
-        shell: bash
-        env:
-          GH_KEY: ${{ secrets.GH_KEY }}
-        run: |
-          set -euo pipefail
-          log_file="${RUNNER_TEMP:-/tmp}/release-publish-github-release.log"
-          exec > >(tee -a "$log_file") 2>&1
-          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "release-publish/github-release" error "$log_file"; fi' EXIT
-
-          api_url="https://api.github.com"
-          upload_url="https://uploads.github.com"
-          owner="firebadnofire"
-          repo="centralssh"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${GH_KEY:?Missing GitHub token}"
-          assets_file="${ASSETS_FILE:?Missing release asset list file}"
-          release_name="CentralSSH ${tag}"
-          release_body="Automated CentralSSH release for ${tag}. See sha256sums.txt for checksums."
-
-          github_request() {
-            local method="$1"
-            local url="$2"
-            local response_file
-            local status
-            shift 2
-            response_file="$(mktemp)"
-            status="$(curl --silent --show-error \
-              --output "$response_file" \
-              --write-out "%{http_code}" \
-              --request "$method" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${token}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$@" \
-              "$url")"
-            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
-              cat "$response_file" >&2
-              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
-              exit 1
-            fi
-            cat "$response_file"
-          }
-
-          upload_asset() {
-            local release_id="$1"
-            local asset_path="$2"
-            local asset_name
-            local asset_name_encoded
-            local existing_asset_id
-
-            asset_name="$(basename "$asset_path")"
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(github_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-
-            if [ -n "$existing_asset_id" ]; then
-              github_request DELETE "${api_url}/repos/${owner}/${repo}/releases/assets/${existing_asset_id}" >/dev/null
-            fi
-
-            github_request POST "${upload_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --header "Content-Type: application/octet-stream" \
-              --data-binary "@${asset_path}" >/dev/null
-          }
-
-          release_response="$(mktemp)"
-          release_status="$(curl --silent --show-error \
-            --output "$release_response" \
-            --write-out "%{http_code}" \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer ${token}" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
-
-          if [ "$release_status" = "404" ]; then
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
-            release_json="$(github_request POST "${api_url}/repos/${owner}/${repo}/releases" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          elif [ "$release_status" = "200" ]; then
-            release_json="$(cat "$release_response")"
-            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
-            release_json="$(github_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          else
-            cat "$release_response" >&2
-            echo "Failed to look up GitHub release for ${tag}: HTTP ${release_status}" >&2
-            exit 1
-          fi
-
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          [ -n "$release_id" ] && [ "$release_id" != "null" ]
-
-          while IFS= read -r asset_path; do
-            [ -n "$asset_path" ] || continue
-            upload_asset "$release_id" "$asset_path"
-          done < "$assets_file"
+          cd "${REPO_DIR:?Missing checkout}"
+          ./ci/publish-release.sh

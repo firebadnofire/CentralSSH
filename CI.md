@@ -481,6 +481,8 @@ Recommended usage patterns:
 - explicit checksum generation
 - explicit API-driven release publication
 
+When package jobs run across different runner classes, stage their validated artifacts into one shared release-staging root keyed by repository, tag, and commit. A final Linux release job should wait on all required package jobs, copy only the expected artifacts into a fresh release workspace, generate the checksum file there, and publish the release in one API-driven pass.
+
 ## apt-cacher-ng
 
 When using Debian or Ubuntu container jobs on self-hosted infrastructure, configure `apt-cacher-ng`.
