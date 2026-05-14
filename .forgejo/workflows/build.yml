@@ -819,8 +819,10 @@ jobs:
           release_id="$(printf '%s' "$releases_json" \
             | sed $'s/},{/}\\\n{/g' \
             | grep -F "\"tag_name\":\"${tag}\"" \
-            | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+            | grep -o '"id":[[:space:]]*[0-9][0-9]*' \
             | head -n 1)"
+          release_id="${release_id##*:}"
+          release_id="$(printf '%s' "$release_id" | tr -d '[:space:]')"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
           upload_asset() {
@@ -830,8 +832,10 @@ jobs:
             existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
               | tr '{' '\n' \
               | grep -F "\"name\":\"${asset_name}\"" \
-              | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+              | grep -o '"id":[[:space:]]*[0-9][0-9]*' \
               | head -n 1)"
+            existing_asset_id="${existing_asset_id##*:}"
+            existing_asset_id="$(printf '%s' "$existing_asset_id" | tr -d '[:space:]')"
             if [ -n "$existing_asset_id" ]; then
               api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
             fi
@@ -1045,8 +1049,10 @@ jobs:
           release_id="$(printf '%s' "$releases_json" \
             | sed $'s/},{/}\\\n{/g' \
             | grep -F "\"tag_name\":\"${tag}\"" \
-            | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+            | grep -o '"id":[[:space:]]*[0-9][0-9]*' \
             | head -n 1)"
+          release_id="${release_id##*:}"
+          release_id="$(printf '%s' "$release_id" | tr -d '[:space:]')"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
           upload_asset() {
@@ -1056,8 +1062,10 @@ jobs:
             existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
               | tr '{' '\n' \
               | grep -F "\"name\":\"${asset_name}\"" \
-              | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+              | grep -o '"id":[[:space:]]*[0-9][0-9]*' \
               | head -n 1)"
+            existing_asset_id="${existing_asset_id##*:}"
+            existing_asset_id="$(printf '%s' "$existing_asset_id" | tr -d '[:space:]')"
             if [ -n "$existing_asset_id" ]; then
               api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
             fi
