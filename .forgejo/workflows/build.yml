@@ -467,7 +467,6 @@ jobs:
 
   freebsd-build-test:
     runs-on: freebsd
-    needs: release-setup
     steps:
       - name: Install FreeBSD test dependencies
         shell: bash
@@ -617,7 +616,6 @@ jobs:
   freebsd-amd64:
     runs-on: freebsd
     needs:
-      - release-setup
       - freebsd-build-test
     steps:
       - name: Install FreeBSD build dependencies
@@ -836,7 +834,6 @@ jobs:
   freebsd-aarch64:
     runs-on: freebsd
     needs:
-      - release-setup
       - freebsd-build-test
     steps:
       - name: Install FreeBSD build dependencies
