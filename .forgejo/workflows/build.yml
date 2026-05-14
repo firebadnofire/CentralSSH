@@ -208,6 +208,16 @@ jobs:
           ./ci/package-linux.sh "$version" amd64
           ./ci/validate-linux-packages.sh "$version" amd64
 
+      - name: Upload Linux amd64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-artifacts
+          if-no-files-found: error
+          path: |
+            ${{ env.REPO_DIR }}/dist/*.tar.gz
+            ${{ env.REPO_DIR }}/dist/*.deb
+            ${{ env.REPO_DIR }}/dist/*.rpm
+
   linux-packages-arm64:
     runs-on: ubuntu-22.04
     needs: linux-build-test
@@ -290,6 +300,16 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           ./ci/package-linux.sh "$version" arm64
           ./ci/validate-linux-packages.sh "$version" arm64
+
+      - name: Upload Linux arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-artifacts
+          if-no-files-found: error
+          path: |
+            ${{ env.REPO_DIR }}/dist/*.tar.gz
+            ${{ env.REPO_DIR }}/dist/*.deb
+            ${{ env.REPO_DIR }}/dist/*.rpm
 
   freebsd-amd64:
     runs-on: freebsd
@@ -453,6 +473,15 @@ jobs:
           }
           ./ci/build-freebsd-native.sh "$version" amd64
 
+      - name: Upload FreeBSD amd64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-amd64-artifacts
+          if-no-files-found: error
+          path: |
+            ${{ env.REPO_DIR }}/dist/*.tar.gz
+            ${{ env.REPO_DIR }}/dist/*.pkg
+
   freebsd-aarch64:
     runs-on: freebsd
     steps:
@@ -614,3 +643,389 @@ jobs:
             exit 1
           }
           ./ci/build-freebsd-native.sh "$version" aarch64
+
+      - name: Upload FreeBSD aarch64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-aarch64-artifacts
+          if-no-files-found: error
+          path: |
+            ${{ env.REPO_DIR }}/dist/*.tar.gz
+            ${{ env.REPO_DIR }}/dist/*.pkg
+
+  release-publish:
+    runs-on: ubuntu-22.04
+    needs:
+      - linux-packages-amd64
+      - linux-packages-arm64
+      - freebsd-amd64
+      - freebsd-aarch64
+    steps:
+      - name: Install release dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends ca-certificates curl git jq
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-artifacts"
+          merge-multiple: true
+          path: dist
+
+      - name: Check out repository
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh-release"
+          remote_url="${server_url%/}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
+          git -C "$repo_dir" -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assets_file="${RUNNER_TEMP:-/tmp}/centralssh-release-assets.txt"
+          find dist -maxdepth 1 -type f | sort > "$assets_file"
+          if [ ! -s "$assets_file" ]; then
+            echo "No release artifacts were downloaded." >&2
+            exit 1
+          fi
+
+          grep -v '/sha256sums.txt$' "$assets_file" > "${assets_file}.without-sha"
+          if [ ! -s "${assets_file}.without-sha" ]; then
+            echo "No release artifacts were found for checksum generation." >&2
+            exit 1
+          fi
+
+          (
+            cd dist
+            xargs -r sha256sum < <(sed 's#^dist/##' "${assets_file}.without-sha")
+          ) > dist/sha256sums.txt
+
+          printf '%s\n' "$(pwd)/dist/sha256sums.txt" >> "$assets_file"
+          printf 'ASSETS_FILE=%s\n' "$assets_file" >> "$GITHUB_ENV"
+
+      - name: Publish Forgejo release
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+          assets_file="${ASSETS_FILE:?Missing release asset list file}"
+          release_name="CentralSSH ${tag}"
+          release_body="Automated CentralSSH release for ${tag}. See sha256sums.txt for checksums."
+
+          api_request() {
+            local method="$1"
+            local url="$2"
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          upload_asset() {
+            local release_id="$1"
+            local asset_path="$2"
+            local asset_name
+            local asset_name_encoded
+            local existing_asset_id
+
+            asset_name="$(basename "$asset_path")"
+            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
+            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+
+            if [ -n "$existing_asset_id" ]; then
+              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
+            fi
+
+            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --form "attachment=@${asset_path}" >/dev/null
+          }
+
+          release_response="$(mktemp)"
+          release_status="$(curl --silent --show-error \
+            --output "$release_response" \
+            --write-out "%{http_code}" \
+            --header "Authorization: token ${token}" \
+            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+
+          if [ "$release_status" = "404" ]; then
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
+            release_json="$(api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
+          elif [ "$release_status" = "200" ]; then
+            release_json="$(cat "$release_response")"
+            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
+            release_json="$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
+          else
+            cat "$release_response" >&2
+            echo "Failed to look up release for ${tag}: HTTP ${release_status}" >&2
+            exit 1
+          fi
+
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          [ -n "$release_id" ] && [ "$release_id" != "null" ]
+
+          while IFS= read -r asset_path; do
+            [ -n "$asset_path" ] || continue
+            upload_asset "$release_id" "$asset_path"
+          done < "$assets_file"
+
+      - name: Sync repository to GitHub
+        shell: bash
+        env:
+          GH_KEY: ${{ secrets.GH_KEY }}
+        run: |
+          set -euo pipefail
+
+          cd "${REPO_DIR:?Missing repository checkout directory}"
+          api_url="https://api.github.com"
+          owner="firebadnofire"
+          repo="centralssh"
+          token="${GH_KEY:?Missing GitHub token}"
+
+          github_api_request() {
+            local method="$1"
+            local url="$2"
+            local response_file
+            local status
+            shift 2
+            response_file="$(mktemp)"
+            status="$(curl --silent --show-error \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --request "$method" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${token}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$@" \
+              "$url")"
+            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
+              cat "$response_file" >&2
+              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
+              exit 1
+            fi
+            cat "$response_file"
+          }
+
+          github_repo_status() {
+            local response_file
+            response_file="$(mktemp)"
+            curl --silent --show-error \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${token}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_url}/repos/${owner}/${repo}"
+          }
+
+          github_git_push() {
+            local remote_url="https://github.com/${owner}/${repo}.git"
+            local auth_header
+            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+            git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" \
+              push "$remote_url" "$@"
+          }
+
+          repo_status="$(github_repo_status)"
+          if [ "$repo_status" = "404" ]; then
+            owner_json="$(github_api_request GET "${api_url}/users/${owner}")"
+            owner_type="$(printf '%s' "$owner_json" | jq -r '.type')"
+            create_payload="$(jq -n \
+              --arg name "$repo" \
+              --arg description "CentralSSH mirror" \
+              '{name: $name, description: $description, private: false, auto_init: false}')"
+
+            if [ "$owner_type" = "Organization" ]; then
+              github_api_request POST "${api_url}/orgs/${owner}/repos" \
+                --header "Content-Type: application/json" \
+                --data "$create_payload" >/dev/null
+            elif [ "$owner_type" = "User" ]; then
+              authenticated_login="$(github_api_request GET "${api_url}/user" | jq -r '.login')"
+              if [ "$authenticated_login" != "$owner" ]; then
+                echo "Cannot create ${owner}/${repo}: GH_KEY authenticates as ${authenticated_login}, not ${owner}." >&2
+                exit 1
+              fi
+              github_api_request POST "${api_url}/user/repos" \
+                --header "Content-Type: application/json" \
+                --data "$create_payload" >/dev/null
+            else
+              echo "Unsupported GitHub owner type for ${owner}: ${owner_type}" >&2
+              exit 1
+            fi
+          elif [ "$repo_status" != "200" ]; then
+            echo "Failed to check GitHub repository ${owner}/${repo}: HTTP ${repo_status}" >&2
+            exit 1
+          fi
+
+          while read -r ref_name short_name; do
+            short_name="${short_name#origin/}"
+            [ "$short_name" = "HEAD" ] && continue
+            branch_refspecs="${branch_refspecs:+$branch_refspecs }${ref_name}:refs/heads/${short_name}"
+          done <<EOF
+$(git for-each-ref --format='%(refname) %(refname:short)' refs/remotes/origin)
+EOF
+
+          if [ -z "${branch_refspecs:-}" ]; then
+            echo "No remote branches were found to sync." >&2
+            exit 1
+          fi
+
+          # shellcheck disable=SC2086
+          github_git_push $branch_refspecs
+          github_git_push "refs/tags/*:refs/tags/*"
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_KEY: ${{ secrets.GH_KEY }}
+        run: |
+          set -euo pipefail
+
+          api_url="https://api.github.com"
+          upload_url="https://uploads.github.com"
+          owner="firebadnofire"
+          repo="centralssh"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${GH_KEY:?Missing GitHub token}"
+          assets_file="${ASSETS_FILE:?Missing release asset list file}"
+          release_name="CentralSSH ${tag}"
+          release_body="Automated CentralSSH release for ${tag}. See sha256sums.txt for checksums."
+
+          github_request() {
+            local method="$1"
+            local url="$2"
+            local response_file
+            local status
+            shift 2
+            response_file="$(mktemp)"
+            status="$(curl --silent --show-error \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --request "$method" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${token}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$@" \
+              "$url")"
+            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
+              cat "$response_file" >&2
+              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
+              exit 1
+            fi
+            cat "$response_file"
+          }
+
+          upload_asset() {
+            local release_id="$1"
+            local asset_path="$2"
+            local asset_name
+            local asset_name_encoded
+            local existing_asset_id
+
+            asset_name="$(basename "$asset_path")"
+            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
+            existing_asset_id="$(github_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+
+            if [ -n "$existing_asset_id" ]; then
+              github_request DELETE "${api_url}/repos/${owner}/${repo}/releases/assets/${existing_asset_id}" >/dev/null
+            fi
+
+            github_request POST "${upload_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@${asset_path}" >/dev/null
+          }
+
+          release_response="$(mktemp)"
+          release_status="$(curl --silent --show-error \
+            --output "$release_response" \
+            --write-out "%{http_code}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${token}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+
+          if [ "$release_status" = "404" ]; then
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
+            release_json="$(github_request POST "${api_url}/repos/${owner}/${repo}/releases" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
+          elif [ "$release_status" = "200" ]; then
+            release_json="$(cat "$release_response")"
+            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
+            release_json="$(github_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload")"
+          else
+            cat "$release_response" >&2
+            echo "Failed to look up GitHub release for ${tag}: HTTP ${release_status}" >&2
+            exit 1
+          fi
+
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          [ -n "$release_id" ] && [ "$release_id" != "null" ]
+
+          while IFS= read -r asset_path; do
+            [ -n "$asset_path" ] || continue
+            upload_asset "$release_id" "$asset_path"
+          done < "$assets_file"
