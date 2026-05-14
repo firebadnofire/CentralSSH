@@ -289,6 +289,7 @@ CentralSSH only accepts keyboard-interactive SSH auth for gateway login.
 - The transport auth flow is implemented entirely through keyboard-interactive prompts.
 - Normal OpenSSH auth-method discovery probes do not count toward fail2ban or password/TOTP failures.
 - Authenticated policy denials for forwarding, SFTP, and SCP are logged separately and do not increment fail2ban or login-failure counters.
+- Transport-level auth rejections are intentionally kept short so OpenSSH clients reach the first password prompt without a multi-second stall.
 
 The user experience is:
 

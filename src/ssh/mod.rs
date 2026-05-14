@@ -36,6 +36,7 @@ pub mod proxy;
 
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
+const AUTH_REJECTION_DELAY: Duration = Duration::from_millis(150);
 const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
 const ENROLLMENT_QR_DARK_MODULE: &str = "█";
 const ENROLLMENT_QR_LIGHT_MODULE: &str = " ";
@@ -1328,22 +1329,23 @@ Use the plaintext secret or URI above.\n\n"
             }
 
             for byte in data {
-                match *byte {
-                    b'\r' | b'\n' => {
+                match menu_input_byte_action(&mut channel_state.menu_escape_state, *byte) {
+                    MenuByteAction::Ignore | MenuByteAction::CompleteEscapeSequence => {}
+                    MenuByteAction::SubmitLine => {
                         let _ = session.data(channel, bytes::Bytes::from_static(b"\r\n"));
                         let line = String::from_utf8_lossy(&channel_state.input_buffer).to_string();
                         channel_state.input_buffer.clear();
                         maybe_line = Some(line);
                         break;
                     }
-                    0x08 | 0x7f => {
+                    MenuByteAction::Backspace => {
                         if channel_state.input_buffer.pop().is_some() {
                             let _ = session.data(channel, bytes::Bytes::from_static(b"\x08 \x08"));
                         }
                     }
-                    _ => {
-                        channel_state.input_buffer.push(*byte);
-                        let _ = session.data(channel, bytes::Bytes::copy_from_slice(&[*byte]));
+                    MenuByteAction::EchoAndBuffer(byte) => {
+                        channel_state.input_buffer.push(byte);
+                        let _ = session.data(channel, bytes::Bytes::copy_from_slice(&[byte]));
                     }
                 }
             }
@@ -1395,6 +1397,7 @@ Use the plaintext secret or URI above.\n\n"
             let mut guard = self.session_channel_state.lock().await;
             if let Some(channel_state) = guard.get_mut(&channel) {
                 channel_state.menu_active = false;
+                channel_state.menu_escape_state = proxy::MenuEscapeState::None;
             }
         }
 
@@ -1463,6 +1466,57 @@ Use the plaintext secret or URI above.\n\n"
         }
 
         Ok(true)
+    }
+
+    async fn fail_channel_request(
+        &self,
+        session: &mut Session,
+        channel: ChannelId,
+        error: &CentralSshError,
+    ) {
+        warn!(error = %error, ?channel, "request on proxied session channel was denied");
+        let _ = session.channel_failure(channel);
+        let _ = session.close(channel);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuByteAction {
+    Ignore,
+    CompleteEscapeSequence,
+    SubmitLine,
+    Backspace,
+    EchoAndBuffer(u8),
+}
+
+fn menu_input_byte_action(state: &mut proxy::MenuEscapeState, byte: u8) -> MenuByteAction {
+    use proxy::MenuEscapeState::{None, SawCsi, SawEscape};
+
+    match *state {
+        None => match byte {
+            b'\r' | b'\n' => MenuByteAction::SubmitLine,
+            0x08 | 0x7f => MenuByteAction::Backspace,
+            0x1b => {
+                *state = SawEscape;
+                MenuByteAction::Ignore
+            }
+            0x20..=0x7e => MenuByteAction::EchoAndBuffer(byte),
+            _ => MenuByteAction::Ignore,
+        },
+        SawEscape => {
+            *state = None;
+            if byte == b'[' {
+                *state = SawCsi;
+            }
+            MenuByteAction::Ignore
+        }
+        SawCsi => {
+            if (0x40..=0x7e).contains(&byte) {
+                *state = None;
+                return MenuByteAction::CompleteEscapeSequence;
+            }
+            MenuByteAction::Ignore
+        }
     }
 }
 
@@ -1936,8 +1990,7 @@ impl server::Handler for GatewayHandler {
             }
             Err(error) => {
                 warn!(error = %error, ?channel, "failed to relay shell request");
-                let _ = session.channel_failure(channel);
-                proxy_session.abort(error.to_string()).await;
+                self.fail_channel_request(session, channel, &error).await;
             }
         }
 
@@ -1983,8 +2036,7 @@ impl server::Handler for GatewayHandler {
             }
             Err(error) => {
                 warn!(error = %error, ?channel, command = %String::from_utf8_lossy(data), "failed to relay exec request");
-                let _ = session.channel_failure(channel);
-                proxy_session.abort(error.to_string()).await;
+                self.fail_channel_request(session, channel, &error).await;
             }
         }
 
@@ -2033,8 +2085,7 @@ impl server::Handler for GatewayHandler {
             }
             Err(error) => {
                 warn!(error = %error, ?channel, subsystem = name, "failed to relay subsystem request");
-                let _ = session.channel_failure(channel);
-                proxy_session.abort(error.to_string()).await;
+                self.fail_channel_request(session, channel, &error).await;
             }
         }
 
@@ -2406,7 +2457,9 @@ pub async fn run_gateway_server(
 
     let mut config = server::Config::default();
     config.methods = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
-    config.auth_rejection_time = Duration::from_secs(3);
+    // Keep normal method discovery snappy. Real auth throttling happens in the
+    // explicit abuse controls instead of a transport-wide multi-second stall.
+    config.auth_rejection_time = AUTH_REJECTION_DELAY;
     let frontend_kex_summary = apply_server_transport_config(&mut config, &frontend_kex_policy)?;
 
     let host_key = russh::keys::load_secret_key(host_key_path, None)
@@ -2547,12 +2600,18 @@ fn validate_host_key_security(path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
 
     fn terminal_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn acquire_terminal_env_lock() -> MutexGuard<'static, ()> {
+        terminal_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -2601,6 +2660,56 @@ mod tests {
             config.limits.rekey_time_limit,
             crate::crypto_policy::SSH_REKEY_TIME
         );
+    }
+
+    #[test]
+    fn gateway_server_uses_short_auth_rejection_delay() {
+        assert_eq!(AUTH_REJECTION_DELAY, Duration::from_millis(150));
+    }
+
+    #[test]
+    fn menu_input_ignores_arrow_key_escape_sequences() {
+        let mut state = proxy::MenuEscapeState::None;
+        let mut rendered = Vec::new();
+
+        for byte in b"\x1b[A\x1b[B12" {
+            match menu_input_byte_action(&mut state, *byte) {
+                MenuByteAction::EchoAndBuffer(byte) => rendered.push(byte),
+                MenuByteAction::Ignore
+                | MenuByteAction::CompleteEscapeSequence
+                | MenuByteAction::SubmitLine
+                | MenuByteAction::Backspace => {}
+            }
+        }
+
+        assert_eq!(state, proxy::MenuEscapeState::None);
+        assert_eq!(rendered, b"12");
+    }
+
+    #[test]
+    fn menu_input_keeps_csi_state_until_sequence_terminator() {
+        let mut state = proxy::MenuEscapeState::None;
+
+        assert_eq!(
+            menu_input_byte_action(&mut state, 0x1b),
+            MenuByteAction::Ignore
+        );
+        assert_eq!(state, proxy::MenuEscapeState::SawEscape);
+        assert_eq!(
+            menu_input_byte_action(&mut state, b'['),
+            MenuByteAction::Ignore
+        );
+        assert_eq!(state, proxy::MenuEscapeState::SawCsi);
+        assert_eq!(
+            menu_input_byte_action(&mut state, b'1'),
+            MenuByteAction::Ignore
+        );
+        assert_eq!(state, proxy::MenuEscapeState::SawCsi);
+        assert_eq!(
+            menu_input_byte_action(&mut state, b'~'),
+            MenuByteAction::CompleteEscapeSequence
+        );
+        assert_eq!(state, proxy::MenuEscapeState::None);
     }
 
     #[test]
@@ -2810,10 +2919,11 @@ mod tests {
 
     #[test]
     fn enrollment_prompt_shows_secret_and_uri_before_qr() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
+            env::set_var("LANG", "en_US.UTF-8");
         }
 
         let auth = GatewayHandler::enrollment_prompt(
@@ -2840,7 +2950,7 @@ mod tests {
 
     #[test]
     fn terminal_dimensions_are_absent_when_env_missing() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
@@ -2851,7 +2961,7 @@ mod tests {
 
     #[test]
     fn enrollment_qr_renders_when_terminal_size_is_unavailable() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
@@ -2868,7 +2978,7 @@ mod tests {
 
     #[test]
     fn enrollment_qr_is_suppressed_when_terminal_is_explicitly_too_small() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::set_var("COLUMNS", "20");
             env::set_var("LINES", "10");
@@ -2885,7 +2995,7 @@ mod tests {
 
     #[test]
     fn enrollment_qr_is_suppressed_without_utf8_locale() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("LC_ALL");
             env::remove_var("LC_CTYPE");
