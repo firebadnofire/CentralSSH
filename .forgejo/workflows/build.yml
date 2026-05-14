@@ -125,9 +125,75 @@ jobs:
           make -n install >/dev/null
           ./ci/log-rust-cache-stats.sh
 
-  linux-packages-amd64:
+  release-setup:
     runs-on: ubuntu-22.04
     needs: linux-build-test
+    steps:
+      - name: Install release setup dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends ca-certificates curl jq
+
+      - name: Ensure Forgejo release exists
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+          release_name="CentralSSH ${tag}"
+          release_body="Automated CentralSSH release for ${tag}."
+
+          api_request() {
+            local method="$1"
+            local url="$2"
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          release_response="$(mktemp)"
+          release_status="$(curl --silent --show-error \
+            --output "$release_response" \
+            --write-out "%{http_code}" \
+            --header "Authorization: token ${token}" \
+            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+
+          if [ "$release_status" = "404" ]; then
+            release_payload="$(jq -n \
+              --arg tag "$tag" \
+              --arg name "$release_name" \
+              --arg body "$release_body" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
+            api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
+              --header "Content-Type: application/json" \
+              --data "$release_payload" >/dev/null
+          elif [ "$release_status" != "200" ]; then
+            cat "$release_response" >&2
+            echo "Failed to look up release for ${tag}: HTTP ${release_status}" >&2
+            exit 1
+          fi
+
+  linux-packages-amd64:
+    runs-on: ubuntu-22.04
+    needs:
+      - linux-build-test
+      - release-setup
     steps:
       - name: Install host dependencies
         shell: bash
@@ -148,6 +214,7 @@ jobs:
             g++ \
             libc6-dev-arm64-cross \
             git \
+            jq \
             make \
             netcat-openbsd \
             pkg-config \
@@ -208,18 +275,63 @@ jobs:
           ./ci/validate-linux-packages.sh "$version" amd64
 
       - name: Upload Linux amd64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-amd64-artifacts
-          if-no-files-found: error
-          path: |
-            ${{ env.REPO_DIR }}/dist/*.tar.gz
-            ${{ env.REPO_DIR }}/dist/*.deb
-            ${{ env.REPO_DIR }}/dist/*.rpm
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+          cd "${REPO_DIR:?Missing checkout}"
+
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+
+          api_request() {
+            local method="$1"
+            local url="$2"
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          [ -n "$release_id" ] && [ "$release_id" != "null" ]
+
+          upload_asset() {
+            local asset_path="$1"
+            local asset_name
+            local asset_name_encoded
+            local existing_asset_id
+            asset_name="$(basename "$asset_path")"
+            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
+            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+            if [ -n "$existing_asset_id" ]; then
+              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
+            fi
+            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --form "attachment=@${asset_path}" >/dev/null
+          }
+
+          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) | sort |
+          while IFS= read -r asset_path; do
+            [ -n "$asset_path" ] || continue
+            upload_asset "$asset_path"
+          done
 
   linux-packages-arm64:
     runs-on: ubuntu-22.04
-    needs: linux-build-test
+    needs:
+      - linux-build-test
+      - release-setup
     steps:
       - name: Install host dependencies
         shell: bash
@@ -241,6 +353,7 @@ jobs:
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             git \
+            jq \
             make \
             pkg-config \
             rpm \
@@ -301,17 +414,61 @@ jobs:
           ./ci/validate-linux-packages.sh "$version" arm64
 
       - name: Upload Linux arm64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-arm64-artifacts
-          if-no-files-found: error
-          path: |
-            ${{ env.REPO_DIR }}/dist/*.tar.gz
-            ${{ env.REPO_DIR }}/dist/*.deb
-            ${{ env.REPO_DIR }}/dist/*.rpm
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+          cd "${REPO_DIR:?Missing checkout}"
+
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+
+          api_request() {
+            local method="$1"
+            local url="$2"
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          [ -n "$release_id" ] && [ "$release_id" != "null" ]
+
+          upload_asset() {
+            local asset_path="$1"
+            local asset_name
+            local asset_name_encoded
+            local existing_asset_id
+            asset_name="$(basename "$asset_path")"
+            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
+            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+            if [ -n "$existing_asset_id" ]; then
+              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
+            fi
+            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --form "attachment=@${asset_path}" >/dev/null
+          }
+
+          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) | sort |
+          while IFS= read -r asset_path; do
+            [ -n "$asset_path" ] || continue
+            upload_asset "$asset_path"
+          done
 
   freebsd-amd64:
     runs-on: freebsd
+    needs: release-setup
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -370,7 +527,7 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
@@ -473,16 +630,60 @@ jobs:
           ./ci/build-freebsd-native.sh "$version" amd64
 
       - name: Upload FreeBSD amd64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: freebsd-amd64-artifacts
-          if-no-files-found: error
-          path: |
-            ${{ env.REPO_DIR }}/dist/*.tar.gz
-            ${{ env.REPO_DIR }}/dist/*.pkg
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          cd "${REPO_DIR:?Missing checkout}"
+
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+
+          api_request() {
+            method=$1
+            url=$2
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          [ -n "$release_id" ] && [ "$release_id" != "null" ]
+
+          upload_asset() {
+            asset_path=$1
+            asset_name=$(basename "$asset_path")
+            asset_name_encoded=$(jq -nr --arg value "$asset_name" '$value|@uri')
+            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+            if [ -n "$existing_asset_id" ]; then
+              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
+            fi
+            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --form "attachment=@${asset_path}" >/dev/null
+          }
+
+          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.pkg' \) | sort |
+          while IFS= read -r asset_path; do
+            [ -n "$asset_path" ] || continue
+            upload_asset "$asset_path"
+          done
 
   freebsd-aarch64:
     runs-on: freebsd
+    needs: release-setup
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -541,7 +742,7 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git
+            $sudo_cmd pkg install -y ca_root_nss curl git jq
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
@@ -644,13 +845,56 @@ jobs:
           ./ci/build-freebsd-native.sh "$version" aarch64
 
       - name: Upload FreeBSD aarch64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: freebsd-aarch64-artifacts
-          if-no-files-found: error
-          path: |
-            ${{ env.REPO_DIR }}/dist/*.tar.gz
-            ${{ env.REPO_DIR }}/dist/*.pkg
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          cd "${REPO_DIR:?Missing checkout}"
+
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+
+          api_request() {
+            method=$1
+            url=$2
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          [ -n "$release_id" ] && [ "$release_id" != "null" ]
+
+          upload_asset() {
+            asset_path=$1
+            asset_name=$(basename "$asset_path")
+            asset_name_encoded=$(jq -nr --arg value "$asset_name" '$value|@uri')
+            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | head -n 1)"
+            if [ -n "$existing_asset_id" ]; then
+              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
+            fi
+            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
+              --form "attachment=@${asset_path}" >/dev/null
+          }
+
+          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.pkg' \) | sort |
+          while IFS= read -r asset_path; do
+            [ -n "$asset_path" ] || continue
+            upload_asset "$asset_path"
+          done
 
   release-publish:
     runs-on: ubuntu-22.04
@@ -670,13 +914,6 @@ jobs:
           fi
           $apt_get update
           $apt_get install -y --no-install-recommends ca-certificates curl git jq
-
-      - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: "*-artifacts"
-          merge-multiple: true
-          path: dist
 
       - name: Check out repository
         shell: bash
@@ -704,13 +941,54 @@ jobs:
 
       - name: Prepare release assets
         shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
 
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
           assets_file="${RUNNER_TEMP:-/tmp}/centralssh-release-assets.txt"
+
+          mkdir -p dist
+
+          api_request() {
+            local method="$1"
+            local url="$2"
+            shift 2
+            curl --fail-with-body --silent --show-error \
+              --request "$method" \
+              --header "Authorization: token ${token}" \
+              "$@" \
+              "$url"
+          }
+
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          [ -n "$release_id" ] && [ "$release_id" != "null" ]
+
+          api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+            | jq -r '.[] | [.name, (.browser_download_url // .download_url // empty)] | @tsv' \
+            | while IFS="$(printf '\t')" read -r asset_name asset_url; do
+                [ -n "$asset_name" ] || continue
+                [ "$asset_name" = "sha256sums.txt" ] && continue
+                [ -n "$asset_url" ] || {
+                  echo "Release asset ${asset_name} did not expose a download URL." >&2
+                  exit 1
+                }
+                curl --fail --silent --show-error --location \
+                  --header "Authorization: token ${token}" \
+                  --output "dist/${asset_name}" \
+                  "$asset_url"
+              done
+
           find dist -maxdepth 1 -type f | sort > "$assets_file"
           if [ ! -s "$assets_file" ]; then
-            echo "No release artifacts were downloaded." >&2
+            echo "No release artifacts were downloaded from Forgejo." >&2
             exit 1
           fi
 
