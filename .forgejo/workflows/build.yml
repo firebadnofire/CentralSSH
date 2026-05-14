@@ -167,6 +167,7 @@ jobs:
             git \
             jq \
             make \
+            nodejs \
             netcat-openbsd \
             pkg-config \
             rpm \
@@ -241,6 +242,14 @@ jobs:
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/package-linux.sh "$version" amd64
           ./ci/validate-linux-packages.sh "$version" amd64
+      - name: Validate Forgejo JS action runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking Forgejo JS action runtime dependencies for linux-packages-amd64"
+          command -v node
+          node --version
+          command -v npm >/dev/null 2>&1 && npm --version || true
       - name: Upload Linux amd64 artifacts
         uses: https://code.forgejo.org/actions/upload-artifact@v3
         with:
@@ -274,6 +283,7 @@ jobs:
             git \
             jq \
             make \
+            nodejs \
             pkg-config \
             rpm \
             dpkg-dev \
@@ -348,6 +358,14 @@ jobs:
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/package-linux.sh "$version" arm64
           ./ci/validate-linux-packages.sh "$version" arm64
+      - name: Validate Forgejo JS action runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking Forgejo JS action runtime dependencies for linux-packages-arm64"
+          command -v node
+          node --version
+          command -v npm >/dev/null 2>&1 && npm --version || true
       - name: Upload Linux arm64 artifacts
         uses: https://code.forgejo.org/actions/upload-artifact@v3
         with:
@@ -414,10 +432,13 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq node npm || \
+              $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq node20 npm-node20
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
+          command -v node >/dev/null 2>&1
+          node --version
 
       - name: Check out repository
         shell: bash
@@ -514,6 +535,14 @@ jobs:
           eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" amd64
+      - name: Validate Forgejo JS action runtime
+        shell: sh
+        run: |
+          set -eu
+          echo "Checking Forgejo JS action runtime dependencies for freebsd-amd64"
+          command -v node
+          node --version
+          command -v npm >/dev/null 2>&1 && npm --version || true
       - name: Upload FreeBSD amd64 artifacts
         uses: https://code.forgejo.org/actions/upload-artifact@v3
         with:
@@ -580,10 +609,13 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git jq
+            $sudo_cmd pkg install -y ca_root_nss curl git jq node npm || \
+              $sudo_cmd pkg install -y ca_root_nss curl git jq node20 npm-node20
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
+          command -v node >/dev/null 2>&1
+          node --version
 
       - name: Check out repository
         shell: bash
@@ -680,6 +712,14 @@ jobs:
           eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" aarch64
+      - name: Validate Forgejo JS action runtime
+        shell: sh
+        run: |
+          set -eu
+          echo "Checking Forgejo JS action runtime dependencies for freebsd-aarch64"
+          command -v node
+          node --version
+          command -v npm >/dev/null 2>&1 && npm --version || true
       - name: Upload FreeBSD aarch64 artifacts
         uses: https://code.forgejo.org/actions/upload-artifact@v3
         with:
@@ -706,7 +746,7 @@ jobs:
             apt_get="sudo apt-get"
           fi
           $apt_get update
-          $apt_get install -y --no-install-recommends ca-certificates curl git jq
+          $apt_get install -y --no-install-recommends ca-certificates curl git jq nodejs
 
       - name: Check out repository
         shell: bash
@@ -732,6 +772,15 @@ jobs:
           git -C "$repo_dir" checkout --detach "$commit_sha"
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
+
+      - name: Validate Forgejo JS action runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking Forgejo JS action runtime dependencies for release-publish"
+          command -v node
+          node --version
+          command -v npm >/dev/null 2>&1 && npm --version || true
 
       - name: Download Linux amd64 artifacts
         uses: https://code.forgejo.org/actions/download-artifact@v3
