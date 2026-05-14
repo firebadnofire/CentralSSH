@@ -1,9 +1,10 @@
 [package]
 name = "centralssh"
-version = "0.0.36"
+version = "0.0.0-dev"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "OpenSSH-compatible hardened SSH gateway"
+build = "build.rs"
 
 [dependencies]
 argon2 = { version = "0.5.3", features = ["std"] }

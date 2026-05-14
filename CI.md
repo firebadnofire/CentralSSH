@@ -481,8 +481,8 @@ Recommended usage patterns:
 - explicit checksum generation
 - explicit API-driven release publication
 
-When package jobs run across different runner classes, stage their validated artifacts in a central holding area that every runner can reach, such as a draft Forgejo release. A final Linux release job should wait on all required package jobs, download only the expected staged release attachments into a fresh release workspace, generate the checksum file there, upload it beside the artifacts, and publish the release in one API-driven pass. If the publish step fails, the emitted error payload should include the failing command and the captured log file path so attachment download and release API failures are explicit.
-Before any release artifacts are built, staged, or published, validate that the pushed tag is `v<version>` or `V<version>` and that the normalized tag version matches `Cargo.toml` exactly. Treat that check as a hard gate, not a warning.
+When package jobs run across different runner classes, stage their validated artifacts in a central holding area that every runner can reach, such as a draft Forgejo release. A final Linux release job should wait on all required package jobs, derive the normalized semantic version from the pushed tag, rewrite `Cargo.toml`, refresh `Cargo.lock`, download only the expected staged release attachments into a fresh release workspace, generate the checksum file there, upload it beside the artifacts, and publish the release in one API-driven pass. If the publish step fails, the emitted error payload should include the failing command and the captured log file path so attachment download and release API failures are explicit.
+The pushed git tag is the canonical release version. `Cargo.toml` is rewritten during CI to match that tag, so a stale placeholder in the repository is acceptable as long as the release helper can normalize the tag and the rewrite step succeeds.
 
 ## apt-cacher-ng
 

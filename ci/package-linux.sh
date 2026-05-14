@@ -10,6 +10,11 @@ version=${1:-}
 arch=${2:-}
 [ -n "$version" ] || usage
 [ -n "$arch" ] || usage
+if [ -n "${RELEASE_VERSION:-}" ] && [ "$version" != "$RELEASE_VERSION" ]; then
+  printf 'release version mismatch: arg=%s env=%s\n' "$version" "$RELEASE_VERSION" >&2
+  exit 1
+fi
+version=${RELEASE_VERSION:-$version}
 
 repo_root=${REPO_ROOT:-$PWD}
 dist_dir=${DIST_DIR:-"$repo_root/dist"}

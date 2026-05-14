@@ -83,6 +83,20 @@ jobs:
           "$HOME/.cargo/bin/rustc" --version
           "$HOME/.cargo/bin/cargo" --version
 
+      - name: Prepare release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-release-version.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/prepare-release-version" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_RELEASE_VERSION=%s\n' "$CENTRALSSH_RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_DIST_BUILD=%s\n' "$CENTRALSSH_DIST_BUILD" >> "$GITHUB_ENV"
+
       - name: Configure Cargo cache
         shell: bash
         run: |
@@ -198,6 +212,20 @@ jobs:
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-gnu
 
+      - name: Prepare release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-release-version.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-amd64/prepare-release-version" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_RELEASE_VERSION=%s\n' "$CENTRALSSH_RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_DIST_BUILD=%s\n' "$CENTRALSSH_DIST_BUILD" >> "$GITHUB_ENV"
+
       - name: Build Linux amd64 packages
         shell: bash
         env:
@@ -287,6 +315,20 @@ jobs:
           sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
           printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-gnu
+
+      - name: Prepare release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-release-version.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-arm64/prepare-release-version" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_RELEASE_VERSION=%s\n' "$CENTRALSSH_RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_DIST_BUILD=%s\n' "$CENTRALSSH_DIST_BUILD" >> "$GITHUB_ENV"
 
       - name: Build Linux arm64 packages
         shell: bash
@@ -467,8 +509,7 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           chmod +x ./ci/build-freebsd-native.sh
-          release_env=$(sh ./ci/release-version.sh)
-          eval "$release_env"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" amd64
           ./ci/stage-release-artifacts.sh freebsd-amd64 \
@@ -632,8 +673,7 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           chmod +x ./ci/build-freebsd-native.sh
-          release_env=$(sh ./ci/release-version.sh)
-          eval "$release_env"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" aarch64
           ./ci/stage-release-artifacts.sh freebsd-aarch64 \
