@@ -127,7 +127,6 @@ jobs:
 
   release-setup:
     runs-on: ubuntu-22.04
-    needs: linux-build-test
     steps:
       - name: Install release setup dependencies
         shell: bash
@@ -466,9 +465,160 @@ jobs:
             upload_asset "$asset_path"
           done
 
-  freebsd-amd64:
+  freebsd-build-test:
     runs-on: freebsd
     needs: release-setup
+    steps:
+      - name: Install FreeBSD test dependencies
+        shell: bash
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-build-test-install-deps.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-build-test/install-deps"; fi' EXIT
+          sudo_cmd=
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+            sudo_cmd="sudo -n"
+          fi
+          if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+            $sudo_cmd pkg update -f
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git
+          fi
+          command -v curl >/dev/null 2>&1
+          command -v git >/dev/null 2>&1
+
+      - name: Check out repository
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-build-test-checkout.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-build-test/checkout"; fi' EXIT
+
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
+          remote_url="${server_url%/}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
+
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
+
+      - name: Build and test FreeBSD host target
+        shell: bash
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-build-test.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if [ -x ./ci/post-ci-log.sh ]; then
+              ./ci/post-ci-log.sh "$context" error "$log_file" >/dev/null 2>&1 || true
+            elif command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-build-test/build-and-test"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
+            fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
+            sh /tmp/rustup.sh -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN"
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo fetch --locked
+          cargo test --locked
+          cargo build --locked --release
+          make -n install >/dev/null
+
+  freebsd-amd64:
+    runs-on: freebsd
+    needs:
+      - release-setup
+      - freebsd-build-test
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -527,7 +677,7 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
@@ -658,15 +808,17 @@ jobs:
           }
 
           release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          release_id="$(printf '%s' "$release_json" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
           upload_asset() {
             asset_path=$1
             asset_name=$(basename "$asset_path")
-            asset_name_encoded=$(jq -nr --arg value "$asset_name" '$value|@uri')
+            asset_name_encoded=$asset_name
             existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | tr '{' '\n' \
+              | grep -F "\"name\":\"${asset_name}\"" \
+              | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
               | head -n 1)"
             if [ -n "$existing_asset_id" ]; then
               api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
@@ -683,7 +835,9 @@ jobs:
 
   freebsd-aarch64:
     runs-on: freebsd
-    needs: release-setup
+    needs:
+      - release-setup
+      - freebsd-build-test
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash
@@ -742,7 +896,7 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git jq
+            $sudo_cmd pkg install -y ca_root_nss curl git
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
@@ -873,15 +1027,17 @@ jobs:
           }
 
           release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          release_id="$(printf '%s' "$release_json" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
           upload_asset() {
             asset_path=$1
             asset_name=$(basename "$asset_path")
-            asset_name_encoded=$(jq -nr --arg value "$asset_name" '$value|@uri')
+            asset_name_encoded=$asset_name
             existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
+              | tr '{' '\n' \
+              | grep -F "\"name\":\"${asset_name}\"" \
+              | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
               | head -n 1)"
             if [ -n "$existing_asset_id" ]; then
               api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
@@ -898,6 +1054,7 @@ jobs:
 
   release-publish:
     runs-on: ubuntu-22.04
+    if: ${{ success() }}
     needs:
       - linux-packages-amd64
       - linux-packages-arm64
