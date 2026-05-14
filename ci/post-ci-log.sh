@@ -5,6 +5,7 @@ endpoint=${CI_LOG_ENDPOINT:-http://192.168.86.41:9000/ingest}
 context=${1:-ci}
 status=${2:-error}
 log_file=${3:-}
+failed_command=${4:-${FAILED_COMMAND:-}}
 
 filter_log() {
   grep -Ev '^(    Updating crates\.io index| Downloading crates \.\.\.|  Downloaded |   Compiling )' |
@@ -25,6 +26,13 @@ trap cleanup EXIT INT TERM
   printf 'ref=%s\n' "${FORGEJO_REF:-${GITHUB_REF:-unknown}}"
   printf 'sha=%s\n' "${FORGEJO_SHA:-${GITHUB_SHA:-unknown}}"
   printf 'runner=%s\n' "${RUNNER_NAME:-unknown}"
+  if [ -n "$failed_command" ]; then
+    printf 'command=%s\n' "$(printf '%s' "$failed_command" | tr '\n' ' ')"
+  fi
+  if [ -n "$log_file" ]; then
+    printf 'log_file=%s\n' "$log_file"
+  fi
+  printf 'cwd=%s\n' "$(pwd)"
   printf '\n'
   if [ -n "$log_file" ] && [ -f "$log_file" ]; then
     filter_log < "$log_file"

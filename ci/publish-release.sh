@@ -53,15 +53,39 @@ centralssh-${version}-freebsd-aarch64.pkg
 centralssh-${version}-freebsd-aarch64.tar.gz
 EOF
 
+log_cmd() {
+  printf '+ %s\n' "$*" >&2
+}
+
 api_request() {
   method=$1
   url=$2
   shift 2
-  curl --fail-with-body --silent --show-error \
+  response_file=$(mktemp)
+  http_code_file=$(mktemp)
+  log_cmd "curl --fail-with-body --silent --show-error --request $method $url"
+  if curl --fail-with-body --silent --show-error \
     --request "$method" \
     --header "Authorization: token ${token}" \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
     "$@" \
-    "$url"
+    "$url" >"$http_code_file"; then
+    cat "$response_file"
+    rm -f "$response_file" "$http_code_file"
+    return 0
+  fi
+
+  curl_rc=$?
+  http_code=$(cat "$http_code_file" 2>/dev/null || printf 'unknown')
+  printf 'api request failed: method=%s url=%s curl_exit=%s http_status=%s\n' \
+    "$method" "$url" "$curl_rc" "$http_code" >&2
+  if [ -s "$response_file" ]; then
+    printf 'api response body:\n' >&2
+    cat "$response_file" >&2
+  fi
+  rm -f "$response_file" "$http_code_file"
+  exit "$curl_rc"
 }
 
 release_name="CentralSSH ${tag}"
@@ -89,17 +113,73 @@ release_id=$(printf '%s' "$release_json" | jq -r '.id')
 release_assets="$work_dir/release-assets.json"
 api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" > "$release_assets"
 
+download_asset_via_api() {
+  asset_id=$1
+  asset_name=$2
+  output_path=$3
+  asset_url="${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${asset_id}"
+
+  log_cmd "curl --fail --silent --show-error --location --request GET ${asset_url} (Accept: application/octet-stream)"
+  curl --fail --silent --show-error --location \
+    --request GET \
+    --header "Accept: application/octet-stream" \
+    --header "Authorization: token ${token}" \
+    --output "$output_path" \
+    "$asset_url"
+}
+
+download_asset_via_browser() {
+  browser_url=$1
+  output_path=$2
+
+  log_cmd "curl --fail --silent --show-error --location ${browser_url} (basic auth x-access-token)"
+  curl --fail --silent --show-error --location \
+    --user "x-access-token:${token}" \
+    --output "$output_path" \
+    "$browser_url"
+}
+
 download_asset() {
   asset_name=$1
-  download_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
-  [ -n "$download_url" ] && [ "$download_url" != "null" ] || {
+  asset_id=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' "$release_assets" | sed -n '1p')
+  browser_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
+  expected_size=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .size' "$release_assets" | sed -n '1p')
+
+  [ -n "$asset_id" ] && [ "$asset_id" != "null" ] || {
     echo "missing staged release asset: $asset_name" >&2
     exit 1
   }
-  curl --fail-with-body --silent --show-error --location \
-    --header "Authorization: token ${token}" \
-    --output "$dist_dir/$asset_name" \
-    "$download_url"
+  [ -n "$browser_url" ] && [ "$browser_url" != "null" ] || {
+    echo "missing staged release browser URL: $asset_name" >&2
+    exit 1
+  }
+  [ -n "$expected_size" ] && [ "$expected_size" != "null" ] || {
+    echo "missing staged release size metadata: $asset_name" >&2
+    exit 1
+  }
+
+  output_path="$dist_dir/$asset_name"
+  if download_asset_via_api "$asset_id" "$asset_name" "$output_path"; then
+    actual_size=$(wc -c < "$output_path" | tr -d ' ')
+    if [ "$actual_size" != "$expected_size" ]; then
+      printf 'api asset download size mismatch for %s: expected=%s actual=%s; retrying browser URL\n' \
+        "$asset_name" "$expected_size" "$actual_size" >&2
+      rm -f "$output_path"
+      download_asset_via_browser "$browser_url" "$output_path"
+    fi
+  else
+    printf 'api asset download failed for %s; retrying browser URL\n' "$asset_name" >&2
+    rm -f "$output_path"
+    download_asset_via_browser "$browser_url" "$output_path"
+  fi
+
+  actual_size=$(wc -c < "$output_path" | tr -d ' ')
+  [ "$actual_size" = "$expected_size" ] || {
+    printf 'downloaded asset size mismatch for %s: expected=%s actual=%s\n' \
+      "$asset_name" "$expected_size" "$actual_size" >&2
+    exit 1
+  }
+
   printf '%s\n' "$dist_dir/$asset_name" >> "$assets_file"
 }
 

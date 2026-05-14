@@ -31,7 +31,7 @@ Support files:
 - `Makefile`: build/install entrypoints and packaging install behavior.
 - `examples/*.toml`: sample runtime configuration.
 - `tools/cssh-keyscan`: helper for building target host trust entries.
-- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI for Linux amd64 or arm64 packaging plus native FreeBSD amd64 packaging and native FreeBSD aarch64 cross-packaging helpers. The aarch64 FreeBSD path uses the packaged `aarch64` sysroot and a nightly `build-std` cross-build. Release helpers stage validated package artifacts on a draft Forgejo release, then publish a single Forgejo release with `sha256sums` after all package jobs succeed. Failures ship filtered logs to the `CI.md` ingestion endpoint.
+- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI for Linux amd64 or arm64 packaging plus native FreeBSD amd64 packaging and native FreeBSD aarch64 cross-packaging helpers. The aarch64 FreeBSD path uses the packaged `aarch64` sysroot and a nightly `build-std` cross-build. Release helpers stage validated package artifacts on a draft Forgejo release, then the final publish helper re-downloads those staged attachments into a fresh workspace, writes `sha256sums`, and publishes one Forgejo release after all package jobs succeed. Failures ship filtered logs to the `CI.md` ingestion endpoint, and the release publication path records the exact failing command.
 - `packaging/`: FreeBSD rc and systemd service packaging.
 - `Dockerfile`, `compose.yaml`, `.dockerignore`, and `container/`: container build, runtime, and example deployment artifacts.
 - `container.md`: container operations guide for Docker and Podman deployments.
