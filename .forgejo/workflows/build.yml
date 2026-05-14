@@ -817,8 +817,7 @@ jobs:
 
           releases_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" | tr -d '\n')"
           release_id="$(printf '%s' "$releases_json" \
-            | sed 's/},{/}\
-{/g' \
+            | sed $'s/},{/}\\\n{/g' \
             | grep -F "\"tag_name\":\"${tag}\"" \
             | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
             | head -n 1)"
@@ -1044,8 +1043,7 @@ jobs:
 
           releases_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" | tr -d '\n')"
           release_id="$(printf '%s' "$releases_json" \
-            | sed 's/},{/}\
-{/g' \
+            | sed $'s/},{/}\\\n{/g' \
             | grep -F "\"tag_name\":\"${tag}\"" \
             | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
             | head -n 1)"
