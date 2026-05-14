@@ -26,7 +26,8 @@ repo_root=${REPO_ROOT:-$PWD}
   exit 1
 }
 
-eval "$(sh "$repo_root/ci/release-version.sh")"
+release_env=$(sh "$repo_root/ci/release-version.sh") || exit $?
+eval "$release_env"
 version=${RELEASE_VERSION:?Missing validated release version}
 release_tag=${RELEASE_TAG:-}
 [ "$tag" = "$release_tag" ] || {

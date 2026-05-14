@@ -18,7 +18,8 @@ api_url=${FORGEJO_API_URL:-${GITHUB_API_URL:-}}
 token=${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}
 repo_root=${REPO_ROOT:-$PWD}
 
-eval "$(sh "$repo_root/ci/release-version.sh")"
+release_env=$(sh "$repo_root/ci/release-version.sh") || exit $?
+eval "$release_env"
 release_version=${RELEASE_VERSION:?Missing validated release version}
 release_tag=${RELEASE_TAG:-}
 

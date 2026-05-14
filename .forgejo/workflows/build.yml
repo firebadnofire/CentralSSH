@@ -467,11 +467,9 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           chmod +x ./ci/build-freebsd-native.sh
-          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
-          [ -n "$version" ] || {
-            echo "failed to resolve Cargo.toml version" >&2
-            exit 1
-          }
+          release_env=$(sh ./ci/release-version.sh)
+          eval "$release_env"
+          version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" amd64
           ./ci/stage-release-artifacts.sh freebsd-amd64 \
             "dist/centralssh-${version}-freebsd-amd64.pkg" \
@@ -634,11 +632,9 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           chmod +x ./ci/build-freebsd-native.sh
-          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
-          [ -n "$version" ] || {
-            echo "failed to resolve Cargo.toml version" >&2
-            exit 1
-          }
+          release_env=$(sh ./ci/release-version.sh)
+          eval "$release_env"
+          version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" aarch64
           ./ci/stage-release-artifacts.sh freebsd-aarch64 \
             "dist/centralssh-${version}-freebsd-aarch64.pkg" \
