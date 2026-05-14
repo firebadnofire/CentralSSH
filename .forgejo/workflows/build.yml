@@ -159,7 +159,7 @@ jobs:
           owner="${repository%%/*}"
           repo="${repository#*/}"
           release_name="CentralSSH ${tag}"
-          release_body="Automated CentralSSH draft release for ${tag}. This remains unpublished until every required pipeline succeeds."
+          release_body="Automated CentralSSH draft release for ${tag}."
 
           api_request() {
             local method="$1"
@@ -172,14 +172,10 @@ jobs:
               "$url"
           }
 
-          release_response="$(mktemp)"
-          release_status="$(curl --silent --show-error \
-            --output "$release_response" \
-            --write-out "%{http_code}" \
-            --header "Authorization: token ${token}" \
-            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
 
-          if [ "$release_status" = "404" ]; then
+          if [ -z "$release_json" ]; then
             release_payload="$(jq -n \
               --arg tag "$tag" \
               --arg name "$release_name" \
@@ -188,10 +184,6 @@ jobs:
             api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
               --header "Content-Type: application/json" \
               --data "$release_payload" >/dev/null
-          elif [ "$release_status" != "200" ]; then
-            cat "$release_response" >&2
-            echo "Failed to look up release for ${tag}: HTTP ${release_status}" >&2
-            exit 1
           fi
 
   linux-packages-amd64:
@@ -308,7 +300,8 @@ jobs:
               "$url"
           }
 
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
           release_id="$(printf '%s' "$release_json" | jq -r '.id')"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
@@ -450,7 +443,8 @@ jobs:
               "$url"
           }
 
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
           release_id="$(printf '%s' "$release_json" | jq -r '.id')"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
@@ -821,7 +815,8 @@ jobs:
               "$url"
           }
 
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
           release_id="$(printf '%s' "$release_json" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
@@ -1043,7 +1038,8 @@ jobs:
               "$url"
           }
 
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
           release_id="$(printf '%s' "$release_json" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
@@ -1150,7 +1146,8 @@ jobs:
               "$url"
           }
 
-          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
           release_id="$(printf '%s' "$release_json" | jq -r '.id')"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
 
@@ -1241,38 +1238,21 @@ jobs:
               --form "attachment=@${asset_path}" >/dev/null
           }
 
-          release_response="$(mktemp)"
-          release_status="$(curl --silent --show-error \
-            --output "$release_response" \
-            --write-out "%{http_code}" \
-            --header "Authorization: token ${token}" \
-            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
-
-          if [ "$release_status" = "404" ]; then
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
-            release_json="$(api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          elif [ "$release_status" = "200" ]; then
-            release_json="$(cat "$release_response")"
-            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
-            release_json="$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          else
-            cat "$release_response" >&2
-            echo "Failed to look up release for ${tag}: HTTP ${release_status}" >&2
+          release_json="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+            | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')"
+          if [ -z "$release_json" ]; then
+            echo "Failed to find staged Forgejo release for ${tag} before publish." >&2
             exit 1
           fi
+          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
+          release_payload="$(jq -n \
+            --arg tag "$tag" \
+            --arg name "$release_name" \
+            --arg body "$release_body" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
+          release_json="$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
+            --header "Content-Type: application/json" \
+            --data "$release_payload")"
 
           release_id="$(printf '%s' "$release_json" | jq -r '.id')"
           [ -n "$release_id" ] && [ "$release_id" != "null" ]
