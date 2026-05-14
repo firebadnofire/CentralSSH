@@ -711,7 +711,8 @@ The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plu
 - FreeBSD aarch64 packaging now also runs on the native `freebsd` runner as a cross-build and produces `centralssh-<version>-freebsd-aarch64.pkg` and `centralssh-<version>-freebsd-aarch64.tar.gz`. The cross build uses the FreeBSD `aarch64` sysroot wrapper and `cargo +nightly -Z build-std`.
 - Native FreeBSD jobs never block on an interactive `sudo` prompt anymore. If non-interactive root access is unavailable, the pipeline skips the privileged amd64 runtime service check instead of hanging.
 - Linux and FreeBSD jobs run in parallel on their native runner classes unless an individual Linux packaging job explicitly depends on the locked host validation pass.
-- Failing CI steps upload a filtered tail of their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits.
+- Tagged runs stage artifacts on a draft Forgejo release first, and the workflow only publishes the release after every required Linux and FreeBSD job succeeds.
+- Failing CI steps, including artifact upload and release publication stages, upload a filtered tail of their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits.
 
 ## 23. Recommended production setup
 
