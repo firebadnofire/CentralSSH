@@ -712,6 +712,7 @@ The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plu
 - Native FreeBSD jobs never block on an interactive `sudo` prompt anymore. If non-interactive root access is unavailable, the pipeline skips the privileged amd64 runtime service check instead of hanging.
 - Linux and FreeBSD jobs run on their native runner classes. Package jobs stage only their validated artifacts on a draft Forgejo release.
 - Tagged runs publish from the final `release-publish` job only after every required Linux and FreeBSD package job succeeds. That job downloads the expected artifacts from the staged release attachments into one workspace, writes a single `sha256sums` file, uploads it beside the artifacts, and publishes one Forgejo release.
+- Release packaging, staging, and publication all stop early unless the pushed tag is `v<version>` or `V<version>` and matches `Cargo.toml` exactly.
 - Failing CI steps, including release staging and release publication stages, upload a filtered tail of their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits. The release publication failure payload now also includes the exact failing command and captured log path.
 
 ## 23. Recommended production setup

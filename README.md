@@ -166,6 +166,7 @@ sudo make install
 
 The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, and validation are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
 Tagged package jobs stage their validated artifacts on a draft Forgejo release. The final `release-publish` job waits for every required Linux and FreeBSD package job, downloads the expected artifact list from the staged release attachments into one fresh release workspace, writes a single `sha256sums` file, uploads it beside the artifacts, and then publishes one Forgejo release.
+The release helpers treat `Cargo.toml` plus the pushed tag as one checked release contract: the tag must be `v<version>` or `V<version>`, and the normalized tag version must match `Cargo.toml` before packaging, staging, or publication continues.
 When a CI step fails, including release staging and release publication steps, the workflow now ships a filtered tail of the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87). The release publication path also includes the failing command and log file path so runner-local API or download failures are explicit instead of collapsing to a bare curl exit line.
 
 ## Configuration

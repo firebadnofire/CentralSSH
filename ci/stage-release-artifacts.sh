@@ -16,6 +16,11 @@ repository=${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}
 tag=${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}
 api_url=${FORGEJO_API_URL:-${GITHUB_API_URL:-}}
 token=${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}
+repo_root=${REPO_ROOT:-$PWD}
+
+eval "$(sh "$repo_root/ci/release-version.sh")"
+release_version=${RELEASE_VERSION:?Missing validated release version}
+release_tag=${RELEASE_TAG:-}
 
 [ -n "$repository" ] || {
   echo "missing repository name for release staging" >&2
@@ -23,6 +28,10 @@ token=${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}
 }
 [ -n "$tag" ] || {
   echo "missing tag name for release staging" >&2
+  exit 1
+}
+[ "$tag" = "$release_tag" ] || {
+  printf 'release staging tag mismatch: env_tag=%s validated_tag=%s\n' "$tag" "$release_tag" >&2
   exit 1
 }
 [ -n "$api_url" ] || {
@@ -104,7 +113,18 @@ for artifact_path in "$@"; do
     echo "release artifact does not exist: $artifact_path" >&2
     exit 1
   }
+  asset_name=$(basename "$artifact_path")
+  case "$asset_name" in
+    centralssh-"$release_version"-*)
+      ;;
+    *)
+      printf 'release artifact version mismatch: expected prefix centralssh-%s- got %s\n' \
+        "$release_version" "$asset_name" >&2
+      exit 1
+      ;;
+  esac
   upload_asset "$artifact_path"
 done
 
-printf 'staged %s release artifacts on draft release %s\n' "$job_name" "$tag"
+printf 'staged %s release artifacts on draft release %s using version %s\n' \
+  "$job_name" "$tag" "$release_version"

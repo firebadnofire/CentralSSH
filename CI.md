@@ -482,6 +482,7 @@ Recommended usage patterns:
 - explicit API-driven release publication
 
 When package jobs run across different runner classes, stage their validated artifacts in a central holding area that every runner can reach, such as a draft Forgejo release. A final Linux release job should wait on all required package jobs, download only the expected staged release attachments into a fresh release workspace, generate the checksum file there, upload it beside the artifacts, and publish the release in one API-driven pass. If the publish step fails, the emitted error payload should include the failing command and the captured log file path so attachment download and release API failures are explicit.
+Before any release artifacts are built, staged, or published, validate that the pushed tag is `v<version>` or `V<version>` and that the normalized tag version matches `Cargo.toml` exactly. Treat that check as a hard gate, not a warning.
 
 ## apt-cacher-ng
 

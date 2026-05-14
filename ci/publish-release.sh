@@ -7,6 +7,7 @@ tag=${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}
 api_url=${FORGEJO_API_URL:-${GITHUB_API_URL:-}}
 token=${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}
 work_dir=${RELEASE_WORK_DIR:-${RUNNER_TEMP:-/tmp}/centralssh-release-publish}
+repo_root=${REPO_ROOT:-$PWD}
 
 [ -n "$repository" ] || {
   echo "missing repository name for release publication" >&2
@@ -25,11 +26,14 @@ work_dir=${RELEASE_WORK_DIR:-${RUNNER_TEMP:-/tmp}/centralssh-release-publish}
   exit 1
 }
 
-version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
-[ -n "$version" ] || {
-  echo "failed to resolve Cargo.toml version" >&2
+eval "$(sh "$repo_root/ci/release-version.sh")"
+version=${RELEASE_VERSION:?Missing validated release version}
+release_tag=${RELEASE_TAG:-}
+[ "$tag" = "$release_tag" ] || {
+  printf 'release publication tag mismatch: env_tag=%s validated_tag=%s\n' "$tag" "$release_tag" >&2
   exit 1
 }
+printf 'release publication: tag=%s version=%s\n' "$tag" "$version"
 
 owner=${repository%%/*}
 repo=${repository#*/}
@@ -113,19 +117,8 @@ release_id=$(printf '%s' "$release_json" | jq -r '.id')
 release_assets="$work_dir/release-assets.json"
 api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" > "$release_assets"
 
-download_asset_via_api() {
-  asset_id=$1
-  asset_name=$2
-  output_path=$3
-  asset_url="${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${asset_id}"
-
-  log_cmd "curl --fail --silent --show-error --location --request GET ${asset_url} (Accept: application/octet-stream)"
-  curl --fail --silent --show-error --location \
-    --request GET \
-    --header "Accept: application/octet-stream" \
-    --header "Authorization: token ${token}" \
-    --output "$output_path" \
-    "$asset_url"
+refresh_release_assets() {
+  api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" > "$release_assets"
 }
 
 download_asset_via_browser() {
@@ -141,16 +134,11 @@ download_asset_via_browser() {
 
 download_asset() {
   asset_name=$1
-  asset_id=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' "$release_assets" | sed -n '1p')
   browser_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
   expected_size=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .size' "$release_assets" | sed -n '1p')
 
-  [ -n "$asset_id" ] && [ "$asset_id" != "null" ] || {
-    echo "missing staged release asset: $asset_name" >&2
-    exit 1
-  }
   [ -n "$browser_url" ] && [ "$browser_url" != "null" ] || {
-    echo "missing staged release browser URL: $asset_name" >&2
+    echo "missing staged release asset: $asset_name" >&2
     exit 1
   }
   [ -n "$expected_size" ] && [ "$expected_size" != "null" ] || {
@@ -159,26 +147,32 @@ download_asset() {
   }
 
   output_path="$dist_dir/$asset_name"
-  if download_asset_via_api "$asset_id" "$asset_name" "$output_path"; then
-    actual_size=$(wc -c < "$output_path" | tr -d ' ')
-    if [ "$actual_size" != "$expected_size" ]; then
-      printf 'api asset download size mismatch for %s: expected=%s actual=%s; retrying browser URL\n' \
-        "$asset_name" "$expected_size" "$actual_size" >&2
-      rm -f "$output_path"
-      download_asset_via_browser "$browser_url" "$output_path"
-    fi
-  else
-    printf 'api asset download failed for %s; retrying browser URL\n' "$asset_name" >&2
-    rm -f "$output_path"
-    download_asset_via_browser "$browser_url" "$output_path"
-  fi
+  download_asset_via_browser "$browser_url" "$output_path"
 
   actual_size=$(wc -c < "$output_path" | tr -d ' ')
-  [ "$actual_size" = "$expected_size" ] || {
-    printf 'downloaded asset size mismatch for %s: expected=%s actual=%s\n' \
+  if [ "$actual_size" != "$expected_size" ]; then
+    printf 'downloaded asset size mismatch for %s: expected=%s actual=%s; refreshing asset metadata and retrying once\n' \
       "$asset_name" "$expected_size" "$actual_size" >&2
-    exit 1
-  }
+    rm -f "$output_path"
+    refresh_release_assets
+    browser_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
+    expected_size=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .size' "$release_assets" | sed -n '1p')
+    [ -n "$browser_url" ] && [ "$browser_url" != "null" ] || {
+      echo "missing staged release browser URL after refresh: $asset_name" >&2
+      exit 1
+    }
+    [ -n "$expected_size" ] && [ "$expected_size" != "null" ] || {
+      echo "missing staged release size metadata after refresh: $asset_name" >&2
+      exit 1
+    }
+    download_asset_via_browser "$browser_url" "$output_path"
+    actual_size=$(wc -c < "$output_path" | tr -d ' ')
+    [ "$actual_size" = "$expected_size" ] || {
+      printf 'downloaded asset size mismatch for %s after retry: expected=%s actual=%s url=%s\n' \
+        "$asset_name" "$expected_size" "$actual_size" "$browser_url" >&2
+      exit 1
+    }
+  fi
 
   printf '%s\n' "$dist_dir/$asset_name" >> "$assets_file"
 }

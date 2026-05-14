@@ -34,6 +34,7 @@ jobs:
             g++ \
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
+            libssl-dev \
             git \
             make \
             netcat-openbsd \
@@ -148,6 +149,7 @@ jobs:
             gcc \
             g++ \
             libc6-dev-arm64-cross \
+            libssl-dev \
             git \
             jq \
             make \
@@ -207,7 +209,8 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-amd64/build-and-validate" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           export PATH="$HOME/.cargo/bin:$PATH"
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          eval "$(sh ./ci/release-version.sh)"
+          version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/package-linux.sh "$version" amd64
           ./ci/validate-linux-packages.sh "$version" amd64
           ./ci/stage-release-artifacts.sh linux-packages-amd64 \
@@ -238,6 +241,7 @@ jobs:
             g++ \
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
+            libssl-dev \
             git \
             jq \
             make \
@@ -297,7 +301,8 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          eval "$(sh ./ci/release-version.sh)"
+          version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/package-linux.sh "$version" arm64
           ./ci/validate-linux-packages.sh "$version" arm64
           ./ci/stage-release-artifacts.sh linux-packages-arm64 \
