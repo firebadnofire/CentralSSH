@@ -10,7 +10,6 @@ env:
   RUST_TOOLCHAIN: "1.95.0"
   RUSTUP_INIT_URL: "https://sh.rustup.rs"
   CI_LOG_ENDPOINT: "http://192.168.86.41:9000/ingest"
-  RELEASE_STAGING_ROOT: "/build-cache/centralssh-release-staging"
 
 jobs:
   linux-build-test:
@@ -150,6 +149,7 @@ jobs:
             g++ \
             libc6-dev-arm64-cross \
             git \
+            jq \
             make \
             netcat-openbsd \
             pkg-config \
@@ -198,6 +198,8 @@ jobs:
 
       - name: Build Linux amd64 packages
         shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64.log"
@@ -237,6 +239,7 @@ jobs:
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             git \
+            jq \
             make \
             pkg-config \
             rpm \
@@ -283,6 +286,8 @@ jobs:
 
       - name: Build Linux arm64 packages
         shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
           log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64.log"
@@ -345,7 +350,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake sudo nc; do
+          for cmd in sh pkg curl fetch git gmake jq sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -360,7 +365,7 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
@@ -408,6 +413,8 @@ jobs:
 
       - name: Build and validate FreeBSD amd64 artifacts
         shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
@@ -510,7 +517,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake sudo nc; do
+          for cmd in sh pkg curl fetch git gmake jq sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -525,7 +532,7 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git
+            $sudo_cmd pkg install -y ca_root_nss curl git jq
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
@@ -573,6 +580,8 @@ jobs:
 
       - name: Build and validate FreeBSD aarch64 artifacts
         shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -eu
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}

@@ -2,10 +2,8 @@
 set -eu
 umask 022
 
-release_root=${RELEASE_STAGING_ROOT:-/build-cache/centralssh-release-staging}
 repository=${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:-}}
 tag=${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}
-commit_sha=${FORGEJO_SHA:-${GITHUB_SHA:-}}
 api_url=${FORGEJO_API_URL:-${GITHUB_API_URL:-}}
 token=${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}
 work_dir=${RELEASE_WORK_DIR:-${RUNNER_TEMP:-/tmp}/centralssh-release-publish}
@@ -16,10 +14,6 @@ work_dir=${RELEASE_WORK_DIR:-${RUNNER_TEMP:-/tmp}/centralssh-release-publish}
 }
 [ -n "$tag" ] || {
   echo "missing tag name for release publication" >&2
-  exit 1
-}
-[ -n "$commit_sha" ] || {
-  echo "missing commit SHA for release publication" >&2
   exit 1
 }
 [ -n "$api_url" ] || {
@@ -39,8 +33,6 @@ version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
 
 owner=${repository%%/*}
 repo=${repository#*/}
-repo_key=$(printf '%s' "$repository" | sed 's#[/:@]#_#g')
-stage_run="$release_root/$repo_key/$tag/$commit_sha"
 dist_dir="$work_dir/dist"
 expected_file="$work_dir/expected-assets.txt"
 assets_file="$work_dir/release-assets.txt"
@@ -61,34 +53,6 @@ centralssh-${version}-freebsd-aarch64.pkg
 centralssh-${version}-freebsd-aarch64.tar.gz
 EOF
 
-for job_name in linux-packages-amd64 linux-packages-arm64 freebsd-amd64 freebsd-aarch64; do
-  [ -f "$stage_run/$job_name/.complete" ] || {
-    echo "missing completed release staging marker for $job_name under $stage_run" >&2
-    exit 1
-  }
-done
-
-: > "$assets_file"
-while IFS= read -r asset_name; do
-  matches=$(find "$stage_run" -mindepth 2 -maxdepth 2 -type f -name "$asset_name" | LC_ALL=C sort)
-  count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
-  [ "$count" = "1" ] || {
-    echo "expected exactly one staged artifact named $asset_name, found $count" >&2
-    exit 1
-  }
-  asset_path=$(printf '%s\n' "$matches" | sed -n '1p')
-  cp "$asset_path" "$dist_dir/$asset_name"
-  printf '%s\n' "$dist_dir/$asset_name" >> "$assets_file"
-done < "$expected_file"
-
-(
-  cd "$dist_dir"
-  while IFS= read -r asset_name; do
-    sha256sum "$asset_name"
-  done < "$expected_file"
-) > "$dist_dir/sha256sums"
-printf '%s\n' "$dist_dir/sha256sums" >> "$assets_file"
-
 api_request() {
   method=$1
   url=$2
@@ -100,23 +64,8 @@ api_request() {
     "$url"
 }
 
-upload_asset() {
-  release_id=$1
-  asset_path=$2
-  asset_name=$(basename "$asset_path")
-  asset_name_encoded=$(jq -nr --arg v "$asset_name" '$v|@uri')
-  api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-    --header "Content-Type: application/octet-stream" \
-    --data-binary @"$asset_path" >/dev/null
-}
-
 release_name="CentralSSH ${tag}"
 release_body="Automated CentralSSH release for ${tag}. See sha256sums for checksums."
-draft_payload=$(jq -n \
-  --arg tag "$tag" \
-  --arg name "$release_name" \
-  --arg body "$release_body" \
-  '{tag_name: $tag, name: $name, body: $body, draft: true, prerelease: false, hide_archive_links: false}')
 public_payload=$(jq -n \
   --arg tag "$tag" \
   --arg name "$release_name" \
@@ -127,18 +76,8 @@ release_json=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
   | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')
 
 if [ -z "$release_json" ]; then
-  release_json=$(api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
-    --header "Content-Type: application/json" \
-    --data "$draft_payload")
-else
-  release_id=$(printf '%s' "$release_json" | jq -r '.id')
-  [ -n "$release_id" ] && [ "$release_id" != "null" ] || {
-    echo "failed to resolve existing release id for $tag" >&2
-    exit 1
-  }
-  release_json=$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
-    --header "Content-Type: application/json" \
-    --data "$draft_payload")
+  echo "failed to find staged Forgejo release for $tag" >&2
+  exit 1
 fi
 
 release_id=$(printf '%s' "$release_json" | jq -r '.id')
@@ -147,23 +86,44 @@ release_id=$(printf '%s' "$release_json" | jq -r '.id')
   exit 1
 }
 
-api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-  | jq -r '.[].id' \
-  | while IFS= read -r asset_id; do
-      [ -n "$asset_id" ] || continue
-      api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${asset_id}" >/dev/null
-    done
+release_assets="$work_dir/release-assets.json"
+api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" > "$release_assets"
 
-while IFS= read -r asset_path; do
-  upload_asset "$release_id" "$asset_path"
-done < "$assets_file"
+download_asset() {
+  asset_name=$1
+  download_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
+  [ -n "$download_url" ] && [ "$download_url" != "null" ] || {
+    echo "missing staged release asset: $asset_name" >&2
+    exit 1
+  }
+  curl --fail-with-body --silent --show-error --location \
+    --header "Authorization: token ${token}" \
+    --output "$dist_dir/$asset_name" \
+    "$download_url"
+  printf '%s\n' "$dist_dir/$asset_name" >> "$assets_file"
+}
+
+: > "$assets_file"
+while IFS= read -r asset_name; do
+  download_asset "$asset_name"
+done < "$expected_file"
+
+(
+  cd "$dist_dir"
+  while IFS= read -r asset_name; do
+    sha256sum "$asset_name"
+  done < "$expected_file"
+) > "$dist_dir/sha256sums"
+
+sha_asset_id=$(jq -r '.[] | select(.name == "sha256sums") | .id' "$release_assets" | sed -n '1p')
+if [ -n "$sha_asset_id" ]; then
+  api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${sha_asset_id}" >/dev/null
+fi
+api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=sha256sums" \
+  --form "attachment=@${dist_dir}/sha256sums" >/dev/null
 
 api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
   --header "Content-Type: application/json" \
   --data "$public_payload" >/dev/null
-
-case "$stage_run" in
-  "$release_root"/*) rm -rf "$stage_run" 2>/dev/null || true ;;
-esac
 
 printf 'published release %s with %s artifacts plus sha256sums\n' "$tag" "$(wc -l < "$expected_file" | tr -d ' ')"
