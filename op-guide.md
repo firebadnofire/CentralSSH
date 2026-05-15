@@ -25,6 +25,7 @@ The operator should know that the repo currently contains both old and new assum
 - The current proxy code does relay `session`, `exec`, `subsystem`, PTY, `direct-tcpip`, and remote forwarding requests.
 - Session request/data forwarding happens from the `russh` server callbacks, so post-selection SSH behavior does not depend on a gateway-local shell shim.
 - If `settings.drop_to_menu=true`, completed interactive shell channels return to the selection menu inline. Stock OpenSSH `sftp` and `scp` clients do not support an inline post-exit gateway menu, so those channels close normally. `Q` disconnects the SSH session from either selection menu.
+- The gateway title is shown on the selection menu and is not repeated on every keyboard-interactive auth prompt.
 - The `README.md` has been updated to match this transparent proxy model.
 - Agent forwarding is still rejected by policy.
 

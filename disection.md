@@ -468,6 +468,8 @@ Selection is still keyboard-interactive prompt driven. It is intentionally minim
 - numbered server list
 - selection prompt
 
+The gateway title is shown on the selection menu and is not repeated on each keyboard-interactive auth prompt.
+
 After a valid choice, the handler stops acting like a menu flow and switches to proxy behavior.
 
 ## 11. Proxy internals

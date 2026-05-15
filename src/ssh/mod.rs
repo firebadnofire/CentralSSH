@@ -142,7 +142,7 @@ impl GatewayHandler {
 
     fn keyboard_prompt(instructions: String, prompt: &'static str, echo: bool) -> Auth {
         Auth::Partial {
-            name: Cow::Borrowed("CentralSSH Gateway"),
+            name: Cow::Borrowed(""),
             instructions: Cow::Owned(instructions),
             prompts: Cow::Owned(vec![(Cow::Borrowed(prompt), echo)]),
         }
@@ -433,7 +433,7 @@ Use the plaintext secret or URI above.\n\n"
             bytes::Bytes::from(format!("{}\n", Self::denied_protocol_message(protocol))),
         )?;
         session.exit_status_request(channel, 1)?;
-        session.eof(channel)?;
+        session.close(channel)?;
         Ok(())
     }
 
@@ -2811,9 +2811,10 @@ mod tests {
 
     #[test]
     fn password_prompt_omits_redundant_user_label() {
-        let Auth::Partial { instructions, .. } = GatewayHandler::password_prompt("alice") else {
+        let Auth::Partial { name, instructions, .. } = GatewayHandler::password_prompt("alice") else {
             panic!("expected partial auth prompt");
         };
+        assert!(name.is_empty());
         assert!(instructions.is_empty());
     }
 
