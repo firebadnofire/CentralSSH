@@ -420,7 +420,7 @@ Use the plaintext secret or URI above.\n\n"
         format!("{}: access denied", protocol.to_ascii_lowercase())
     }
 
-    fn deny_protocol_and_close(
+    fn deny_protocol_and_disconnect(
         &self,
         session: &mut Session,
         channel: ChannelId,
@@ -433,7 +433,7 @@ Use the plaintext secret or URI above.\n\n"
             bytes::Bytes::from(format!("{}\n", Self::denied_protocol_message(protocol))),
         )?;
         session.exit_status_request(channel, 1)?;
-        session.close(channel)?;
+        session.disconnect(russh::Disconnect::ByApplication, "request denied", "en")?;
         Ok(())
     }
 
@@ -2026,7 +2026,7 @@ impl server::Handler for GatewayHandler {
                 &format!("scp disabled by authorization policy ({scp_mode})"),
             )
             .await;
-            return self.deny_protocol_and_close(session, channel, "scp");
+            return self.deny_protocol_and_disconnect(session, channel, "scp");
         }
 
         match proxy_session.exec(channel, true, data.to_vec()).await {
@@ -2065,6 +2065,7 @@ impl server::Handler for GatewayHandler {
             return Ok(());
         };
         if !subsystem_request_permitted(policy, name) {
+            let denied_protocol = if !policy.allow_scp { "scp" } else { "sftp" };
             self.log_policy_denial(
                 "denied_sftp",
                 "subsystem",
@@ -2072,7 +2073,8 @@ impl server::Handler for GatewayHandler {
                 "sftp disabled by authorization policy",
             )
             .await;
-            return self.deny_protocol_and_close(session, channel, "sftp");
+            return self
+                .deny_protocol_and_disconnect(session, channel, denied_protocol);
         }
 
         match proxy_session

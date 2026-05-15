@@ -209,7 +209,7 @@ If `settings.hide_proxy_ip=true`, the authenticated selection menu shows only lo
 - `allow_remote_forwarding=false` rejects `tcpip-forward` and `cancel-tcpip-forward`.
 - `allow_sftp=false` rejects `subsystem sftp`.
 - `allow_scp=false` rejects SCP `exec` requests when the command parser detects `scp` source or sink mode flags such as `-f` or `-t`.
-- Denied SFTP and SCP requests emit explicit stderr text such as `sftp: access denied` or `scp: access denied` and then close with a nonzero exit status.
+- Denied SFTP and SCP requests emit explicit stderr text such as `sftp: access denied` or `scp: access denied` and then disconnect the SSH session cleanly instead of leaving the client with only a generic channel failure.
 
 ### Fail2ban fields
 
