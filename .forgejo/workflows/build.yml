@@ -417,7 +417,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake jq sudo nc; do
+          for cmd in sh pkg curl fetch git gmake jq node npm sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -430,16 +430,31 @@ jobs:
           fi
           echo "uid=$(id -u)"
           echo "sudo_cmd=${sudo_cmd:-none}"
+          install_node_runtime() {
+            for node_pkg in node node24 node22 node20; do
+              if $sudo_cmd pkg install -y "$node_pkg"; then
+                case "$node_pkg" in
+                  node) $sudo_cmd pkg install -y npm || true ;;
+                  node24) $sudo_cmd pkg install -y npm-node24 || true ;;
+                  node22) $sudo_cmd pkg install -y npm-node22 || true ;;
+                  node20) $sudo_cmd pkg install -y npm-node20 || true ;;
+                esac
+                return 0
+              fi
+            done
+            return 1
+          }
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             echo "starting pkg update"
             $sudo_cmd pkg update -f
             echo "starting pkg install"
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
-            echo "validating node runtime"
-            $sudo_cmd pkg install -y node || $sudo_cmd pkg install -y node20
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git gmake jq
+            echo "installing node runtime"
+            install_node_runtime
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
+          command -v gmake >/dev/null 2>&1
           command -v node >/dev/null 2>&1
           node --version
           command -v npm >/dev/null 2>&1 && npm --version || true
@@ -598,7 +613,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake jq sudo nc; do
+          for cmd in sh pkg curl fetch git gmake jq node npm sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -611,16 +626,31 @@ jobs:
           fi
           echo "uid=$(id -u)"
           echo "sudo_cmd=${sudo_cmd:-none}"
+          install_node_runtime() {
+            for node_pkg in node node24 node22 node20; do
+              if $sudo_cmd pkg install -y "$node_pkg"; then
+                case "$node_pkg" in
+                  node) $sudo_cmd pkg install -y npm || true ;;
+                  node24) $sudo_cmd pkg install -y npm-node24 || true ;;
+                  node22) $sudo_cmd pkg install -y npm-node22 || true ;;
+                  node20) $sudo_cmd pkg install -y npm-node20 || true ;;
+                esac
+                return 0
+              fi
+            done
+            return 1
+          }
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             echo "starting pkg update"
             $sudo_cmd pkg update -f
             echo "starting pkg install"
-            $sudo_cmd pkg install -y ca_root_nss curl git jq
-            echo "validating node runtime"
-            $sudo_cmd pkg install -y node || $sudo_cmd pkg install -y node20
+            $sudo_cmd pkg install -y ca_root_nss curl git gmake jq
+            echo "installing node runtime"
+            install_node_runtime
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
+          command -v gmake >/dev/null 2>&1
           command -v node >/dev/null 2>&1
           node --version
           command -v npm >/dev/null 2>&1 && npm --version || true
