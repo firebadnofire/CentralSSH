@@ -167,7 +167,6 @@ jobs:
             git \
             jq \
             make \
-            nodejs \
             netcat-openbsd \
             pkg-config \
             rpm \
@@ -242,19 +241,10 @@ jobs:
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/package-linux.sh "$version" amd64
           ./ci/validate-linux-packages.sh "$version" amd64
-      - name: Validate Forgejo JS action runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Checking Forgejo JS action runtime dependencies for linux-packages-amd64"
-          command -v node
-          node --version
-          command -v npm >/dev/null 2>&1 && npm --version || true
-      - name: Upload Linux amd64 artifacts
-        uses: https://code.forgejo.org/actions/upload-artifact@v3
-        with:
-          name: linux-packages-amd64
-          path: dist
+          ./ci/stage-release-artifacts.sh linux-packages-amd64 \
+            "dist/centralssh-${version}-linux-amd64-systemd.tar.gz" \
+            "dist/centralssh-${version}-debian-amd64.deb" \
+            "dist/centralssh-${version}-fedora-x86_64.rpm"
 
   linux-packages-arm64:
     runs-on: ubuntu-22.04
@@ -283,7 +273,6 @@ jobs:
             git \
             jq \
             make \
-            nodejs \
             pkg-config \
             rpm \
             dpkg-dev \
@@ -358,19 +347,10 @@ jobs:
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/package-linux.sh "$version" arm64
           ./ci/validate-linux-packages.sh "$version" arm64
-      - name: Validate Forgejo JS action runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Checking Forgejo JS action runtime dependencies for linux-packages-arm64"
-          command -v node
-          node --version
-          command -v npm >/dev/null 2>&1 && npm --version || true
-      - name: Upload Linux arm64 artifacts
-        uses: https://code.forgejo.org/actions/upload-artifact@v3
-        with:
-          name: linux-packages-arm64
-          path: dist
+          ./ci/stage-release-artifacts.sh linux-packages-arm64 \
+            "dist/centralssh-${version}-linux-arm64-systemd.tar.gz" \
+            "dist/centralssh-${version}-debian-arm64.deb" \
+            "dist/centralssh-${version}-fedora-aarch64.rpm"
 
   freebsd-amd64:
     runs-on: freebsd
@@ -417,7 +397,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake jq node npm sudo nc; do
+          for cmd in sh pkg curl fetch git jq sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -430,34 +410,15 @@ jobs:
           fi
           echo "uid=$(id -u)"
           echo "sudo_cmd=${sudo_cmd:-none}"
-          install_node_runtime() {
-            for node_pkg in node node24 node22 node20; do
-              if $sudo_cmd pkg install -y "$node_pkg"; then
-                case "$node_pkg" in
-                  node) $sudo_cmd pkg install -y npm || true ;;
-                  node24) $sudo_cmd pkg install -y npm-node24 || true ;;
-                  node22) $sudo_cmd pkg install -y npm-node22 || true ;;
-                  node20) $sudo_cmd pkg install -y npm-node20 || true ;;
-                esac
-                return 0
-              fi
-            done
-            return 1
-          }
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             echo "starting pkg update"
             $sudo_cmd pkg update -f
             echo "starting pkg install"
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git gmake jq
-            echo "installing node runtime"
-            install_node_runtime
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
-          command -v gmake >/dev/null 2>&1
-          command -v node >/dev/null 2>&1
-          node --version
-          command -v npm >/dev/null 2>&1 && npm --version || true
+          command -v jq >/dev/null 2>&1
 
       - name: Check out repository
         shell: sh
@@ -554,19 +515,9 @@ jobs:
           eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" amd64
-      - name: Validate Forgejo JS action runtime
-        shell: sh
-        run: |
-          set -eu
-          echo "Checking Forgejo JS action runtime dependencies for freebsd-amd64"
-          command -v node
-          node --version
-          command -v npm >/dev/null 2>&1 && npm --version || true
-      - name: Upload FreeBSD amd64 artifacts
-        uses: https://code.forgejo.org/actions/upload-artifact@v3
-        with:
-          name: freebsd-amd64
-          path: dist
+          ./ci/stage-release-artifacts.sh freebsd-amd64 \
+            "dist/centralssh-${version}-freebsd-amd64.pkg" \
+            "dist/centralssh-${version}-freebsd-amd64.tar.gz"
 
   freebsd-aarch64:
     runs-on: freebsd
@@ -613,7 +564,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git gmake jq node npm sudo nc; do
+          for cmd in sh pkg curl fetch git jq sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -626,34 +577,15 @@ jobs:
           fi
           echo "uid=$(id -u)"
           echo "sudo_cmd=${sudo_cmd:-none}"
-          install_node_runtime() {
-            for node_pkg in node node24 node22 node20; do
-              if $sudo_cmd pkg install -y "$node_pkg"; then
-                case "$node_pkg" in
-                  node) $sudo_cmd pkg install -y npm || true ;;
-                  node24) $sudo_cmd pkg install -y npm-node24 || true ;;
-                  node22) $sudo_cmd pkg install -y npm-node22 || true ;;
-                  node20) $sudo_cmd pkg install -y npm-node20 || true ;;
-                esac
-                return 0
-              fi
-            done
-            return 1
-          }
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             echo "starting pkg update"
             $sudo_cmd pkg update -f
             echo "starting pkg install"
-            $sudo_cmd pkg install -y ca_root_nss curl git gmake jq
-            echo "installing node runtime"
-            install_node_runtime
+            $sudo_cmd pkg install -y ca_root_nss curl git jq
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
-          command -v gmake >/dev/null 2>&1
-          command -v node >/dev/null 2>&1
-          node --version
-          command -v npm >/dev/null 2>&1 && npm --version || true
+          command -v jq >/dev/null 2>&1
 
       - name: Check out repository
         shell: sh
@@ -750,19 +682,9 @@ jobs:
           eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
           ./ci/build-freebsd-native.sh "$version" aarch64
-      - name: Validate Forgejo JS action runtime
-        shell: sh
-        run: |
-          set -eu
-          echo "Checking Forgejo JS action runtime dependencies for freebsd-aarch64"
-          command -v node
-          node --version
-          command -v npm >/dev/null 2>&1 && npm --version || true
-      - name: Upload FreeBSD aarch64 artifacts
-        uses: https://code.forgejo.org/actions/upload-artifact@v3
-        with:
-          name: freebsd-aarch64
-          path: dist
+          ./ci/stage-release-artifacts.sh freebsd-aarch64 \
+            "dist/centralssh-${version}-freebsd-aarch64.pkg" \
+            "dist/centralssh-${version}-freebsd-aarch64.tar.gz"
 
   release-publish:
     runs-on: ubuntu-22.04
@@ -784,7 +706,7 @@ jobs:
             apt_get="sudo apt-get"
           fi
           $apt_get update
-          $apt_get install -y --no-install-recommends ca-certificates curl git jq nodejs
+          $apt_get install -y --no-install-recommends ca-certificates curl git jq
 
       - name: Check out repository
         shell: bash
@@ -811,39 +733,6 @@ jobs:
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
-      - name: Validate Forgejo JS action runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Checking Forgejo JS action runtime dependencies for release-publish"
-          command -v node
-          node --version
-          command -v npm >/dev/null 2>&1 && npm --version || true
-
-      - name: Download Linux amd64 artifacts
-        uses: https://code.forgejo.org/actions/download-artifact@v3
-        with:
-          name: linux-packages-amd64
-          path: release-artifacts/linux-packages-amd64
-
-      - name: Download Linux arm64 artifacts
-        uses: https://code.forgejo.org/actions/download-artifact@v3
-        with:
-          name: linux-packages-arm64
-          path: release-artifacts/linux-packages-arm64
-
-      - name: Download FreeBSD amd64 artifacts
-        uses: https://code.forgejo.org/actions/download-artifact@v3
-        with:
-          name: freebsd-amd64
-          path: release-artifacts/freebsd-amd64
-
-      - name: Download FreeBSD aarch64 artifacts
-        uses: https://code.forgejo.org/actions/download-artifact@v3
-        with:
-          name: freebsd-aarch64
-          path: release-artifacts/freebsd-aarch64
-
       - name: Publish Forgejo release
         shell: bash
         env:
@@ -856,4 +745,4 @@ jobs:
           trap 'last_command=$BASH_COMMAND' DEBUG
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then FAILED_COMMAND="$last_command" ./ci/post-ci-log.sh "release-publish/forgejo-release" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
-          ./ci/job-release.sh release-artifacts
+          ./ci/publish-release.sh
