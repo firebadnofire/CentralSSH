@@ -37,6 +37,10 @@ pub struct AuditEvent {
     pub ban_duration_seconds: Option<u64>,
     pub ban_until: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transport_side: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kex_algorithm: Option<String>,
@@ -67,6 +71,8 @@ impl AuditEvent {
             reason,
             ban_duration_seconds: None,
             ban_until: None,
+            request_type: None,
+            request_detail: None,
             transport_side: None,
             kex_algorithm: None,
             kex_algorithms_offered: None,

@@ -398,6 +398,35 @@ Required:
 
 If policy restrictions are later added for forwarding destinations or ports, those restrictions must be explicit, enforceable, and documented. Do not fake support.
 
+### Current authorization policy controls
+
+The current implementation includes explicit post-auth authorization controls for:
+
+* `allow_local_forwarding`
+* `allow_remote_forwarding`
+* `allow_sftp`
+* `allow_scp`
+
+Current default values are:
+
+* `allow_local_forwarding = false`
+* `allow_remote_forwarding = false`
+* `allow_sftp = true`
+* `allow_scp = true`
+
+Mode rules:
+
+* when `settings.per_user_per_server = false`, resolve these controls only from `[[users]]`
+* when `settings.per_user_per_server = true`, resolve these controls only from `[server.user]` tables
+* do not merge the two models
+* invalid mode/policy combinations must fail config load or reload
+
+Authenticated policy denials for forwarding, SFTP, or SCP must remain separate from brute-force auth handling:
+
+* do not increment password or TOTP failure counters
+* do not feed fail2ban login-ban state
+* do audit the denied operation with structured post-auth context
+
 ---
 
 # 9. Security Boundaries

@@ -8,6 +8,8 @@ mod error;
 mod keys;
 mod reload;
 mod ssh;
+pub mod version;
+pub mod version_support;
 mod ui;
 
 use std::path::PathBuf;
@@ -18,6 +20,7 @@ use app::{AppState, host_key_path_from_config_dir};
 use audit::AuditLogger;
 use auth::AuthEngine;
 use clap::Parser;
+use clap::ArgAction;
 use config::{ConfigStore, DEFAULT_LISTEN, load_config_file, resolve_paths};
 use error::Result;
 use keys::ensure_user_key_root_directory;
@@ -68,7 +71,8 @@ fn build_env_filter() -> EnvFilter {
 #[derive(Debug, Parser, Clone)]
 #[command(
     author,
-    version,
+    version = version::VERSION,
+    disable_version_flag = true,
     about = "CentralSSH hardened SSH gateway",
     long_about = "CentralSSH is an OpenSSH-compatible hardened SSH gateway. It authenticates users locally, requires target selection, and then transparently proxies SSH protocol traffic to the selected target.",
     after_help = "Troubleshooting:
@@ -101,6 +105,9 @@ fn build_env_filter() -> EnvFilter {
 struct Cli {
     #[arg(long, env = "CENTRALSSH_LISTEN", default_value = DEFAULT_LISTEN)]
     listen: String,
+
+    #[arg(short = 'v', long = "version", action = ArgAction::SetTrue)]
+    version_flag: bool,
 
     #[arg(long, env = "CENTRALSSH_CONFIG")]
     config: Option<PathBuf>,
@@ -146,6 +153,12 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    let cli = Cli::parse();
+    if cli.version_flag {
+        println!("centralssh {}", version::VERSION);
+        return Ok(());
+    }
+
     let log_format = LogFormat::from_env();
     match log_format {
         LogFormat::Compact => {
@@ -179,7 +192,6 @@ async fn run() -> Result<()> {
         }
     }
 
-    let cli = Cli::parse();
     info!(
         log_format = log_format.as_str(),
         journal_stream = std::env::var_os("JOURNAL_STREAM").is_some(),

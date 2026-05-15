@@ -59,6 +59,8 @@ impl ProxyAuditContext {
                 reason: reason_code,
                 ban_duration_seconds: None,
                 ban_until: None,
+                request_type: None,
+                request_detail: None,
                 transport_side: None,
                 kex_algorithm: None,
                 kex_algorithms_offered: None,
@@ -91,6 +93,8 @@ impl ProxyAuditContext {
                 reason: None,
                 ban_duration_seconds: None,
                 ban_until: None,
+                request_type: None,
+                request_detail: None,
                 transport_side: Some(transport_side.to_string()),
                 kex_algorithm: Some(kex_algorithm.to_string()),
                 kex_algorithms_offered: None,
@@ -124,6 +128,8 @@ impl ProxyAuditContext {
                 reason: None,
                 ban_duration_seconds: None,
                 ban_until: None,
+                request_type: None,
+                request_detail: None,
                 transport_side: Some(transport_side.to_string()),
                 kex_algorithm: None,
                 kex_algorithms_offered: Some(offered_algorithms),
@@ -174,6 +180,15 @@ pub struct SessionChannelState {
     pub request: SessionRequest,
     pub menu_active: bool,
     pub input_buffer: Vec<u8>,
+    pub menu_escape_state: MenuEscapeState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MenuEscapeState {
+    #[default]
+    None,
+    SawEscape,
+    SawCsi,
 }
 
 #[derive(Debug, Clone, Default)]

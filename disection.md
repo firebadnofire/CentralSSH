@@ -31,11 +31,30 @@ Support files:
 - `Makefile`: build/install entrypoints and packaging install behavior.
 - `examples/*.toml`: sample runtime configuration.
 - `tools/cssh-keyscan`: helper for building target host trust entries.
-- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI and FreeBSD QEMU build helpers.
+- `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI for Linux amd64 or arm64 packaging plus native FreeBSD amd64 packaging and native FreeBSD aarch64 cross-packaging helpers. The aarch64 FreeBSD path uses the packaged `aarch64` sysroot and a nightly `build-std` cross-build. `ci/release-version.sh` derives the normalized version from the pushed tag, `ci/rewrite-release-version.sh` rewrites `Cargo.toml` and refreshes `Cargo.lock`, the package jobs stage validated build outputs on a draft Forgejo release, and the final publish helper downloads those staged release attachments into a fresh workspace before publishing one Forgejo release. Failures ship filtered logs to the `CI.md` ingestion endpoint, and the release publication path records the exact failing command.
+- `build.rs` and `src/version_support.rs`: compile-time version metadata for the binary. Build-time env or an exact git tag select the base version, and CI/distribution builds append `-dist` without needing `.git` at runtime.
 - `packaging/`: FreeBSD rc and systemd service packaging.
 - `Dockerfile`, `compose.yaml`, `.dockerignore`, and `container/`: container build, runtime, and example deployment artifacts.
 - `container.md`: container operations guide for Docker and Podman deployments.
 - `ACCESS.md`: intentionally redacted placeholder for external access notes; live inventory must stay outside source control.
+
+## 3. Pipeline invariants
+
+The current Forgejo pipeline is intentionally stable. Do not change these pieces without a matching update to the workflow, packaging scripts, validation scripts, and the operator-facing docs:
+
+- release version derivation comes only from the pushed git tag
+- `Cargo.toml` and `Cargo.lock` are rewritten from that canonical tag version
+- staged release assets are uploaded to a draft release first, then downloaded from that same release during final publication
+- final publication uses one `sha256sums` file and one Forgejo release
+- runtime `centralssh --version` / `-v` output is `centralssh <version>` for local builds and `centralssh <version>-dist` for CI distribution builds
+
+Do not touch these without a real topology change:
+
+- asset naming conventions
+- the draft-release staging model
+- the release-publish download path
+- shell-only workflow steps replacing JS `uses:` actions
+- the FreeBSD native runner split
 
 ## 2. Process startup flow
 
@@ -100,6 +119,8 @@ Primary structs in `src/config/mod.rs`:
 - `ConfigFile`
 - `SettingsConfig`
 - `KexPolicyConfig`
+- `AuthorizationPolicyConfig`
+- `EffectiveAuthorizationPolicy`
 - `UserRecord`
 - `ServersFile`
 - `EffectivePaths`
@@ -120,6 +141,7 @@ Important exception:
 - `servers.toml` has no `settings` override inside `config.toml`; it is controlled by CLI/env or the compiled default.
 - the gateway host key is not separately configurable; it is derived from the config directory as `<config_dir>/host_ed25519`.
 - `drop_to_menu` and `hide_proxy_ip` are runtime settings and can be overridden by CLI/env or FreeBSD rc.conf the same way `per_user_per_server` can.
+- the FreeBSD rc script forwards `centralssh_per_user_per_server` to `--per-user-per-server`; per-user `allow_*` values still come only from `config.toml`
 
 ### 4.2 Load and reload
 
@@ -150,6 +172,10 @@ Reload is all-or-nothing. Invalid reload input does not replace the previous act
 - valid TOTP secret parseability
 - at least one allowed server per user
 - every allowed server must exist in `servers.toml`
+- unambiguous authorization policy mode selection
+- user-level `allow_*` fields only when `settings.per_user_per_server = false`
+- `[server.user]` authorization policy tables only when `settings.per_user_per_server = true`
+- policy-table server and user references must exist and match `allowed_servers`
 - configured frontend KEX names must be supported by the pinned SSH library stack
 - fail2ban config must be parseable if present
 - password policy minimum must be `<= 256`
@@ -164,6 +190,15 @@ Bootstrap password fields are allowed only when:
 Otherwise the password must already be an Argon2id string.
 
 The packaged example intentionally uses a rejected placeholder so operators must replace it before startup. Previously documented sample values such as `TemporaryPassword123!` and `AnotherTempPass123!` are also rejected.
+
+Authorization policy defaults are explicit in code:
+
+- `allow_local_forwarding = false`
+- `allow_remote_forwarding = false`
+- `allow_sftp = true`
+- `allow_scp = true`
+
+`resolve_effective_authorization_policy()` computes one deterministic policy for the authenticated `username + selected target` pair. The implementation does not merge user-level and per-server policy sources.
 
 ### 4.4 Atomic mutation
 
@@ -390,6 +425,7 @@ On startup:
 - keyboard auth state
 - authenticated username
 - pending selected target
+- active resolved authorization policy for the selected target
 - active `ProxySession`
 - whether `connection_opened` was already audited
 
@@ -414,7 +450,8 @@ The current gateway login flow is:
 6. if TOTP is missing, generate a secret, display secret plus `otpauth://` URI, and require a valid verification code
 7. persist any credential changes through `ConfigStore`
 8. show the allowed target menu
-9. on selection, create an outbound `ProxySession`
+9. on selection, resolve the target-specific authorization policy
+10. create an outbound `ProxySession`
 
 Important implementation detail:
 
@@ -430,6 +467,8 @@ Selection is still keyboard-interactive prompt driven. It is intentionally minim
 - user label
 - numbered server list
 - selection prompt
+
+The gateway title is shown on the selection menu and is not repeated on each keyboard-interactive auth prompt.
 
 After a valid choice, the handler stops acting like a menu flow and switches to proxy behavior.
 
@@ -474,6 +513,10 @@ The current proxy code explicitly supports:
 Current explicit policy rejection:
 
 - agent forwarding requests are not relayed and are logged as failures
+- `direct-tcpip` is rejected when local forwarding is disabled
+- `tcpip-forward` and `cancel-tcpip-forward` are rejected when remote forwarding is disabled
+- `subsystem sftp` is rejected when SFTP is disabled
+- SCP-style `exec` requests are rejected when SCP is disabled
 
 ### 11.3 Session bridge structure
 
@@ -484,9 +527,19 @@ For session channels the proxy now splits responsibility across the `russh` serv
 
 The session proxy keeps a per-frontend-channel map of backend session write handles so callback-driven events can be forwarded without waiting for a synthetic frontend read loop.
 
+Policy enforcement for session requests happens in `src/ssh/mod.rs` before the corresponding backend relay call:
+
+- `exec_request()` runs conservative SCP detection on the exact exec payload and fails the request with normal SSH failure semantics when SCP is disabled
+- `subsystem_request()` rejects `sftp` before the subsystem request is proxied when SFTP is disabled
+- `channel_open_direct_tcpip()`, `tcpip_forward()`, and `cancel_tcpip_forward()` reject forwarding before any backend channel or listener is created when policy forbids it
+
+For denied SFTP and SCP, the handler now acknowledges the request, writes stderr text in the form `<protocol>: access denied`, sends exit status `1`, and disconnects the SSH session cleanly. This avoids the stock OpenSSH `sftp` client collapsing the result into a generic `subsystem request failed` line.
+
+These denials are post-auth authorization events. They are audited as `denied_local_forward`, `denied_remote_forward`, `denied_sftp`, or `denied_scp`, and they do not call into the pre-auth fail2ban or password/TOTP failure paths.
+
 - `BackendSessionAction`
 
-Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Stock OpenSSH `sftp` and `scp` clients exit when their subsystem or exec channel closes, so those channels close normally instead of attempting an inline gateway menu.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Stock OpenSSH `sftp` and `scp` clients exit when their subsystem or exec channel closes, so those channels close normally instead of attempting an inline gateway menu. That inline menu now consumes cursor-control escape sequences instead of echoing them back into the selection prompt, so arrow keys do not visibly move the cursor across the line.
 
 ### 11.4 Raw channel bridge structure
 
@@ -511,7 +564,7 @@ On fatal relay failure it:
 2. disconnects the target SSH client connection
 3. logs `proxy_end` as failure
 
-If the session drops cleanly, `Drop` on `ProxySession` logs `proxy_end` as success.
+Per-channel request denials such as a rejected subsystem request are relayed as channel failure plus channel close, not escalated into a whole-connection disconnect by themselves. If the session drops cleanly, `Drop` on `ProxySession` logs `proxy_end` as success.
 
 ## 12. Reload behavior
 

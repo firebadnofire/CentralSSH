@@ -20,13 +20,14 @@ load_rc_config "$name"
 : ${centralssh_audit_log:="/var/log/centralssh/audit.jsonl"}
 : ${centralssh_whitelist:=""}
 : ${centralssh_listen:="0.0.0.0:7788"}
+: ${centralssh_per_user_per_server:="true"}
 : ${centralssh_drop_to_menu:="false"}
 : ${centralssh_hide_proxy_ip:="false"}
 
 pidfile="/var/run/${name}.pid"
 procname="/usr/local/sbin/centralssh"
 command="/usr/sbin/daemon"
-command_args="-p ${pidfile} -u ${centralssh_user} ${procname} --listen ${centralssh_listen} --config ${centralssh_config} --servers ${centralssh_servers} --known-hosts ${centralssh_known_hosts} --user-key-root ${centralssh_user_key_root} --audit-log ${centralssh_audit_log} --drop-to-menu ${centralssh_drop_to_menu} --hide-proxy-ip ${centralssh_hide_proxy_ip}"
+command_args="-p ${pidfile} -u ${centralssh_user} ${procname} --listen ${centralssh_listen} --config ${centralssh_config} --servers ${centralssh_servers} --known-hosts ${centralssh_known_hosts} --user-key-root ${centralssh_user_key_root} --audit-log ${centralssh_audit_log} --per-user-per-server ${centralssh_per_user_per_server} --drop-to-menu ${centralssh_drop_to_menu} --hide-proxy-ip ${centralssh_hide_proxy_ip}"
 
 if [ -n "${centralssh_whitelist}" ]; then
 	command_args="${command_args} --whitelist ${centralssh_whitelist}"

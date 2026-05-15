@@ -1,4 +1,4 @@
-name: Release
+name: centralssh-build
 
 on:
   push:
@@ -6,33 +6,44 @@ on:
       - "v*"
       - "V*"
 
-jobs:
-  release:
-    runs-on: ubuntu-22.04
-    container:
-      image: docker.io/library/ubuntu:22.04
-      options: --network ci-network
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+  RUSTUP_INIT_URL: "https://sh.rustup.rs"
+  CI_LOG_ENDPOINT: "http://192.168.86.41:9000/ingest"
 
+jobs:
+  linux-build-test:
+    runs-on: ubuntu-22.04
     steps:
-      - name: Install release dependencies
+      - name: Install host dependencies
         shell: bash
         run: |
           set -euo pipefail
-
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
           apt_get="apt-get"
-          tee_cmd="tee"
           if command -v sudo >/dev/null 2>&1; then
             apt_get="sudo apt-get"
-            tee_cmd="sudo tee"
           fi
-
-          {
-            echo 'Acquire::http::Proxy "http://apt-cacher-ng:3142";'
-            echo 'Acquire::https::Proxy "http://apt-cacher-ng:3142";'
-          } | $tee_cmd /etc/apt/apt.conf.d/01proxy >/dev/null
-
           $apt_get update
-          $apt_get install -y --no-install-recommends ca-certificates curl dpkg-dev file git jq make rpm tar
+          $apt_get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            gcc \
+            g++ \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            libssl-dev \
+            git \
+            make \
+            netcat-openbsd \
+            pkg-config \
+            rpm \
+            dpkg-dev \
+            file \
+            xz-utils \
+            systemd
 
       - name: Check out repository
         shell: bash
@@ -40,339 +51,686 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
-          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing Forgejo server URL}}"
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          repo_dir="${RUNNER_TEMP:-/tmp}/secure-dns-proxy"
-          remote_url="${server_url}/${repository}.git"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
+          remote_url="${server_url%/}/${repository}.git"
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
           git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
-            fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
-          git -C "$repo_dir" checkout --detach "refs/tags/${tag}"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
-      - name: Install Go toolchain
+      - name: Install Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-rust-toolchain.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-build-test/install-rust"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
+          printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustc" --version
+          "$HOME/.cargo/bin/cargo" --version
 
-          go_version="1.24.3"
-          go_tarball="go${go_version}.linux-amd64.tar.gz"
-          go_url="https://dl.google.com/go/${go_tarball}"
-          go_sha256="3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8"
-          tool_dir="${RUNNER_TEMP:-/tmp}/go-toolchain"
+      - name: Prepare release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-release-version.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/prepare-release-version" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_RELEASE_VERSION=%s\n' "$CENTRALSSH_RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_DIST_BUILD=%s\n' "$CENTRALSSH_DIST_BUILD" >> "$GITHUB_ENV"
 
-          rm -rf "$tool_dir"
-          mkdir -p "$tool_dir"
-          curl --fail --silent --show-error --location "$go_url" --output "${tool_dir}/${go_tarball}"
-          printf '%s  %s\n' "$go_sha256" "${tool_dir}/${go_tarball}" | sha256sum --check --status
-          tar -C "$tool_dir" -xzf "${tool_dir}/${go_tarball}"
+      - name: Configure Cargo cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-cache.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/configure-cache" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          eval "$(./ci/cache-env.sh linux-build-test release x86_64-unknown-linux-gnu /build-cache)"
+          ./ci/install-sccache.sh
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER="$(command -v sccache)"
+          fi
+          ./ci/log-rust-cache-stats.sh
 
-          printf '%s\n' "${tool_dir}/go/bin" >> "$GITHUB_PATH"
-          "${tool_dir}/go/bin/go" version
+      - name: Validate lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test-validate.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/validate-version" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          cargo fetch --locked >/dev/null
 
-      - name: Validate release inputs
+      - name: Build and test host target
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-build-test.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-build-test/build-and-test" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          eval "$(./ci/cache-env.sh linux-build-test release x86_64-unknown-linux-gnu /build-cache)"
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER="$(command -v sccache)"
+          fi
+          cargo fetch --locked
+          cargo test --locked
+          cargo build --locked --release
+          make -n install >/dev/null
+          ./ci/log-rust-cache-stats.sh
+
+  linux-packages-amd64:
+    runs-on: ubuntu-22.04
+    needs: linux-build-test
+    steps:
+      - name: Install host dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            gcc \
+            g++ \
+            libc6-dev-arm64-cross \
+            libssl-dev \
+            git \
+            jq \
+            make \
+            netcat-openbsd \
+            pkg-config \
+            rpm \
+            dpkg-dev \
+            file \
+            xz-utils \
+            systemd
+
+      - name: Check out repository
         shell: bash
         env:
-          GH_KEY: ${{ secrets.GH_KEY }}
+          FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
-          for name in GH_KEY; do
-            if [ -z "${!name:-}" ]; then
-              echo "Missing required secret: ${name}" >&2
-              if [ "$name" = "GH_KEY" ]; then
-                echo "GH_KEY must be available to this repository's workflow." >&2
-                echo "For an owner/organization repository, add it under the repository or owner/organization Actions secrets, not only under personal user settings." >&2
-              fi
-              exit 1
-            fi
-          done
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
+          remote_url="${server_url%/}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
-          for tool in base64 curl dpkg-deb file git go jq make rpm rpmbuild sha256sum sha512sum tar; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              echo "Missing required tool: ${tool}" >&2
-              exit 1
-            fi
-          done
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
 
-      - name: Build Linux release assets
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
-          cd "${REPO_DIR:?Missing repository checkout directory}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-rust-toolchain.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-amd64/install-rust"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
+          printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-gnu
 
-          make clean
-          for arch in amd64 arm64; do
-            case "$arch" in
-              amd64)
-                deb_arch="amd64"
-                rpm_arch="x86_64"
-                pet_arch="x86_64"
-                ;;
-              arm64)
-                deb_arch="arm64"
-                rpm_arch="aarch64"
-                pet_arch="aarch64"
-                ;;
-              *)
-                echo "Unsupported release architecture: ${arch}" >&2
-                exit 1
-                ;;
-            esac
-
-            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 make -B package VERSION="${tag}-linux-${arch}-systemd"
-            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 make -B openrc-package VERSION="${tag}-linux-${arch}"
-            if [ "$arch" = "amd64" ]; then
-              make -B pet VERSION="${tag}" PET_GOARCH="$arch" PET_ARCH="$pet_arch"
-            fi
-            make -B deb VERSION="${tag}" DEB_GOARCH="$arch" DEB_ARCH="$deb_arch"
-            make -B rpm VERSION="${tag}" RPM_GOARCH="$arch" RPM_ARCH="$rpm_arch"
-          done
-
-      - name: Prepare release assets
+      - name: Prepare release version
         shell: bash
         run: |
           set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64-release-version.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-amd64/prepare-release-version" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_RELEASE_VERSION=%s\n' "$CENTRALSSH_RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_DIST_BUILD=%s\n' "$CENTRALSSH_DIST_BUILD" >> "$GITHUB_ENV"
 
-          cd "${REPO_DIR:?Missing repository checkout directory}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          assets_file="${RUNNER_TEMP:-/tmp}/secure-dns-proxy-release-assets.txt"
+      - name: Build Linux amd64 packages
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-amd64.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-amd64/build-and-validate" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          eval "$(sh ./ci/release-version.sh)"
+          version="${RELEASE_VERSION:?Missing validated release version}"
+          ./ci/package-linux.sh "$version" amd64
+          ./ci/validate-linux-packages.sh "$version" amd64
+          ./ci/stage-release-artifacts.sh linux-packages-amd64 \
+            "dist/centralssh-${version}-linux-amd64-systemd.tar.gz" \
+            "dist/centralssh-${version}-debian-amd64.deb" \
+            "dist/centralssh-${version}-fedora-x86_64.rpm"
 
-          systemd_tarballs=(
-            "dist/secure-dns-proxy-${tag}-linux-amd64-systemd.tar.gz"
-            "dist/secure-dns-proxy-${tag}-linux-arm64-systemd.tar.gz"
-          )
-          openrc_tarballs=(
-            "dist/secure-dns-proxy-${tag}-linux-amd64-openrc.tar.gz"
-            "dist/secure-dns-proxy-${tag}-linux-arm64-openrc.tar.gz"
-          )
-          pet_packages=(
-            "dist/secure-dns-proxy-${tag}-puppy-x86_64.pet"
-          )
-          deb_packages=(
-            "dist/secure-dns-proxy-${tag}-debian-amd64.deb"
-            "dist/secure-dns-proxy-${tag}-debian-arm64.deb"
-          )
-          rpm_packages=(
-            "dist/secure-dns-proxy-${tag}-fedora-x86_64.rpm"
-            "dist/secure-dns-proxy-${tag}-fedora-aarch64.rpm"
-          )
-          asset_paths=(
-            "${systemd_tarballs[@]}"
-            "${openrc_tarballs[@]}"
-            "${pet_packages[@]}"
-            "${deb_packages[@]}"
-            "${rpm_packages[@]}"
-          )
+  linux-packages-arm64:
+    runs-on: ubuntu-22.04
+    needs: linux-build-test
+    steps:
+      - name: Install host dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            gcc \
+            g++ \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            libssl-dev \
+            git \
+            jq \
+            make \
+            pkg-config \
+            rpm \
+            dpkg-dev \
+            file \
+            xz-utils
 
-          require_members() {
-            local asset_path="$1"
-            local listing="$2"
-            shift 2
-            local member
-            for member in "$@"; do
-              grep -Fxq "$member" "$listing" || {
-                echo "Archive ${asset_path} is missing ${member}." >&2
-                exit 1
-              }
-            done
+      - name: Check out repository
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
+          remote_url="${server_url%/}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
+
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-rust-toolchain.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "linux-packages-arm64/install-rust"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          curl --fail --silent --show-error --location "$RUSTUP_INIT_URL" -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
+          printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-gnu
+
+      - name: Prepare release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64-release-version.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-arm64/prepare-release-version" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_RELEASE_VERSION=%s\n' "$CENTRALSSH_RELEASE_VERSION" >> "$GITHUB_ENV"
+          printf 'CENTRALSSH_DIST_BUILD=%s\n' "$CENTRALSSH_DIST_BUILD" >> "$GITHUB_ENV"
+
+      - name: Build Linux arm64 packages
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/linux-packages-arm64.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then ./ci/post-ci-log.sh "linux-packages-arm64/build-and-validate" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          eval "$(sh ./ci/release-version.sh)"
+          version="${RELEASE_VERSION:?Missing validated release version}"
+          ./ci/package-linux.sh "$version" arm64
+          ./ci/validate-linux-packages.sh "$version" arm64
+          ./ci/stage-release-artifacts.sh linux-packages-arm64 \
+            "dist/centralssh-${version}-linux-arm64-systemd.tar.gz" \
+            "dist/centralssh-${version}-debian-arm64.deb" \
+            "dist/centralssh-${version}-fedora-aarch64.rpm"
+
+  freebsd-amd64:
+    runs-on: freebsd
+    steps:
+      - name: Install FreeBSD build dependencies
+        shell: sh
+        run: |
+          set -eux
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-install-deps.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
           }
-
-          validate_tarball() {
-            local asset_path="$1"
-            shift
-            archive_listing="$(mktemp)"
-            if [ ! -f "$asset_path" ]; then
-              echo "Expected release tarball at ${asset_path}." >&2
-              exit 1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/install-deps"; fi' EXIT
+          echo "PATH=$PATH"
+          uname -a || true
+          for cmd in sh pkg curl fetch git gmake sudo nc; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd=$(command -v "$cmd")"
+            else
+              echo "$cmd=missing"
             fi
+          done
+          sudo_cmd=
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+            sudo_cmd="sudo -n"
+          fi
+          echo "uid=$(id -u)"
+          echo "sudo_cmd=${sudo_cmd:-none}"
+          if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+            echo "starting pkg update"
+            $sudo_cmd pkg update -f
+            echo "starting pkg install"
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git || {
+              echo "failed to install required FreeBSD build packages" >&2
+              exit 1
+            }
+          fi
+          command -v curl >/dev/null 2>&1
+          command -v git >/dev/null 2>&1
 
-            tar -tzf "$asset_path" > "$archive_listing"
-            require_members "$asset_path" "$archive_listing" "$@"
-            rm -f "$archive_listing"
+      - name: Check out repository
+        shell: sh
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-checkout.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
           }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/checkout"; fi' EXIT
 
-          validate_pet() {
-            local asset_path="$1"
-            local size
-            local payload
-            local listing
-            local package_base
-            local specs_line
-            local spec_fullpkg
-            local spec_name
-            local spec_version
-            local spec_release
-            local spec_category
-            local spec_size
-            local spec_path
-            local spec_filename
-            local spec_deps
-            local spec_description
-            local expected_md5
-            local appended_md5
-            if [ ! -f "$asset_path" ]; then
-              echo "Expected PET package at ${asset_path}." >&2
-              exit 1
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
+          remote_url="${server_url%/}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
+
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
+
+      - name: Build and validate FreeBSD amd64 artifacts
+        shell: sh
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if [ -x ./ci/post-ci-log.sh ]; then
+              ./ci/post-ci-log.sh "$context" error "$log_file" >/dev/null 2>&1 || true
+            elif command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
             fi
-            package_base="$(basename "$asset_path" .pet)"
-            size="$(wc -c < "$asset_path")"
-            if [ "$size" -le 32 ]; then
-              echo "PET package ${asset_path} is too small to contain an MD5 trailer." >&2
-              exit 1
-            fi
-            payload="$(mktemp)"
-            listing="$(mktemp)"
-            head -c "$((size - 32))" "$asset_path" > "$payload"
-            appended_md5="$(tail -c 32 "$asset_path")"
-            expected_md5="$(md5sum "$payload" | awk '{print $1}')"
-            if [ "$expected_md5" != "$appended_md5" ]; then
-              echo "PET package ${asset_path} has an invalid MD5 trailer." >&2
-              exit 1
-            fi
-            tar -tzf "$payload" > "$listing"
-            if [ "$(sed -n '1p' "$listing")" != "${package_base}/" ]; then
-              echo "PET package ${asset_path} first archive member is '$(sed -n '1p' "$listing")', expected ${package_base}/." >&2
-              exit 1
-            fi
-            if grep -qxE '(\./?|\.)' "$listing"; then
-              echo "PET package ${asset_path} contains a root current-directory entry; Puppy may treat it as package name '.'." >&2
-              exit 1
-            fi
-            if grep -qE '(^|/)\._' "$listing"; then
-              echo "PET package ${asset_path} contains AppleDouble metadata entries." >&2
-              exit 1
-            fi
-            require_members "$asset_path" "$listing" \
-              "${package_base}/pet.specs" \
-              "${package_base}/pinstall.sh" \
-              "${package_base}/puninstall.sh" \
-              "${package_base}/etc/secure-dns-proxy/config.example.toml" \
-              "${package_base}/usr/local/bin/secure-dns-proxy" \
-              "${package_base}/usr/share/secure-dns-proxy/config.default.toml" \
-              "${package_base}/usr/share/doc/secure-dns-proxy/LICENSE"
-            specs_line="$(tar -xOzf "$payload" "${package_base}/pet.specs" | head -n 1)"
-            if printf '%s' "$specs_line" | grep -q $'\r'; then
-              echo "PET package ${asset_path} pet.specs contains CRLF line endings." >&2
-              exit 1
-            fi
-            if [ "$(awk -F'|' '{print NF}' <<< "$specs_line")" -ne 10 ]; then
-              echo "PET package ${asset_path} pet.specs must contain exactly 10 pipe-delimited fields." >&2
-              exit 1
-            fi
-            IFS='|' read -r spec_fullpkg spec_name spec_version spec_release spec_category spec_size spec_path spec_filename spec_deps spec_description _ <<< "$specs_line"
-            if [ -z "$spec_fullpkg" ] || [ "$spec_fullpkg" = "." ]; then
-              echo "PET package ${asset_path} has an invalid pet.specs package name: '${spec_fullpkg}'." >&2
-              exit 1
-            fi
-            if [ "$spec_fullpkg" != "$package_base" ]; then
-              echo "PET package ${asset_path} pet.specs name '${spec_fullpkg}' does not match '${package_base}'." >&2
-              exit 1
-            fi
-            if [ "$spec_name" != "secure-dns-proxy" ]; then
-              echo "PET package ${asset_path} pet.specs package field is '${spec_name}', expected secure-dns-proxy." >&2
-              exit 1
-            fi
-            if [ -z "$spec_version" ] || [[ "$spec_version" == v* ]] || [[ "$spec_version" == V* ]]; then
-              echo "PET package ${asset_path} pet.specs version field is '${spec_version}', expected a non-empty version without a leading v." >&2
-              exit 1
-            fi
-            if [ "$spec_filename" != "${package_base}.pet" ]; then
-              echo "PET package ${asset_path} pet.specs filename field is '${spec_filename}', expected ${package_base}.pet." >&2
-              exit 1
-            fi
-            rm -f "$payload" "$listing"
+            rm -f "$payload_file"
           }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/build-and-validate"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
+            fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
+            sh /tmp/rustup.sh -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN"
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          chmod +x ./ci/build-freebsd-native.sh
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          version="${RELEASE_VERSION:?Missing validated release version}"
+          ./ci/build-freebsd-native.sh "$version" amd64
+          ./ci/stage-release-artifacts.sh freebsd-amd64 \
+            "dist/centralssh-${version}-freebsd-amd64.pkg" \
+            "dist/centralssh-${version}-freebsd-amd64.tar.gz"
 
-          validate_deb() {
-            local asset_path="$1"
-            local listing
-            if [ ! -f "$asset_path" ]; then
-              echo "Expected Debian package at ${asset_path}." >&2
-              exit 1
+  freebsd-aarch64:
+    runs-on: freebsd
+    steps:
+      - name: Install FreeBSD build dependencies
+        shell: bash
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-install-deps.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
             fi
-            dpkg-deb --info "$asset_path" >/dev/null
-            listing="$(mktemp)"
-            dpkg-deb --contents "$asset_path" | awk '{print $6}' > "$listing"
-            require_members "$asset_path" "$listing" \
-              './usr/local/bin/secure-dns-proxy' \
-              './lib/systemd/system/secure-dns-proxy.service' \
-              './etc/sysctl.d/80-secure-dns-proxy.conf' \
-              './etc/secure-dns-proxy/config.example.toml' \
-              './usr/share/secure-dns-proxy/config.default.toml'
-            rm -f "$listing"
+            rm -f "$payload_file"
           }
-
-          validate_rpm() {
-            local asset_path="$1"
-            local listing
-            if [ ! -f "$asset_path" ]; then
-              echo "Expected RPM package at ${asset_path}." >&2
-              exit 1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/install-deps"; fi' EXIT
+          echo "PATH=$PATH"
+          uname -a || true
+          for cmd in sh pkg curl fetch git gmake sudo nc; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd=$(command -v "$cmd")"
+            else
+              echo "$cmd=missing"
             fi
-            rpm -qip "$asset_path" >/dev/null
-            listing="$(mktemp)"
-            rpm -qlp "$asset_path" > "$listing"
-            require_members "$asset_path" "$listing" \
-              '/usr/local/bin/secure-dns-proxy' \
-              '/usr/lib/systemd/system/secure-dns-proxy.service' \
-              '/etc/sysctl.d/80-secure-dns-proxy.conf' \
-              '/etc/secure-dns-proxy/config.example.toml' \
-              '/usr/share/secure-dns-proxy/config.default.toml'
-            rm -f "$listing"
+          done
+          sudo_cmd=
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+            sudo_cmd="sudo -n"
+          fi
+          echo "uid=$(id -u)"
+          echo "sudo_cmd=${sudo_cmd:-none}"
+          if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+            $sudo_cmd pkg update -f
+            $sudo_cmd pkg install -y ca_root_nss curl git
+          fi
+          command -v curl >/dev/null 2>&1
+          command -v git >/dev/null 2>&1
+
+      - name: Check out repository
+        shell: sh
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-checkout.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
           }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/checkout"; fi' EXIT
 
-          for asset_path in "${systemd_tarballs[@]}"; do
-            validate_tarball "$asset_path" \
-              'secure-dns-proxy/Makefile' \
-              'secure-dns-proxy/README.md' \
-              'secure-dns-proxy/bin/secure-dns-proxy' \
-              'secure-dns-proxy/etc/secure-dns-proxy/config.example.toml' \
-              'secure-dns-proxy/etc/secure-dns-proxy/config.toml' \
-              'secure-dns-proxy/packaging/systemd/secure-dns-proxy.service' \
-              'secure-dns-proxy/packaging/sysctl/secure-dns-proxy.conf'
-          done
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
+          remote_url="${server_url%/}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
-          for asset_path in "${openrc_tarballs[@]}"; do
-            validate_tarball "$asset_path" \
-              'secure-dns-proxy/Makefile' \
-              'secure-dns-proxy/README.md' \
-              'secure-dns-proxy/bin/secure-dns-proxy' \
-              'secure-dns-proxy/etc/secure-dns-proxy/config.example.toml' \
-              'secure-dns-proxy/etc/secure-dns-proxy/config.toml' \
-              'secure-dns-proxy/packaging/openrc/secure-dns-proxy' \
-              'secure-dns-proxy/packaging/sysctl/secure-dns-proxy.conf'
-          done
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
 
-          for asset_path in "${pet_packages[@]}"; do
-            validate_pet "$asset_path"
-          done
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
-          for asset_path in "${deb_packages[@]}"; do
-            validate_deb "$asset_path"
-          done
+      - name: Build and validate FreeBSD aarch64 artifacts
+        shell: sh
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -eu
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+          export PATH
+          log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64.log"
+          : > "$log_file"
+          exec >>"$log_file" 2>&1
+          post_log() {
+            context=$1
+            payload_file=$(mktemp)
+            host_and_path=${CI_LOG_ENDPOINT#http://}
+            host_port=${host_and_path%%/*}
+            request_path=/${host_and_path#*/}
+            [ "$request_path" != "/$host_and_path" ] || request_path=/ingest
+            host=${host_port%%:*}
+            port=${host_port#*:}
+            [ "$port" != "$host_port" ] || port=80
+            {
+              printf 'context=%s\n' "$context"
+              printf 'status=error\n\n'
+              tail -n 250 "$log_file"
+            } > "$payload_file"
+            if [ -x ./ci/post-ci-log.sh ]; then
+              ./ci/post-ci-log.sh "$context" error "$log_file" >/dev/null 2>&1 || true
+            elif command -v curl >/dev/null 2>&1; then
+              curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
+            elif command -v nc >/dev/null 2>&1; then
+              content_length=$(wc -c < "$payload_file" | tr -d ' ')
+              {
+                printf 'POST %s HTTP/1.1\r\n' "$request_path"
+                printf 'Host: %s\r\n' "$host"
+                printf 'Content-Type: text/plain; charset=utf-8\r\n'
+                printf 'Content-Length: %s\r\n' "$content_length"
+                printf 'Connection: close\r\n\r\n'
+                cat "$payload_file"
+              } | nc "$host" "$port" >/dev/null 2>&1 || true
+            fi
+            rm -f "$payload_file"
+          }
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/build-and-validate"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
+            fetch -q -o /tmp/rustup.sh "$RUSTUP_INIT_URL"
+            sh /tmp/rustup.sh -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN"
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          chmod +x ./ci/build-freebsd-native.sh
+          eval "$(sh ./ci/rewrite-release-version.sh)"
+          version="${RELEASE_VERSION:?Missing validated release version}"
+          ./ci/build-freebsd-native.sh "$version" aarch64
+          ./ci/stage-release-artifacts.sh freebsd-aarch64 \
+            "dist/centralssh-${version}-freebsd-aarch64.pkg" \
+            "dist/centralssh-${version}-freebsd-aarch64.tar.gz"
 
-          for asset_path in "${rpm_packages[@]}"; do
-            validate_rpm "$asset_path"
-          done
+  release-publish:
+    runs-on: ubuntu-22.04
+    needs:
+      - linux-packages-amd64
+      - linux-packages-arm64
+      - freebsd-amd64
+      - freebsd-aarch64
+    steps:
+      - name: Install release dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/release-publish-install-deps.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "release-publish/install-deps"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
+          apt_get="apt-get"
+          if command -v sudo >/dev/null 2>&1; then
+            apt_get="sudo apt-get"
+          fi
+          $apt_get update
+          $apt_get install -y --no-install-recommends ca-certificates curl git jq
 
-          : > "$assets_file"
-          for asset_path in "${asset_paths[@]}"; do
-            printf '%s\n' "${REPO_DIR}/${asset_path}" >> "$assets_file"
-          done
+      - name: Check out repository
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ forgejo.token }}
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP:-/tmp}/release-publish-checkout.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then { printf "context=%s\nstatus=error\n\n" "release-publish/checkout"; grep -Ev "^(    Updating crates\\.io index| Downloading crates \\.\\.\\.|  Downloaded |   Compiling )" "$log_file" | tail -n 250; } | curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @- "$CI_LOG_ENDPOINT" >/dev/null || true; fi' EXIT
 
-          sha512sum "${asset_paths[@]}" > dist/sha512sums.txt
-          printf '%s\n' "${REPO_DIR}/dist/sha512sums.txt" >> "$assets_file"
-          printf 'ASSETS_FILE=%s\n' "$assets_file" >> "$GITHUB_ENV"
+          server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
+          commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
+          repo_dir="${RUNNER_TEMP:-/tmp}/centralssh-release"
+          remote_url="${server_url%/}/${repository}.git"
+          auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+
+          rm -rf "$repo_dir"
+          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            clone "$remote_url" "$repo_dir"
+          git -C "$repo_dir" checkout --detach "$commit_sha"
+
+          printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
       - name: Publish Forgejo release
         shell: bash
@@ -380,339 +738,10 @@ jobs:
           FORGEJO_TOKEN: ${{ forgejo.token }}
         run: |
           set -euo pipefail
-
-          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?Missing Forgejo API URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
-          owner="${repository%%/*}"
-          repo="${repository#*/}"
-          assets_file="${ASSETS_FILE:?Missing release asset list file}"
-          release_name="secure-dns-proxy ${tag}"
-          release_body="Automated Linux package release for ${tag}."
-
-          api_request() {
-            local method="$1"
-            local url="$2"
-            shift 2
-            curl --fail-with-body --silent --show-error \
-              --request "$method" \
-              --header "Authorization: token ${token}" \
-              "$@" \
-              "$url"
-          }
-
-          upload_asset() {
-            local release_id="$1"
-            local asset_path="$2"
-            local asset_name
-            local asset_name_encoded
-            local existing_asset_id
-
-            if [ ! -f "$asset_path" ]; then
-              echo "Expected release asset at ${asset_path}." >&2
-              exit 1
-            fi
-
-            asset_name="$(basename "$asset_path")"
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-
-            if [ -n "$existing_asset_id" ]; then
-              api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${existing_asset_id}" >/dev/null
-            fi
-
-            api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --form "attachment=@${asset_path}" >/dev/null
-          }
-
-          release_response="$(mktemp)"
-          release_status="$(curl --silent --show-error \
-            --output "$release_response" \
-            --write-out "%{http_code}" \
-            --header "Authorization: token ${token}" \
-            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
-
-          if [ "$release_status" = "404" ]; then
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
-            release_json="$(api_request POST "${api_url}/repos/${owner}/${repo}/releases" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          elif [ "$release_status" = "200" ]; then
-            release_json="$(cat "$release_response")"
-            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')"
-            release_json="$(api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          else
-            cat "$release_response" >&2
-            echo "Failed to look up release for ${tag}: HTTP ${release_status}" >&2
-            exit 1
-          fi
-
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "Release response did not include an id." >&2
-            exit 1
-          fi
-
-          if [ ! -f "$assets_file" ]; then
-            echo "Expected release asset list at ${assets_file}." >&2
-            exit 1
-          fi
-
-          while IFS= read -r asset_path; do
-            if [ -z "$asset_path" ]; then
-              continue
-            fi
-            upload_asset "$release_id" "$asset_path"
-          done < "$assets_file"
-
-      - name: Migrate repository to GitHub
-        shell: bash
-        env:
-          GH_KEY: ${{ secrets.GH_KEY }}
-        run: |
-          set -euo pipefail
-
-          cd "${REPO_DIR:?Missing repository checkout directory}"
-          api_url="https://api.github.com"
-          owner="firebadnofire"
-          repo="secure-dns-proxy"
-          token="${GH_KEY:?Missing GitHub token}"
-
-          github_api_request() {
-            local method="$1"
-            local url="$2"
-            local response_file
-            local status
-            shift 2
-            response_file="$(mktemp)"
-            status="$(curl --silent --show-error \
-              --output "$response_file" \
-              --write-out "%{http_code}" \
-              --request "$method" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${token}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$@" \
-              "$url")"
-            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
-              cat "$response_file" >&2
-              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
-              exit 1
-            fi
-            cat "$response_file"
-          }
-
-          github_repo_status() {
-            local response_file
-            response_file="$(mktemp)"
-            curl --silent --show-error \
-              --output "$response_file" \
-              --write-out "%{http_code}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${token}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "${api_url}/repos/${owner}/${repo}"
-          }
-
-          github_git_push() {
-            local remote_url="https://github.com/${owner}/${repo}.git"
-            local auth_header
-            auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-            git -c "http.${remote_url}.extraheader=AUTHORIZATION: basic ${auth_header}" \
-              push "$remote_url" "$@"
-          }
-
-          github_migrate() {
-            local repo_status
-            local owner_json
-            local owner_type
-            local create_payload
-            local branch_refspecs=()
-            local ref_name
-            local short_name
-
-            repo_status="$(github_repo_status)"
-            if [ "$repo_status" = "404" ]; then
-              owner_json="$(github_api_request GET "${api_url}/users/${owner}")"
-              owner_type="$(printf '%s' "$owner_json" | jq -r '.type')"
-              create_payload="$(jq -n \
-                --arg name "$repo" \
-                --arg description "secure-dns-proxy mirror" \
-                '{name: $name, description: $description, private: false, auto_init: false}')"
-
-              if [ "$owner_type" = "Organization" ]; then
-                github_api_request POST "${api_url}/orgs/${owner}/repos" \
-                  --header "Content-Type: application/json" \
-                  --data "$create_payload" >/dev/null
-              elif [ "$owner_type" = "User" ]; then
-                authenticated_login="$(github_api_request GET "${api_url}/user" | jq -r '.login')"
-                if [ "$authenticated_login" != "$owner" ]; then
-                  echo "Cannot create ${owner}/${repo}: GH_KEY authenticates as ${authenticated_login}, not ${owner}." >&2
-                  exit 1
-                fi
-                github_api_request POST "${api_url}/user/repos" \
-                  --header "Content-Type: application/json" \
-                  --data "$create_payload" >/dev/null
-              else
-                echo "Unsupported GitHub owner type for ${owner}: ${owner_type}" >&2
-                exit 1
-              fi
-            elif [ "$repo_status" != "200" ]; then
-              echo "Failed to check GitHub repository ${owner}/${repo}: HTTP ${repo_status}" >&2
-              exit 1
-            fi
-
-            while read -r ref_name short_name; do
-              short_name="${short_name#origin/}"
-              if [ "$short_name" = "HEAD" ]; then
-                continue
-              fi
-              branch_refspecs+=("${ref_name}:refs/heads/${short_name}")
-            done < <(git for-each-ref --format='%(refname) %(refname:short)' refs/remotes/origin)
-
-            if [ "${#branch_refspecs[@]}" -gt 0 ]; then
-              github_git_push "${branch_refspecs[@]}"
-            else
-              echo "No remote branches were found to migrate." >&2
-              exit 1
-            fi
-
-            github_git_push "refs/tags/*:refs/tags/*"
-          }
-
-          github_migrate
-
-      - name: Publish GitHub release
-        shell: bash
-        env:
-          GH_KEY: ${{ secrets.GH_KEY }}
-        run: |
-          set -euo pipefail
-
-          api_url="https://api.github.com"
-          upload_url="https://uploads.github.com"
-          owner="firebadnofire"
-          repo="secure-dns-proxy"
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:?Missing tag ref name}}"
-          token="${GH_KEY:?Missing GitHub token}"
-          assets_file="${ASSETS_FILE:?Missing release asset list file}"
-          release_name="secure-dns-proxy ${tag}"
-          release_body="Automated Linux package release for ${tag}."
-
-          github_request() {
-            local method="$1"
-            local url="$2"
-            local response_file
-            local status
-            shift 2
-            response_file="$(mktemp)"
-            status="$(curl --silent --show-error \
-              --output "$response_file" \
-              --write-out "%{http_code}" \
-              --request "$method" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${token}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$@" \
-              "$url")"
-            if [ "$status" -lt 200 ] || [ "$status" -gt 299 ]; then
-              cat "$response_file" >&2
-              echo "GitHub API request failed: ${method} ${url} returned HTTP ${status}" >&2
-              exit 1
-            fi
-            cat "$response_file"
-          }
-
-          upload_asset() {
-            local release_id="$1"
-            local asset_path="$2"
-            local asset_name
-            local asset_name_encoded
-            local existing_asset_id
-
-            if [ ! -f "$asset_path" ]; then
-              echo "Expected release asset at ${asset_path}." >&2
-              exit 1
-            fi
-
-            asset_name="$(basename "$asset_path")"
-            asset_name_encoded="$(jq -nr --arg value "$asset_name" '$value|@uri')"
-            existing_asset_id="$(github_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
-              | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
-              | head -n 1)"
-
-            if [ -n "$existing_asset_id" ]; then
-              github_request DELETE "${api_url}/repos/${owner}/${repo}/releases/assets/${existing_asset_id}" >/dev/null
-            fi
-
-            github_request POST "${upload_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${asset_name_encoded}" \
-              --header "Content-Type: application/octet-stream" \
-              --data-binary "@${asset_path}" >/dev/null
-          }
-
-          release_response="$(mktemp)"
-          release_status="$(curl --silent --show-error \
-            --output "$release_response" \
-            --write-out "%{http_code}" \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer ${token}" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "${api_url}/repos/${owner}/${repo}/releases/tags/${tag}")"
-
-          if [ "$release_status" = "404" ]; then
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
-            release_json="$(github_request POST "${api_url}/repos/${owner}/${repo}/releases" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          elif [ "$release_status" = "200" ]; then
-            release_json="$(cat "$release_response")"
-            release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-            release_payload="$(jq -n \
-              --arg tag "$tag" \
-              --arg name "$release_name" \
-              --arg body "$release_body" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
-            release_json="$(github_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
-              --header "Content-Type: application/json" \
-              --data "$release_payload")"
-          else
-            cat "$release_response" >&2
-            echo "Failed to look up GitHub release for ${tag}: HTTP ${release_status}" >&2
-            exit 1
-          fi
-
-          release_id="$(printf '%s' "$release_json" | jq -r '.id')"
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "GitHub release response did not include an id." >&2
-            exit 1
-          fi
-
-          if [ ! -f "$assets_file" ]; then
-            echo "Expected release asset list at ${assets_file}." >&2
-            exit 1
-          fi
-
-          while IFS= read -r asset_path; do
-            if [ -z "$asset_path" ]; then
-              continue
-            fi
-            upload_asset "$release_id" "$asset_path"
-          done < "$assets_file"
+          last_command=
+          log_file="${RUNNER_TEMP:-/tmp}/release-publish-forgejo.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'last_command=$BASH_COMMAND' DEBUG
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then FAILED_COMMAND="$last_command" ./ci/post-ci-log.sh "release-publish/forgejo-release" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          ./ci/publish-release.sh

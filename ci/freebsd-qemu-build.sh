@@ -10,6 +10,7 @@ command_name=${1:-}
 [ -n "$command_name" ] || usage
 FREEBSD_ARCH=${FREEBSD_ARCH:-${2:-amd64}}
 CURRENT_STEP=initializing
+CLOUDINIT_SSH_READY_FILE=/var/tmp/centralssh-sshd-ready
 CLOUDINIT_READY_FILE=/var/tmp/centralssh-cloudinit-ready
 CLOUDINIT_FAILED_FILE=/var/tmp/centralssh-cloudinit-failed
 
@@ -58,6 +59,9 @@ init_paths() {
   resolve_arch_settings
   FREEBSD_QEMU_MEM=${FREEBSD_QEMU_MEM:-4096}
   FREEBSD_QEMU_CPUS=${FREEBSD_QEMU_CPUS:-4}
+  FREEBSD_SSH_WAIT_TIMEOUT=${FREEBSD_SSH_WAIT_TIMEOUT:-120}
+  FREEBSD_GUEST_PROVISION_TIMEOUT=${FREEBSD_GUEST_PROVISION_TIMEOUT:-600}
+  FREEBSD_GUEST_SETTLE_TIMEOUT=${FREEBSD_GUEST_SETTLE_TIMEOUT:-600}
   SSH_USER=${FREEBSD_VM_USER:-ci}
   SSH_HOST=127.0.0.1
 
@@ -92,6 +96,7 @@ init_paths() {
   export REPO_ARCHIVE CACHE_ARCHIVE SSH_HOST SSH_PORT SSH_USER REMOTE_HOME
   export FREEBSD_VERSION FREEBSD_ARCH FREEBSD_IMAGE_URL FREEBSD_CHECKSUM_URL
   export FREEBSD_IMAGE_SOURCE_FILENAME FREEBSD_QEMU_MEM FREEBSD_QEMU_CPUS
+  export FREEBSD_SSH_WAIT_TIMEOUT FREEBSD_GUEST_PROVISION_TIMEOUT FREEBSD_GUEST_SETTLE_TIMEOUT
   export FREEBSD_QEMU_SYSTEM FREEBSD_PACKAGE_SUFFIX CHECKSUM_FILE
 }
 
@@ -232,12 +237,13 @@ write_files:
     content: |
       #!/bin/sh
       set -eu
-      rm -f "${CLOUDINIT_READY_FILE}" "${CLOUDINIT_FAILED_FILE}"
+      rm -f "${CLOUDINIT_SSH_READY_FILE}" "${CLOUDINIT_READY_FILE}" "${CLOUDINIT_FAILED_FILE}"
       trap 'rc=\$?; if [ "\$rc" -ne 0 ]; then echo "\$rc" > "${CLOUDINIT_FAILED_FILE}"; fi; exit "\$rc"' EXIT
-      pkg bootstrap -yf
-      pkg install -y sudo ca_root_nss
       sysrc sshd_enable=YES
       service sshd start || service sshd restart
+      touch "${CLOUDINIT_SSH_READY_FILE}"
+      pkg bootstrap -yf
+      pkg install -y sudo ca_root_nss
       touch "${CLOUDINIT_READY_FILE}"
 runcmd:
   - /var/tmp/centralssh-cloudinit-provision.sh
@@ -279,9 +285,14 @@ run_ssh() {
 }
 
 wait_for_ssh() {
+  max_attempts=$((FREEBSD_SSH_WAIT_TIMEOUT / 2))
+  if [ "$max_attempts" -lt 1 ]; then
+    max_attempts=1
+  fi
+
   i=1
-  while [ "$i" -le 150 ]; do
-    if run_ssh "test -f '${CLOUDINIT_READY_FILE}' && test ! -f '${CLOUDINIT_FAILED_FILE}' && command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready" >/dev/null 2>&1; then
+  while [ "$i" -le "$max_attempts" ]; do
+    if run_ssh "test -f '${CLOUDINIT_SSH_READY_FILE}' && echo ready" >/dev/null 2>&1; then
       echo "SSH is ready on port ${SSH_PORT}"
       return 0
     fi
@@ -289,12 +300,90 @@ wait_for_ssh() {
       echo "FreeBSD cloud-init provisioning failed; readiness marker was not created" >&2
       return 1
     fi
+    if [ -f "$QEMU_PID_FILE" ]; then
+      qemu_pid=$(cat "$QEMU_PID_FILE" 2>/dev/null || true)
+      if [ -n "${qemu_pid:-}" ] && ! kill -0 "$qemu_pid" 2>/dev/null; then
+        echo "QEMU exited before FreeBSD SSH became ready" >&2
+        tail -n 200 "$QEMU_LOG" >&2 || true
+        return 1
+      fi
+    fi
     sleep 2
     i=$((i + 1))
   done
-  echo "Timed out waiting for FreeBSD SSH" >&2
+  echo "Timed out waiting for FreeBSD SSH after ${FREEBSD_SSH_WAIT_TIMEOUT}s" >&2
   tail -n 200 "$QEMU_LOG" >&2 || true
   return 1
+}
+
+wait_for_guest_provisioning() {
+  max_attempts=$((FREEBSD_GUEST_PROVISION_TIMEOUT / 2))
+  if [ "$max_attempts" -lt 1 ]; then
+    max_attempts=1
+  fi
+
+  i=1
+  while [ "$i" -le "$max_attempts" ]; do
+    if run_ssh "test -f '${CLOUDINIT_READY_FILE}' && test ! -f '${CLOUDINIT_FAILED_FILE}' && command -v sudo >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1 && echo ready" >/dev/null 2>&1; then
+      echo "Guest provisioning completed"
+      return 0
+    fi
+    if run_ssh "test -f '${CLOUDINIT_FAILED_FILE}'" >/dev/null 2>&1; then
+      echo "FreeBSD cloud-init provisioning failed after SSH became available" >&2
+      return 1
+    fi
+    sleep 2
+    i=$((i + 1))
+  done
+  echo "Timed out waiting for FreeBSD guest provisioning to finish after ${FREEBSD_GUEST_PROVISION_TIMEOUT}s" >&2
+  return 1
+}
+
+wait_for_guest_settle() {
+  max_attempts=$((FREEBSD_GUEST_SETTLE_TIMEOUT / 5))
+  if [ "$max_attempts" -lt 1 ]; then
+    max_attempts=1
+  fi
+
+  consecutive_ok=0
+  last_boot_marker=
+  i=1
+  while [ "$i" -le "$max_attempts" ]; do
+    boot_marker=$(run_ssh "test -f '${CLOUDINIT_READY_FILE}' && sysctl -n kern.boottime" 2>/dev/null || true)
+    if [ -n "$boot_marker" ]; then
+      if [ "$boot_marker" = "$last_boot_marker" ]; then
+        consecutive_ok=$((consecutive_ok + 1))
+      else
+        last_boot_marker=$boot_marker
+        consecutive_ok=1
+      fi
+      if [ "$consecutive_ok" -ge 3 ]; then
+        echo "Guest boot state has settled"
+        return 0
+      fi
+    else
+      consecutive_ok=0
+      last_boot_marker=
+    fi
+    sleep 5
+    i=$((i + 1))
+  done
+  echo "Timed out waiting for FreeBSD guest boot state to settle after ${FREEBSD_GUEST_SETTLE_TIMEOUT}s" >&2
+  return 1
+}
+
+reboot_guest_after_provisioning() {
+  run_ssh 'sudo shutdown -r now' >/dev/null 2>&1 || true
+  i=1
+  while [ "$i" -le 60 ]; do
+    if ! run_ssh 'true' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+    i=$((i + 1))
+  done
+  wait_for_ssh
+  wait_for_guest_settle
 }
 
 guest_debug_available() {
@@ -312,7 +401,7 @@ dump_guest_debug() {
   echo "---- guest pkg state ----" >&2
   run_ssh "pkg -vv || sudo pkg -vv" >&2 || true
   echo "---- guest cloud-init markers ----" >&2
-  run_ssh "ls -l '${CLOUDINIT_READY_FILE}' '${CLOUDINIT_FAILED_FILE}' 2>/dev/null || true" >&2 || true
+  run_ssh "ls -l '${CLOUDINIT_SSH_READY_FILE}' '${CLOUDINIT_READY_FILE}' '${CLOUDINIT_FAILED_FILE}' 2>/dev/null || true" >&2 || true
   echo "---- guest cloud-init.log ----" >&2
   run_ssh "sudo tail -n 200 /var/log/cloud-init.log" >&2 || true
   echo "---- guest cloud-init-output.log ----" >&2
@@ -407,7 +496,7 @@ cargo build --locked --release
 sccache --show-stats || true
 
 CI_PACKAGE_NAME="\$(sed -n 's/^name = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
-CI_PACKAGE_VERSION="\$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
+CI_PACKAGE_VERSION="\${CI_RELEASE_VERSION:?Missing CI_RELEASE_VERSION for package version}"
 CI_PACKAGE_COMMENT="\$(sed -n 's/^description = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
 CI_PACKAGE_DESC="\${CI_PACKAGE_COMMENT}"
 CI_PACKAGE_ORIGIN="security/\${CI_PACKAGE_NAME}"
@@ -415,9 +504,11 @@ CI_PACKAGE_MAINTAINER="root@localhost"
 CI_PACKAGE_WWW="${repo_url}"
 CI_PACKAGE_ARCH="\$(pkg config ABI)"
 CI_PACKAGE_SUFFIX="${FREEBSD_PACKAGE_SUFFIX}"
+CI_TARBALL_NAME="\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.tar.gz"
+CI_PKG_NAME="\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
 
-rm -rf stage dist
-mkdir -p stage dist
+rm -rf stage dist archive
+mkdir -p stage dist archive
 
 gmake install DESTDIR="\$PWD/stage" PREFIX=/usr/local
 
@@ -454,9 +545,42 @@ if ! pkg create -M stage/+MANIFEST -p stage/pkg-plist -r stage -o dist; then
 fi
 
 PKG_FILE="\$(find dist -type f -name '*.pkg' | head -n1)"
-cp "\$PKG_FILE" "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
-test -f "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg"
-pkg info -F "dist/\${CI_PACKAGE_NAME}-\${CI_PACKAGE_VERSION}-\${CI_PACKAGE_SUFFIX}.pkg" >/dev/null
+cp "\$PKG_FILE" "dist/\${CI_PKG_NAME}"
+test -f "dist/\${CI_PKG_NAME}"
+pkg info -F "dist/\${CI_PKG_NAME}" >/dev/null
+
+mkdir -p archive/\${CI_PACKAGE_NAME}
+tar -C stage -cf - . | tar -C archive/\${CI_PACKAGE_NAME} -xf -
+tar -C archive -czf "dist/\${CI_TARBALL_NAME}" "\${CI_PACKAGE_NAME}"
+test -f "dist/\${CI_TARBALL_NAME}"
+tar -tzf "dist/\${CI_TARBALL_NAME}" >/dev/null
+
+sudo pkg add -f "dist/\${CI_PKG_NAME}"
+sudo install -d -m 0700 /etc/centralssh /var/lib/centralssh/keys /var/log/centralssh
+sudo sh -c "cat > /etc/centralssh/config.toml" <<RUNTIMECFG
+[[users]]
+name = "ci"
+password = "ValidBootstrapPassword-123!"
+must_change_password = true
+allowed_servers = ["loopback"]
+
+[settings]
+user_key_root = "/var/lib/centralssh/keys"
+per_user_per_server = true
+known_hosts_path = "/etc/centralssh/known_hosts"
+audit_log_path = "/var/log/centralssh/audit.jsonl"
+RUNTIMECFG
+sudo sh -c "cat > /etc/centralssh/servers.toml" <<RUNTIMESRV
+[servers]
+loopback = "127.0.0.1"
+RUNTIMESRV
+sudo touch /etc/centralssh/known_hosts /var/log/centralssh/audit.jsonl
+sudo chmod 0600 /etc/centralssh/config.toml /etc/centralssh/servers.toml /etc/centralssh/known_hosts /var/log/centralssh/audit.jsonl
+sudo sysrc centralssh_enable=YES >/dev/null
+sudo sysrc centralssh_listen=127.0.0.1:47789 >/dev/null
+sudo service centralssh start
+sudo service centralssh status
+sudo service centralssh stop
 EOF
 
   chmod +x "$BUILD_SCRIPT"
@@ -496,7 +620,7 @@ boot_vm_aarch64() {
     -drive file="$OVERLAY_QCOW2",if=virtio,format=qcow2 \
     -drive file="$SEED_ISO",if=virtio,media=cdrom,readonly=on,format=raw \
     -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
-    -device virtio-net-pci,netdev=net0 \
+    -device virtio-net-device,netdev=net0 \
     -nographic \
     -serial mon:stdio \
     -pidfile "$QEMU_PID_FILE" \
@@ -604,13 +728,22 @@ case "$command_name" in
     ensure_command sha512sum
     ensure_command tar
     ensure_command xz
+    if [ -z "${CI_RELEASE_VERSION:-}" ]; then
+      release_env=$(sh "$REPO_ROOT/ci/release-version.sh")
+      eval "$release_env"
+      export CI_RELEASE_VERSION="$RELEASE_VERSION"
+    fi
     prepare_dirs
     download_base_image
     trap cleanup EXIT INT TERM
     set_step "booting FreeBSD VM"
     boot_vm
-    set_step "waiting for cloud-init readiness"
+    set_step "waiting for SSH readiness"
     wait_for_ssh
+    set_step "waiting for guest provisioning"
+    wait_for_guest_provisioning
+    set_step "rebooting guest after provisioning"
+    reboot_guest_after_provisioning
     set_step "generating guest build script"
     create_guest_build_script
     set_step "transferring repository"

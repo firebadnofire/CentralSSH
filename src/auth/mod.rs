@@ -317,7 +317,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DEFAULT_MIN_PASSWORD_POLICY;
+    use crate::config::{AuthorizationPolicyConfig, DEFAULT_MIN_PASSWORD_POLICY};
 
     #[test]
     fn build_totp_from_secret_accepts_runtime_valid_secret() {
@@ -344,6 +344,7 @@ mod tests {
             totp_secret: Some(secret.to_string()),
             must_change_password: false,
             allowed_servers: vec!["git".to_string()],
+            authorization: AuthorizationPolicyConfig::default(),
         };
 
         let code = totp.generate_current().expect("code");
@@ -370,6 +371,7 @@ mod tests {
             totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
             must_change_password: false,
             allowed_servers: vec!["git".to_string()],
+            authorization: AuthorizationPolicyConfig::default(),
         };
 
         let result = auth.verify_password_and_optional_totp_constant_time(
@@ -393,6 +395,7 @@ mod tests {
             totp_secret: None,
             must_change_password: true,
             allowed_servers: vec!["git".to_string()],
+            authorization: AuthorizationPolicyConfig::default(),
         };
 
         let verified = auth
@@ -418,6 +421,7 @@ mod tests {
             totp_secret: None,
             must_change_password: true,
             allowed_servers: vec!["git".to_string()],
+            authorization: AuthorizationPolicyConfig::default(),
         };
 
         let result =

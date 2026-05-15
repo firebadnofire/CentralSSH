@@ -23,7 +23,10 @@ use crate::abuse::{BanEvent, BanEventKind, FailureOutcome, PreAuthCheck};
 use crate::app::AppState;
 use crate::audit::{AuditEvent, AuditResult};
 use crate::config::validate_path_has_no_symlinks;
-use crate::config::{DEFAULT_MIN_PASSWORD_POLICY, UserRecord};
+use crate::config::{
+    DEFAULT_MIN_PASSWORD_POLICY, EffectiveAuthorizationPolicy, UserRecord,
+    resolve_effective_authorization_policy,
+};
 use crate::crypto_policy::{
     apply_client_transport_crypto_policy, apply_server_transport_crypto_policy,
 };
@@ -33,6 +36,7 @@ pub mod proxy;
 
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const SSH_KEEPALIVE_MAX: usize = 3;
+const AUTH_REJECTION_DELAY: Duration = Duration::from_millis(150);
 const ENROLLMENT_QR_QUIET_ZONE: usize = 4;
 const ENROLLMENT_QR_DARK_MODULE: &str = "█";
 const ENROLLMENT_QR_LIGHT_MODULE: &str = " ";
@@ -52,6 +56,7 @@ struct GatewayHandler {
     keyboard_auth_state: Option<KeyboardAuthState>,
     authenticated_username: Option<String>,
     pending_target: Option<proxy::SelectedTarget>,
+    active_policy: Option<EffectiveAuthorizationPolicy>,
     proxy_session: Option<proxy::ProxySession>,
     session_channel_state: Arc<Mutex<HashMap<ChannelId, proxy::SessionChannelState>>>,
     connection_logged: bool,
@@ -115,6 +120,7 @@ impl server::Server for GatewayServer {
             keyboard_auth_state: None,
             authenticated_username: None,
             pending_target: None,
+            active_policy: None,
             proxy_session: None,
             session_channel_state: Arc::new(Mutex::new(HashMap::new())),
             connection_logged: false,
@@ -136,51 +142,51 @@ impl GatewayHandler {
 
     fn keyboard_prompt(instructions: String, prompt: &'static str, echo: bool) -> Auth {
         Auth::Partial {
-            name: Cow::Borrowed("CentralSSH Gateway"),
+            name: Cow::Borrowed(""),
             instructions: Cow::Owned(instructions),
             prompts: Cow::Owned(vec![(Cow::Borrowed(prompt), echo)]),
         }
     }
 
-    fn password_prompt(username: &str) -> Auth {
-        Self::keyboard_prompt(format!("User: {username}\n"), "Password: ", false)
+    fn password_prompt(_username: &str) -> Auth {
+        Self::keyboard_prompt(String::new(), "Password: ", false)
     }
 
-    fn new_password_prompt(username: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("User: {username}\n");
+    fn new_password_prompt(_username: &str, message: Option<&str>) -> Auth {
+        let mut instructions = String::new();
         if let Some(message) = message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str("\nPassword change required before target access.\n");
         Self::keyboard_prompt(instructions, "New password: ", false)
     }
 
-    fn confirm_password_prompt(username: &str) -> Auth {
+    fn confirm_password_prompt(_username: &str) -> Auth {
         Self::keyboard_prompt(
-            format!("User: {username}\n\nConfirm your new password.\n"),
+            "Confirm your new password.\n".to_string(),
             "Confirm password: ",
             false,
         )
     }
 
-    fn totp_prompt(username: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("User: {username}\n");
+    fn totp_prompt(_username: &str, message: Option<&str>) -> Auth {
+        let mut instructions = String::new();
         if let Some(message) = message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str("\nEnter the current TOTP code.\n");
         Self::keyboard_prompt(instructions, "TOTP Code: ", false)
     }
 
-    fn enrollment_prompt(username: &str, secret: &str, url: &str, message: Option<&str>) -> Auth {
-        let mut instructions = format!("User: {username}\n");
+    fn enrollment_prompt(_username: &str, secret: &str, url: &str, message: Option<&str>) -> Auth {
+        let mut instructions = String::new();
         if let Some(message) = message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str(
@@ -258,10 +264,10 @@ Use the plaintext secret or URI above.\n\n"
             }
         };
         let hide_proxy_ip = self.state.config_store.paths.hide_proxy_ip;
-        let mut instructions = format!("User: {username}\n");
+        let mut instructions = String::new();
         if let Some(message) = error_message {
-            instructions.push('\n');
             instructions.push_str(message);
+            instructions.push('\n');
             instructions.push('\n');
         }
         instructions.push_str("\nSelect a server:\n\n");
@@ -335,6 +341,8 @@ Use the plaintext secret or URI above.\n\n"
                 reason,
                 ban_duration_seconds: ban_duration.map(|duration| duration.as_secs()),
                 ban_until,
+                request_type: None,
+                request_detail: None,
                 transport_side: None,
                 kex_algorithm: None,
                 kex_algorithms_offered: None,
@@ -362,6 +370,85 @@ Use the plaintext secret or URI above.\n\n"
             None,
         )
         .await;
+    }
+
+    fn current_target_name(&self) -> Option<&str> {
+        self.pending_target.as_ref().map(|target| target.name.as_str())
+    }
+
+    fn current_policy(&self) -> Option<EffectiveAuthorizationPolicy> {
+        self.active_policy
+    }
+
+    async fn log_policy_denial(
+        &self,
+        event_type: &str,
+        request_type: &str,
+        request_detail: Option<String>,
+        reason: &str,
+    ) {
+        let _ = self
+            .state
+            .audit
+            .log(AuditEvent {
+                timestamp: Utc::now(),
+                event_type: event_type.to_string(),
+                request_id: self.session_id.clone(),
+                remote_ip: Some(self.peer_ip.to_string()),
+                remote_port: self.peer_port,
+                username: self.authenticated_username.clone(),
+                target_server: self.current_target_name().map(ToOwned::to_owned),
+                auth_method: None,
+                result: AuditResult::Denied,
+                reason: Some(reason.to_string()),
+                ban_duration_seconds: None,
+                ban_until: None,
+                request_type: Some(request_type.to_string()),
+                request_detail,
+                transport_side: None,
+                kex_algorithm: None,
+                kex_algorithms_offered: None,
+                post_quantum: None,
+                hybrid: None,
+                classical_fallback: None,
+                pq_required: None,
+            })
+            .await;
+    }
+
+    fn denied_protocol_message(protocol: &str) -> String {
+        format!("{}: access denied", protocol.to_ascii_lowercase())
+    }
+
+    fn deny_protocol_and_disconnect(
+        &self,
+        session: &mut Session,
+        channel: ChannelId,
+        protocol: &str,
+    ) -> std::result::Result<(), russh::Error> {
+        session.channel_success(channel)?;
+        session.extended_data(
+            channel,
+            1,
+            bytes::Bytes::from(format!("{}\n", Self::denied_protocol_message(protocol))),
+        )?;
+        session.exit_status_request(channel, 1)?;
+        session.disconnect(russh::Disconnect::ByApplication, "request denied", "en")?;
+        Ok(())
+    }
+
+    async fn resolve_target_policy(
+        &self,
+        username: &str,
+        target_name: &str,
+    ) -> Result<EffectiveAuthorizationPolicy> {
+        let snapshot = self.state.config_store.snapshot().await;
+        resolve_effective_authorization_policy(
+            &snapshot.config,
+            username,
+            target_name,
+            self.state.config_store.paths.per_user_per_server,
+        )
     }
 
     async fn log_ban_event(&self, ban_event: &BanEvent) {
@@ -1120,6 +1207,7 @@ Use the plaintext secret or URI above.\n\n"
             self.keyboard_auth_state = None;
             self.authenticated_username = None;
             self.pending_target = None;
+            self.active_policy = None;
             return Err(russh::Error::Disconnect);
         }
         let entries = self
@@ -1166,6 +1254,11 @@ Use the plaintext secret or URI above.\n\n"
         )
         .await;
 
+        let policy = self
+            .resolve_target_policy(username, &target.name)
+            .await
+            .map_err(|error| russh::Error::IO(std::io::Error::other(error.to_string())))?;
+
         match proxy::ProxySession::connect(
             self.state.clone(),
             self.session_id.clone(),
@@ -1189,10 +1282,12 @@ Use the plaintext secret or URI above.\n\n"
                     None,
                 )
                 .await;
+                self.active_policy = Some(policy);
                 self.proxy_session = Some(proxy_session);
                 Ok(())
             }
             Err(error) => {
+                self.active_policy = None;
                 self.log_event(
                     "proxy_start",
                     Some(username),
@@ -1233,22 +1328,23 @@ Use the plaintext secret or URI above.\n\n"
             }
 
             for byte in data {
-                match *byte {
-                    b'\r' | b'\n' => {
+                match menu_input_byte_action(&mut channel_state.menu_escape_state, *byte) {
+                    MenuByteAction::Ignore | MenuByteAction::CompleteEscapeSequence => {}
+                    MenuByteAction::SubmitLine => {
                         let _ = session.data(channel, bytes::Bytes::from_static(b"\r\n"));
                         let line = String::from_utf8_lossy(&channel_state.input_buffer).to_string();
                         channel_state.input_buffer.clear();
                         maybe_line = Some(line);
                         break;
                     }
-                    0x08 | 0x7f => {
+                    MenuByteAction::Backspace => {
                         if channel_state.input_buffer.pop().is_some() {
                             let _ = session.data(channel, bytes::Bytes::from_static(b"\x08 \x08"));
                         }
                     }
-                    _ => {
-                        channel_state.input_buffer.push(*byte);
-                        let _ = session.data(channel, bytes::Bytes::copy_from_slice(&[*byte]));
+                    MenuByteAction::EchoAndBuffer(byte) => {
+                        channel_state.input_buffer.push(byte);
+                        let _ = session.data(channel, bytes::Bytes::copy_from_slice(&[byte]));
                     }
                 }
             }
@@ -1300,6 +1396,7 @@ Use the plaintext secret or URI above.\n\n"
             let mut guard = self.session_channel_state.lock().await;
             if let Some(channel_state) = guard.get_mut(&channel) {
                 channel_state.menu_active = false;
+                channel_state.menu_escape_state = proxy::MenuEscapeState::None;
             }
         }
 
@@ -1368,6 +1465,57 @@ Use the plaintext secret or URI above.\n\n"
         }
 
         Ok(true)
+    }
+
+    async fn fail_channel_request(
+        &self,
+        session: &mut Session,
+        channel: ChannelId,
+        error: &CentralSshError,
+    ) {
+        warn!(error = %error, ?channel, "request on proxied session channel was denied");
+        let _ = session.channel_failure(channel);
+        let _ = session.close(channel);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuByteAction {
+    Ignore,
+    CompleteEscapeSequence,
+    SubmitLine,
+    Backspace,
+    EchoAndBuffer(u8),
+}
+
+fn menu_input_byte_action(state: &mut proxy::MenuEscapeState, byte: u8) -> MenuByteAction {
+    use proxy::MenuEscapeState::{None, SawCsi, SawEscape};
+
+    match *state {
+        None => match byte {
+            b'\r' | b'\n' => MenuByteAction::SubmitLine,
+            0x08 | 0x7f => MenuByteAction::Backspace,
+            0x1b => {
+                *state = SawEscape;
+                MenuByteAction::Ignore
+            }
+            0x20..=0x7e => MenuByteAction::EchoAndBuffer(byte),
+            _ => MenuByteAction::Ignore,
+        },
+        SawEscape => {
+            *state = None;
+            if byte == b'[' {
+                *state = SawCsi;
+            }
+            MenuByteAction::Ignore
+        }
+        SawCsi => {
+            if (0x40..=0x7e).contains(&byte) {
+                *state = None;
+                return MenuByteAction::CompleteEscapeSequence;
+            }
+            MenuByteAction::Ignore
+        }
     }
 }
 
@@ -1712,6 +1860,21 @@ impl server::Handler for GatewayHandler {
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };
+        let Some(policy) = self.current_policy() else {
+            return Ok(false);
+        };
+        if !local_forwarding_permitted(policy) {
+            self.log_policy_denial(
+                "denied_local_forward",
+                "direct-tcpip",
+                Some(format!(
+                    "{host_to_connect}:{port_to_connect} from {originator_address}:{originator_port}"
+                )),
+                "local forwarding disabled by authorization policy",
+            )
+            .await;
+            return Ok(false);
+        }
 
         match proxy_session
             .open_direct_tcpip_channel(
@@ -1826,8 +1989,7 @@ impl server::Handler for GatewayHandler {
             }
             Err(error) => {
                 warn!(error = %error, ?channel, "failed to relay shell request");
-                let _ = session.channel_failure(channel);
-                proxy_session.abort(error.to_string()).await;
+                self.fail_channel_request(session, channel, &error).await;
             }
         }
 
@@ -1852,14 +2014,28 @@ impl server::Handler for GatewayHandler {
             .or_default()
             .request = proxy::SessionRequest::Exec(data.to_vec());
 
+        let Some(policy) = self.current_policy() else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+        if let Err(scp_mode) = validate_exec_request(policy, data) {
+            self.log_policy_denial(
+                "denied_scp",
+                "exec",
+                Some(String::from_utf8_lossy(data).into_owned()),
+                &format!("scp disabled by authorization policy ({scp_mode})"),
+            )
+            .await;
+            return self.deny_protocol_and_disconnect(session, channel, "scp");
+        }
+
         match proxy_session.exec(channel, true, data.to_vec()).await {
             Ok(()) => {
                 let _ = session.channel_success(channel);
             }
             Err(error) => {
                 warn!(error = %error, ?channel, command = %String::from_utf8_lossy(data), "failed to relay exec request");
-                let _ = session.channel_failure(channel);
-                proxy_session.abort(error.to_string()).await;
+                self.fail_channel_request(session, channel, &error).await;
             }
         }
 
@@ -1884,6 +2060,23 @@ impl server::Handler for GatewayHandler {
             .or_default()
             .request = proxy::SessionRequest::Subsystem(name.to_string());
 
+        let Some(policy) = self.current_policy() else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+        if !subsystem_request_permitted(policy, name) {
+            let denied_protocol = if !policy.allow_scp { "scp" } else { "sftp" };
+            self.log_policy_denial(
+                "denied_sftp",
+                "subsystem",
+                Some(name.to_string()),
+                "sftp disabled by authorization policy",
+            )
+            .await;
+            return self
+                .deny_protocol_and_disconnect(session, channel, denied_protocol);
+        }
+
         match proxy_session
             .request_subsystem(channel, true, name.to_string())
             .await
@@ -1893,8 +2086,7 @@ impl server::Handler for GatewayHandler {
             }
             Err(error) => {
                 warn!(error = %error, ?channel, subsystem = name, "failed to relay subsystem request");
-                let _ = session.channel_failure(channel);
-                proxy_session.abort(error.to_string()).await;
+                self.fail_channel_request(session, channel, &error).await;
             }
         }
 
@@ -2089,6 +2281,19 @@ impl server::Handler for GatewayHandler {
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };
+        let Some(policy) = self.current_policy() else {
+            return Ok(false);
+        };
+        if !remote_forwarding_permitted(policy) {
+            self.log_policy_denial(
+                "denied_remote_forward",
+                "tcpip-forward",
+                Some(format!("{address}:{port}")),
+                "remote forwarding disabled by authorization policy",
+            )
+            .await;
+            return Ok(false);
+        }
 
         match proxy_session.tcpip_forward(address, *port).await {
             Ok(allocated_port) => {
@@ -2111,6 +2316,19 @@ impl server::Handler for GatewayHandler {
         let Some(proxy_session) = &self.proxy_session else {
             return Ok(false);
         };
+        let Some(policy) = self.current_policy() else {
+            return Ok(false);
+        };
+        if !remote_forwarding_permitted(policy) {
+            self.log_policy_denial(
+                "denied_remote_forward",
+                "cancel-tcpip-forward",
+                Some(format!("{address}:{port}")),
+                "remote forwarding disabled by authorization policy",
+            )
+            .await;
+            return Ok(false);
+        }
 
         match proxy_session.cancel_tcpip_forward(address, port).await {
             Ok(()) => Ok(true),
@@ -2120,6 +2338,110 @@ impl server::Handler for GatewayHandler {
             }
         }
     }
+}
+
+fn local_forwarding_permitted(policy: EffectiveAuthorizationPolicy) -> bool {
+    policy.allow_local_forwarding
+}
+
+fn remote_forwarding_permitted(policy: EffectiveAuthorizationPolicy) -> bool {
+    policy.allow_remote_forwarding
+}
+
+fn subsystem_request_permitted(policy: EffectiveAuthorizationPolicy, name: &str) -> bool {
+    name != "sftp" || policy.allow_sftp
+}
+
+fn validate_exec_request(
+    policy: EffectiveAuthorizationPolicy,
+    data: &[u8],
+) -> std::result::Result<(), &'static str> {
+    if !policy.allow_scp {
+        if let Some(mode) = classify_scp_exec_request(data) {
+            return Err(mode);
+        }
+    }
+    Ok(())
+}
+
+fn classify_scp_exec_request(data: &[u8]) -> Option<&'static str> {
+    let command = std::str::from_utf8(data).ok()?.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    let tokens = shell_like_split(command)?;
+    let executable = tokens.first()?;
+    let basename = executable.rsplit('/').next().unwrap_or(executable.as_str());
+    if basename != "scp" {
+        return None;
+    }
+
+    let mut after_double_dash = false;
+    for token in tokens.iter().skip(1) {
+        if after_double_dash {
+            break;
+        }
+        if token == "--" {
+            after_double_dash = true;
+            continue;
+        }
+        if !token.starts_with('-') || token == "-" {
+            continue;
+        }
+        if token.len() == 2 {
+            match token.as_bytes()[1] {
+                b't' => return Some("sink"),
+                b'f' => return Some("source"),
+                _ => continue,
+            }
+        }
+
+        for flag in token[1..].chars() {
+            match flag {
+                't' => return Some("sink"),
+                'f' => return Some("source"),
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+fn shell_like_split(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '\\' if !in_single => {
+                let escaped = chars.next()?;
+                current.push(escaped);
+            }
+            ch if ch.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            other => current.push(other),
+        }
+    }
+
+    if in_single || in_double {
+        return None;
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Some(tokens)
 }
 
 pub async fn run_gateway_server(
@@ -2136,7 +2458,9 @@ pub async fn run_gateway_server(
 
     let mut config = server::Config::default();
     config.methods = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
-    config.auth_rejection_time = Duration::from_secs(3);
+    // Keep normal method discovery snappy. Real auth throttling happens in the
+    // explicit abuse controls instead of a transport-wide multi-second stall.
+    config.auth_rejection_time = AUTH_REJECTION_DELAY;
     let frontend_kex_summary = apply_server_transport_config(&mut config, &frontend_kex_policy)?;
 
     let host_key = russh::keys::load_secret_key(host_key_path, None)
@@ -2167,6 +2491,8 @@ pub async fn run_gateway_server(
             ),
             ban_duration_seconds: None,
             ban_until: None,
+            request_type: None,
+            request_detail: None,
             transport_side: Some("frontend".to_string()),
             kex_algorithm: None,
             kex_algorithms_offered: Some(frontend_kex_summary.offered_algorithms.clone()),
@@ -2275,12 +2601,18 @@ fn validate_host_key_security(path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
 
     fn terminal_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn acquire_terminal_env_lock() -> MutexGuard<'static, ()> {
+        terminal_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -2332,6 +2664,56 @@ mod tests {
     }
 
     #[test]
+    fn gateway_server_uses_short_auth_rejection_delay() {
+        assert_eq!(AUTH_REJECTION_DELAY, Duration::from_millis(150));
+    }
+
+    #[test]
+    fn menu_input_ignores_arrow_key_escape_sequences() {
+        let mut state = proxy::MenuEscapeState::None;
+        let mut rendered = Vec::new();
+
+        for byte in b"\x1b[A\x1b[B12" {
+            match menu_input_byte_action(&mut state, *byte) {
+                MenuByteAction::EchoAndBuffer(byte) => rendered.push(byte),
+                MenuByteAction::Ignore
+                | MenuByteAction::CompleteEscapeSequence
+                | MenuByteAction::SubmitLine
+                | MenuByteAction::Backspace => {}
+            }
+        }
+
+        assert_eq!(state, proxy::MenuEscapeState::None);
+        assert_eq!(rendered, b"12");
+    }
+
+    #[test]
+    fn menu_input_keeps_csi_state_until_sequence_terminator() {
+        let mut state = proxy::MenuEscapeState::None;
+
+        assert_eq!(
+            menu_input_byte_action(&mut state, 0x1b),
+            MenuByteAction::Ignore
+        );
+        assert_eq!(state, proxy::MenuEscapeState::SawEscape);
+        assert_eq!(
+            menu_input_byte_action(&mut state, b'['),
+            MenuByteAction::Ignore
+        );
+        assert_eq!(state, proxy::MenuEscapeState::SawCsi);
+        assert_eq!(
+            menu_input_byte_action(&mut state, b'1'),
+            MenuByteAction::Ignore
+        );
+        assert_eq!(state, proxy::MenuEscapeState::SawCsi);
+        assert_eq!(
+            menu_input_byte_action(&mut state, b'~'),
+            MenuByteAction::CompleteEscapeSequence
+        );
+        assert_eq!(state, proxy::MenuEscapeState::None);
+    }
+
+    #[test]
     fn ensure_server_host_key_rejects_symlink_without_touching_target() {
         let tempdir = TempDir::new().expect("tempdir");
         let real_key = tempdir.path().join("real_host_key");
@@ -2360,6 +2742,7 @@ mod tests {
             totp_secret: None,
             must_change_password: true,
             allowed_servers: vec!["git".to_string()],
+            authorization: crate::config::AuthorizationPolicyConfig::default(),
         };
 
         assert!(!GatewayHandler::should_prompt_existing_totp(Some(&user)));
@@ -2373,6 +2756,7 @@ mod tests {
             totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
             must_change_password: true,
             allowed_servers: vec!["git".to_string()],
+            authorization: crate::config::AuthorizationPolicyConfig::default(),
         };
 
         assert!(!GatewayHandler::should_prompt_existing_totp(Some(&user)));
@@ -2386,10 +2770,129 @@ mod tests {
             totp_secret: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string()),
             must_change_password: false,
             allowed_servers: vec!["git".to_string()],
+            authorization: crate::config::AuthorizationPolicyConfig::default(),
         };
 
         assert!(GatewayHandler::should_prompt_existing_totp(Some(&user)));
         assert!(GatewayHandler::should_prompt_existing_totp(None));
+    }
+
+    #[test]
+    fn classify_scp_exec_request_matches_source_and_sink_modes() {
+        assert_eq!(classify_scp_exec_request(b"scp -t /tmp/file"), Some("sink"));
+        assert_eq!(classify_scp_exec_request(b"scp -f /tmp/file"), Some("source"));
+        assert_eq!(
+            classify_scp_exec_request(b"/usr/bin/scp -prvf /tmp/file"),
+            Some("source")
+        );
+        assert_eq!(
+            classify_scp_exec_request(b"scp -d -t -- /tmp/file"),
+            Some("sink")
+        );
+    }
+
+    #[test]
+    fn classify_scp_exec_request_ignores_non_scp_execs() {
+        assert_eq!(classify_scp_exec_request(b"uname -a"), None);
+        assert_eq!(classify_scp_exec_request(b"scp /tmp/file"), None);
+        assert_eq!(classify_scp_exec_request(b"sh -c 'scp -t /tmp/file'"), None);
+        assert_eq!(classify_scp_exec_request(b""), None);
+    }
+
+    #[test]
+    fn denied_protocol_message_is_user_facing() {
+        assert_eq!(
+            GatewayHandler::denied_protocol_message("SFTP"),
+            "sftp: access denied"
+        );
+        assert_eq!(
+            GatewayHandler::denied_protocol_message("SCP"),
+            "scp: access denied"
+        );
+    }
+
+    #[test]
+    fn password_prompt_omits_redundant_user_label() {
+        let Auth::Partial { name, instructions, .. } = GatewayHandler::password_prompt("alice") else {
+            panic!("expected partial auth prompt");
+        };
+        assert!(name.is_empty());
+        assert!(instructions.is_empty());
+    }
+
+    #[test]
+    fn local_forwarding_policy_allows_and_denies_as_configured() {
+        let denied = EffectiveAuthorizationPolicy {
+            allow_local_forwarding: false,
+            allow_remote_forwarding: false,
+            allow_sftp: true,
+            allow_scp: true,
+        };
+        let allowed = EffectiveAuthorizationPolicy {
+            allow_local_forwarding: true,
+            ..denied
+        };
+
+        assert!(!local_forwarding_permitted(denied));
+        assert!(local_forwarding_permitted(allowed));
+    }
+
+    #[test]
+    fn remote_forwarding_policy_allows_and_denies_as_configured() {
+        let denied = EffectiveAuthorizationPolicy {
+            allow_local_forwarding: false,
+            allow_remote_forwarding: false,
+            allow_sftp: true,
+            allow_scp: true,
+        };
+        let allowed = EffectiveAuthorizationPolicy {
+            allow_remote_forwarding: true,
+            ..denied
+        };
+
+        assert!(!remote_forwarding_permitted(denied));
+        assert!(remote_forwarding_permitted(allowed));
+    }
+
+    #[test]
+    fn sftp_policy_allows_and_denies_as_configured() {
+        let denied = EffectiveAuthorizationPolicy {
+            allow_local_forwarding: false,
+            allow_remote_forwarding: false,
+            allow_sftp: false,
+            allow_scp: true,
+        };
+        let allowed = EffectiveAuthorizationPolicy {
+            allow_sftp: true,
+            ..denied
+        };
+
+        assert!(!subsystem_request_permitted(denied, "sftp"));
+        assert!(subsystem_request_permitted(allowed, "sftp"));
+        assert!(subsystem_request_permitted(denied, "netconf"));
+    }
+
+    #[test]
+    fn scp_policy_allows_and_denies_as_configured() {
+        let denied = EffectiveAuthorizationPolicy {
+            allow_local_forwarding: false,
+            allow_remote_forwarding: false,
+            allow_sftp: true,
+            allow_scp: false,
+        };
+        let allowed = EffectiveAuthorizationPolicy {
+            allow_scp: true,
+            ..denied
+        };
+
+        assert!(validate_exec_request(denied, b"scp -t /tmp/file").is_err());
+        assert!(validate_exec_request(allowed, b"scp -t /tmp/file").is_ok());
+        assert!(validate_exec_request(denied, b"uname -a").is_ok());
+    }
+
+    #[test]
+    fn shell_like_split_rejects_unbalanced_quotes() {
+        assert!(shell_like_split("scp -t 'unterminated").is_none());
     }
 
     #[test]
@@ -2418,10 +2921,11 @@ mod tests {
 
     #[test]
     fn enrollment_prompt_shows_secret_and_uri_before_qr() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
+            env::set_var("LANG", "en_US.UTF-8");
         }
 
         let auth = GatewayHandler::enrollment_prompt(
@@ -2448,7 +2952,7 @@ mod tests {
 
     #[test]
     fn terminal_dimensions_are_absent_when_env_missing() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
@@ -2459,7 +2963,7 @@ mod tests {
 
     #[test]
     fn enrollment_qr_renders_when_terminal_size_is_unavailable() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("COLUMNS");
             env::remove_var("LINES");
@@ -2476,7 +2980,7 @@ mod tests {
 
     #[test]
     fn enrollment_qr_is_suppressed_when_terminal_is_explicitly_too_small() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::set_var("COLUMNS", "20");
             env::set_var("LINES", "10");
@@ -2493,7 +2997,7 @@ mod tests {
 
     #[test]
     fn enrollment_qr_is_suppressed_without_utf8_locale() {
-        let _guard = terminal_env_lock().lock().expect("terminal env lock");
+        let _guard = acquire_terminal_env_lock();
         unsafe {
             env::remove_var("LC_ALL");
             env::remove_var("LC_CTYPE");

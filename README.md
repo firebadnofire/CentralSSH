@@ -127,9 +127,12 @@ centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
+centralssh_per_user_per_server="true"
 centralssh_drop_to_menu="false"
 centralssh_hide_proxy_ip="false"
 ```
+
+`centralssh_per_user_per_server` controls only the key-layout and policy-resolution mode override. The actual `allow_local_forwarding`, `allow_remote_forwarding`, `allow_sftp`, and `allow_scp` values remain per-user or per-server entries in `config.toml`, not rc.conf booleans.
 
 ## Makefile Behavior
 
@@ -150,6 +153,39 @@ sudo make install
 - Creates `/var/log/centralssh/audit.jsonl` if missing.
 - Installs FreeBSD rc script on FreeBSD.
 - Installs systemd unit on non-FreeBSD hosts.
+
+## Forgejo CI
+
+`.forgejo/workflows/build.yml` now runs the project-specific CentralSSH build matrix described in `CI.md` for Linux and FreeBSD only, and it triggers only on version-tag pushes.
+
+- `linux-build-test`: locked host build plus unit tests.
+- `linux-packages-amd64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation and Linux runtime smoke checks.
+- `linux-packages-arm64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation.
+- `freebsd-amd64`: native FreeBSD runner build that emits `.pkg` and `.tar.gz`, then installs and rc-script checks the package on the FreeBSD runner itself when non-interactive root access is available.
+- `freebsd-aarch64`: native FreeBSD runner cross-build that emits `aarch64` `.pkg` and `.tar.gz` artifacts without the unstable Linux-hosted QEMU boot path. The cross path uses the FreeBSD `aarch64` sysroot plus `cargo +nightly -Z build-std`.
+
+The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, validation, artifact staging, and release publication are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
+Tagged package jobs stage their validated build outputs on a draft Forgejo release. The final `release-publish` job waits for every required Linux and FreeBSD package job, downloads the expected staged release attachments into one fresh release workspace, writes a single `sha256sums` file, uploads it beside the artifacts, and then publishes one Forgejo release.
+The release pipeline treats the git tag as canonical. CI rewrites `Cargo.toml` to the normalized tag version, refreshes `Cargo.lock`, and passes that version through the build and packaging steps. Runtime `centralssh --version` and `centralssh -v` report the normalized version, while CI/distribution builds append `-dist`.
+When a CI step fails, including release staging and release publication steps, the workflow now ships a filtered tail of the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87). The release publication path also includes the failing command and log file path so runner-local API or download failures are explicit instead of collapsing to a bare curl exit line.
+
+### Frozen CI contract
+
+These pieces are now part of the release contract and should not be changed casually:
+
+- `ci/release-version.sh` is the only place that derives the canonical release version from a tag.
+- `ci/rewrite-release-version.sh` rewrites package metadata from that canonical version only.
+- `ci/stage-release-artifacts.sh` stages already-built artifacts on the draft release and should not reconstruct filenames.
+- `ci/publish-release.sh` downloads staged assets by their attachment UUIDs and publishes one final Forgejo release after validating the expected asset list.
+- `build.rs` and `src/version_support.rs` control the runtime `--version` / `-v` string. Local builds report `centralssh <version>`, CI distribution builds report `centralssh <version>-dist`.
+
+Do not reintroduce:
+
+- release version parsing from `Cargo.toml`
+- browser download URLs for staged release assets
+- ad hoc version string mutation like `0.43` vs `0.0.43`
+- extra JS release actions for the Forgejo pipeline
+- QEMU-based FreeBSD release staging
 
 ## Configuration
 
@@ -182,6 +218,24 @@ audit_log_path = "/var/log/centralssh/audit.jsonl"
 whitelist_path = "/etc/centralssh/whitelist.txt"
 enforce_password_policy = true
 min_password_policy = 12
+
+[git.alice]
+allow_local_forwarding = true
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
+
+[httpd.alice]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = false
+
+[dns.bob]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
 
 [kex_policy]
 frontend_preferred = [
@@ -221,9 +275,12 @@ Fields:
 - `users[].totp_secret`: optional base32 TOTP secret.
 - `users[].must_change_password`: boolean.
 - `users[].allowed_servers`: required non-empty list of server names in `servers.toml`.
+- `users[].allow_local_forwarding`, `users[].allow_remote_forwarding`, `users[].allow_sftp`, `users[].allow_scp`: only valid when `settings.per_user_per_server=false`.
 - `settings.user_key_root`: optional path override.
 - `settings.per_user_per_server`: optional bool, default `true`. When `true`, CentralSSH uses one outbound key per user and server. When `false`, it uses one outbound key per user.
 - `settings.drop_to_menu`: optional bool, default `false`. When `true`, a completed interactive shell returns to the server menu on the same shell channel. `sftp` and `scp` do not support an inline post-exit gateway menu with stock OpenSSH clients, so those channels close normally. Choosing `Q` from either selection menu disconnects the SSH session instead of restarting authentication.
+- The inline post-shell menu ignores cursor-control escape sequences such as arrow keys instead of echoing them into the selection line.
+- The gateway title is shown on the server-selection screen and is not repeated on each keyboard-interactive auth prompt.
 - `settings.hide_proxy_ip`: optional bool, default `false`. When `true`, the logged-in server-selection menu shows only logical server names and omits the configured endpoint IP or hostname from the rendered list.
 - `settings.known_hosts_path`: optional path override.
 - `settings.audit_log_path`: optional path override.
@@ -247,6 +304,20 @@ Fields:
 - `fail2ban.state_path`: optional path for persisted abuse state, default `/var/lib/centralssh/fail2ban_state.json`.
 - `fail2ban.whitelist.ips`: optional IPv4/IPv6 CIDR list. Defaults include `127.0.0.1/32` and `::1/128`.
 
+Authorization policy:
+
+- CentralSSH resolves one effective post-auth policy for each `username + selected target`.
+- Default values for missing policy keys are explicit and deterministic:
+  `allow_local_forwarding=false`, `allow_remote_forwarding=false`, `allow_sftp=true`, `allow_scp=true`.
+- When `settings.per_user_per_server=false`, CentralSSH reads `allow_*` fields directly from each `[[users]]` entry and rejects `[server.user]` policy tables at load or reload time.
+- When `settings.per_user_per_server=true`, CentralSSH reads `allow_*` fields only from `[server.user]` tables such as `[git.alice]` and rejects user-level `allow_*` fields at load or reload time.
+- Per-server policy tables must reference an existing server, an existing user, and a user/server pair already allowed by `users[].allowed_servers`.
+- `allow_local_forwarding=false` rejects `direct-tcpip` channel opens before any backend forwarding channel is established.
+- `allow_remote_forwarding=false` rejects `tcpip-forward` and `cancel-tcpip-forward` requests before any backend listener is created or touched.
+- `allow_sftp=false` rejects `subsystem` requests where the subsystem name is exactly `sftp`.
+- `allow_scp=false` rejects SCP-style `exec` requests after conservative command parsing detects `scp` source or sink mode flags such as `-f` or `-t`. It does not treat arbitrary `exec` requests as SCP.
+- When SFTP or SCP is denied after successful authentication and target selection, CentralSSH accepts the request long enough to emit explicit stderr text such as `sftp: access denied` or `scp: access denied`, then disconnects the SSH session cleanly instead of leaving the client with only a generic channel failure.
+
 Notes:
 
 - Outbound target SSH username is always the authenticated CentralSSH username.
@@ -255,6 +326,7 @@ Notes:
 - The frontend listener and outbound SSH client currently support `mlkem768x25519-sha256` but not `sntrup761x25519-sha512`; configuring the latter in either frontend or backend policy fails startup validation.
 - `SIGHUP` reload updates auth, authorization, and abuse-control settings, but transport KEX policy is fixed for existing listener/client configs and currently requires a process restart to change the frontend offer set.
 - No OpenSSH weak-crypto warning on the frontend means the client-to-gateway KEX was hybrid; it does not mean signatures, stored keys, or every outbound target session are post-quantum.
+- Denied forwarding, SFTP, and SCP operations are post-auth policy denials. They are audited as `denied_*` events and do not increment password/TOTP failure counters or fail2ban bans.
 
 ## PQ Validation
 
@@ -276,6 +348,7 @@ Behavior:
 
 - Failures are tracked in a sliding window, not a fixed reset bucket.
 - Normal SSH auth-method discovery such as `none`, `publickey`, or disabled `password` probes does not count as a failed login.
+- Authenticated policy denials for forwarding, SFTP, and SCP are kept separate from brute-force tracking. They are logged, but they do not poison login-failure counters or trigger fail2ban bans.
 - `max_failures` inside `find_time` creates a ban for `ban_time`.
 - Repeated bans for the same IP use exponential backoff and stop growing at `max_ban_time`.
 - Optional tarpitting applies `delay_time` just before the ban threshold when `delay_before_ban=true`.

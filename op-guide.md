@@ -25,6 +25,7 @@ The operator should know that the repo currently contains both old and new assum
 - The current proxy code does relay `session`, `exec`, `subsystem`, PTY, `direct-tcpip`, and remote forwarding requests.
 - Session request/data forwarding happens from the `russh` server callbacks, so post-selection SSH behavior does not depend on a gateway-local shell shim.
 - If `settings.drop_to_menu=true`, completed interactive shell channels return to the selection menu inline. Stock OpenSSH `sftp` and `scp` clients do not support an inline post-exit gateway menu, so those channels close normally. `Q` disconnects the SSH session from either selection menu.
+- The gateway title is shown on the selection menu and is not repeated on every keyboard-interactive auth prompt.
 - The `README.md` has been updated to match this transparent proxy model.
 - Agent forwarding is still rejected by policy.
 
@@ -112,6 +113,12 @@ password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
 must_change_password = true
 allowed_servers = ["git", "httpd"]
 
+[[users]]
+name = "bob"
+password = "REPLACE_WITH_UNIQUE_TEMPORARY_PASSWORD"
+must_change_password = true
+allowed_servers = ["dns"]
+
 [settings]
 user_key_root = "/var/lib/centralssh/keys"
 per_user_per_server = true
@@ -121,6 +128,24 @@ known_hosts_path = "/etc/centralssh/known_hosts"
 audit_log_path = "/var/log/centralssh/audit.jsonl"
 enforce_password_policy = true
 min_password_policy = 12
+
+[git.alice]
+allow_local_forwarding = true
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
+
+[httpd.alice]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = false
+
+[dns.bob]
+allow_local_forwarding = false
+allow_remote_forwarding = false
+allow_sftp = true
+allow_scp = true
 
 [kex_policy]
 frontend_preferred = [
@@ -161,6 +186,7 @@ If `settings.hide_proxy_ip=true`, the authenticated selection menu shows only lo
 - `totp_secret`: optional base32 TOTP secret
 - `must_change_password`: boolean
 - `allowed_servers`: required non-empty list of keys that must exist in `servers.toml`
+- `allow_local_forwarding`, `allow_remote_forwarding`, `allow_sftp`, `allow_scp`: only valid here when `settings.per_user_per_server=false`
 
 ### Settings fields
 
@@ -170,6 +196,20 @@ If `settings.hide_proxy_ip=true`, the authenticated selection menu shows only lo
 - `audit_log_path`: optional override for audit log file
 - `enforce_password_policy`: optional boolean; defaults to `true`
 - `min_password_policy`: optional integer minimum password length; defaults to `12`
+
+### Authorization policy fields
+
+- CentralSSH resolves one effective policy for each authenticated `username + selected target`.
+- Missing policy keys use explicit defaults:
+  `allow_local_forwarding=false`, `allow_remote_forwarding=false`, `allow_sftp=true`, `allow_scp=true`.
+- When `per_user_per_server=false`, CentralSSH reads `allow_*` from `[[users]]` and rejects `[server.user]` policy tables.
+- When `per_user_per_server=true`, CentralSSH reads `allow_*` only from `[server.user]` tables and rejects user-level `allow_*` keys.
+- Per-server policy tables must reference an existing server, an existing user, and a user/server pair already present in `allowed_servers`.
+- `allow_local_forwarding=false` rejects `direct-tcpip`.
+- `allow_remote_forwarding=false` rejects `tcpip-forward` and `cancel-tcpip-forward`.
+- `allow_sftp=false` rejects `subsystem sftp`.
+- `allow_scp=false` rejects SCP `exec` requests when the command parser detects `scp` source or sink mode flags such as `-f` or `-t`.
+- Denied SFTP and SCP requests emit explicit stderr text such as `sftp: access denied` or `scp: access denied` and then disconnect the SSH session cleanly instead of leaving the client with only a generic channel failure.
 
 ### Fail2ban fields
 
@@ -249,6 +289,8 @@ CentralSSH only accepts keyboard-interactive SSH auth for gateway login.
 - Plain SSH password auth to the gateway is rejected.
 - The transport auth flow is implemented entirely through keyboard-interactive prompts.
 - Normal OpenSSH auth-method discovery probes do not count toward fail2ban or password/TOTP failures.
+- Authenticated policy denials for forwarding, SFTP, and SCP are logged separately and do not increment fail2ban or login-failure counters.
+- Transport-level auth rejections are intentionally kept short so OpenSSH clients reach the first password prompt without a multi-second stall.
 
 The user experience is:
 
@@ -618,6 +660,7 @@ centralssh_known_hosts="/etc/centralssh/known_hosts"
 centralssh_user_key_root="/var/lib/centralssh/keys"
 centralssh_audit_log="/var/log/centralssh/audit.jsonl"
 centralssh_whitelist="/etc/centralssh/whitelist.txt"
+centralssh_per_user_per_server="true"
 centralssh_drop_to_menu="false"
 centralssh_hide_proxy_ip="false"
 ```
@@ -625,7 +668,8 @@ centralssh_hide_proxy_ip="false"
 Important note:
 
 - The rc script now defaults `centralssh_user_key_root` to `/var/lib/centralssh/keys`.
-- Set `PER_USER_PER_SERVER=false` in the service environment only if you intentionally want one outbound key per user.
+- Use `centralssh_per_user_per_server="false"` only if you intentionally want one outbound key per user and user-level `allow_*` policy fields.
+- The actual `allow_local_forwarding`, `allow_remote_forwarding`, `allow_sftp`, and `allow_scp` values remain in `config.toml`; rc.conf does not provide separate global booleans for them.
 
 ### Linux
 
@@ -657,6 +701,35 @@ Important note:
 - installs either the FreeBSD rc.d script or the systemd unit
 
 It does not fully provision per-user per-server outbound keys for you.
+
+## 22.1 CI pipeline
+
+The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plus FreeBSD-only matrix from `CI.md` and is triggered only by version-tag pushes.
+
+- Linux host validation runs `cargo test --locked` and a locked release build.
+- Linux packaging produces `centralssh-<version>-linux-amd64-systemd.tar.gz`, `centralssh-<version>-linux-arm64-systemd.tar.gz`, matching `.deb` packages, and matching `.rpm` packages.
+- FreeBSD amd64 packaging now runs on the native `freebsd` runner and produces `centralssh-<version>-freebsd-amd64.pkg` and `centralssh-<version>-freebsd-amd64.tar.gz`. When privilege is available, the runner validates the installed package through the packaged rc script with a temporary root-owned config tree.
+- FreeBSD aarch64 packaging now also runs on the native `freebsd` runner as a cross-build and produces `centralssh-<version>-freebsd-aarch64.pkg` and `centralssh-<version>-freebsd-aarch64.tar.gz`. The cross build uses the FreeBSD `aarch64` sysroot wrapper and `cargo +nightly -Z build-std`.
+- Native FreeBSD jobs never block on an interactive `sudo` prompt anymore. If non-interactive root access is unavailable, the pipeline skips the privileged amd64 runtime service check instead of hanging.
+- Linux and FreeBSD jobs run on their native runner classes. Package jobs stage only their validated artifacts on a draft Forgejo release.
+- Tagged runs publish from the final `release-publish` job only after every required Linux and FreeBSD package job succeeds. That job downloads the expected staged release attachments into one workspace, writes a single `sha256sums` file, uploads it beside the artifacts, and publishes one Forgejo release.
+- Release packaging, staging, and publication derive the canonical version from the pushed tag. The CI helper rewrites `Cargo.toml`, refreshes `Cargo.lock`, and then runs the locked build and packaging commands against that rewritten version.
+- Runtime `centralssh --version` and `centralssh -v` report the normalized tag version. CI and distribution builds append `-dist` to that runtime version string, but package filenames stay on the plain semantic version.
+- Failing CI steps, including release staging and release publication stages, upload a filtered tail of their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits. The release publication failure payload now also includes the exact failing command and captured log path.
+
+### Do not touch
+
+Treat these as pipeline invariants unless you are intentionally changing the release topology and updating all related scripts and docs together:
+
+- do not derive release versions from `Cargo.toml`
+- do not mutate canonical versions after `ci/release-version.sh` validates them
+- do not change release asset filenames without changing staging, publish, and validation together
+- do not reintroduce browser URL downloads for release assets
+- do not replace the shell-only workflow steps with third-party `uses:` actions
+- do not reintroduce QEMU-based FreeBSD packaging or staging
+- do not remove the `-dist` suffix from CI distribution builds
+
+If a release job fails, inspect the repo-local log capture first. The job log plus `jsonlogs --last` are the authoritative record of the failure path; the workflow is designed to make missing assets, bad versions, and API errors explicit there.
 
 ## 23. Recommended production setup
 
@@ -733,6 +806,15 @@ Current code supports these behaviors through the proxy layer:
 - local forwarding via `direct-tcpip`
 - remote forwarding via `tcpip-forward`
 - X11 channel/request forwarding
+
+Current policy enforcement can selectively deny:
+
+- `direct-tcpip` when local forwarding is disabled
+- `tcpip-forward` and `cancel-tcpip-forward` when remote forwarding is disabled
+- `subsystem sftp` when SFTP is disabled
+- SCP-style `exec` requests when SCP is disabled
+
+Those denials happen after successful authentication at the SSH request layer. SFTP and SCP denials now succeed the request long enough to print a protocol-specific access-denied message before the channel exits nonzero, and all of them leave fail2ban state unchanged.
 
 Current code rejects:
 
