@@ -434,7 +434,6 @@ Use the plaintext secret or URI above.\n\n"
         )?;
         session.exit_status_request(channel, 1)?;
         session.eof(channel)?;
-        session.close(channel)?;
         Ok(())
     }
 
