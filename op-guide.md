@@ -713,7 +713,7 @@ The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plu
 - FreeBSD aarch64 packaging now also runs on the native `freebsd` runner as a cross-build and produces `centralssh-<version>-freebsd-aarch64.pkg` and `centralssh-<version>-freebsd-aarch64.tar.gz`. The cross build uses the FreeBSD `aarch64` sysroot wrapper and `cargo +nightly -Z build-std`.
 - Native FreeBSD jobs never block on an interactive `sudo` prompt anymore. If non-interactive root access is unavailable, the pipeline skips the privileged amd64 runtime service check instead of hanging.
 - Linux and FreeBSD jobs run on their native runner classes. Package jobs stage only their validated artifacts on a draft Forgejo release.
-- Tagged runs publish from the final `release-publish` job only after every required Linux and FreeBSD package job succeeds. That job downloads the expected staged release attachments into one workspace, writes `SHA256SUMS` and `SHA512SUMS`, uploads them beside the artifacts, and publishes one Forgejo release.
+- Tagged runs publish from the final `release-publish` job only after every required Linux and FreeBSD package job succeeds. That job downloads the expected staged release attachments into one workspace, writes `SHA256SUMS` and `SHA512SUMS`, publishes the final Forgejo release, syncs the repository branches and tags to `https://github.com/firebadnofire/centralssh`, and then publishes the same artifacts plus checksum files on the GitHub release for the tag.
 - Release packaging, staging, and publication derive the canonical version from the pushed tag. The CI helper rewrites `Cargo.toml`, refreshes `Cargo.lock`, and then runs the locked build and packaging commands against that rewritten version.
 - Runtime `centralssh --version` and `centralssh -v` report the normalized tag version. CI and distribution builds append `-dist` to that runtime version string, but package filenames stay on the plain semantic version.
 - Failing CI steps, including release staging and release publication stages, upload a filtered tail of their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits. The release publication failure payload now also includes the exact failing command and captured log path.
@@ -726,6 +726,7 @@ Treat these as pipeline invariants unless you are intentionally changing the rel
 - do not mutate canonical versions after `ci/release-version.sh` validates them
 - do not change release asset filenames without changing staging, publish, and validation together
 - do not reintroduce browser URL downloads for release assets
+- do not treat GitHub publication as an independent artifact build; it must reuse the validated Forgejo-staged artifact set
 - do not replace the shell-only workflow steps with third-party `uses:` actions
 - do not reintroduce QEMU-based FreeBSD packaging or staging
 - do not remove the `-dist` suffix from CI distribution builds

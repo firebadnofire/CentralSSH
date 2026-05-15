@@ -747,3 +747,31 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then FAILED_COMMAND="$last_command" ./ci/post-ci-log.sh "release-publish/forgejo-release" error "$log_file"; fi' EXIT
           cd "${REPO_DIR:?Missing checkout}"
           ./ci/publish-release.sh
+
+      - name: Sync repository to GitHub
+        shell: bash
+        env:
+          GH_KEY: ${{ secrets.GH_KEY }}
+        run: |
+          set -euo pipefail
+          last_command=
+          log_file="${RUNNER_TEMP:-/tmp}/release-publish-github-sync.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'last_command=$BASH_COMMAND' DEBUG
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then FAILED_COMMAND="$last_command" ./ci/post-ci-log.sh "release-publish/github-sync" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          ./ci/sync-github-mirror.sh
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_KEY: ${{ secrets.GH_KEY }}
+        run: |
+          set -euo pipefail
+          last_command=
+          log_file="${RUNNER_TEMP:-/tmp}/release-publish-github.log"
+          exec > >(tee -a "$log_file") 2>&1
+          trap 'last_command=$BASH_COMMAND' DEBUG
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then FAILED_COMMAND="$last_command" ./ci/post-ci-log.sh "release-publish/github-release" error "$log_file"; fi' EXIT
+          cd "${REPO_DIR:?Missing checkout}"
+          ./ci/publish-github-release.sh

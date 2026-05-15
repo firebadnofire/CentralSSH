@@ -165,8 +165,8 @@ sudo make install
 - `freebsd-amd64`: native FreeBSD runner build that emits `.pkg` and `.tar.gz`, then installs and rc-script checks the package on the FreeBSD runner itself when non-interactive root access is available.
 - `freebsd-aarch64`: native FreeBSD runner cross-build that emits `aarch64` `.pkg` and `.tar.gz` artifacts without the unstable Linux-hosted QEMU boot path. The cross path uses the FreeBSD `aarch64` sysroot plus `cargo +nightly -Z build-std`.
 
-The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, validation, artifact staging, and release publication are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
-Tagged package jobs stage their validated build outputs on a draft Forgejo release. The final `release-publish` job waits for every required Linux and FreeBSD package job, downloads the expected staged release attachments into one fresh release workspace, writes `SHA256SUMS` and `SHA512SUMS`, uploads them beside the artifacts, and then publishes one Forgejo release.
+The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, validation, artifact staging, repository mirroring, and release publication are all done with repository-local shell logic so Forgejo and GitHub assumptions do not become hidden dependencies.
+Tagged package jobs stage their validated build outputs on a draft Forgejo release. The final `release-publish` job waits for every required Linux and FreeBSD package job, downloads the expected staged release attachments into one fresh release workspace, writes `SHA256SUMS` and `SHA512SUMS`, publishes the final Forgejo release, syncs the repository branches and tags to `https://github.com/firebadnofire/centralssh`, and then publishes the same asset set on the GitHub release for the tag.
 The release pipeline treats the git tag as canonical. CI rewrites `Cargo.toml` to the normalized tag version, refreshes `Cargo.lock`, and passes that version through the build and packaging steps. Runtime `centralssh --version` and `centralssh -v` report the normalized version, while CI/distribution builds append `-dist`.
 When a CI step fails, including release staging and release publication steps, the workflow now ships a filtered tail of the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87). The release publication path also includes the failing command and log file path so runner-local API or download failures are explicit instead of collapsing to a bare curl exit line.
 
@@ -177,7 +177,9 @@ These pieces are now part of the release contract and should not be changed casu
 - `ci/release-version.sh` is the only place that derives the canonical release version from a tag.
 - `ci/rewrite-release-version.sh` rewrites package metadata from that canonical version only.
 - `ci/stage-release-artifacts.sh` stages already-built artifacts on the draft release and should not reconstruct filenames.
-- `ci/publish-release.sh` downloads staged assets by their attachment UUIDs and publishes one final Forgejo release after validating the expected asset list.
+- `ci/publish-release.sh` downloads staged assets by their attachment UUIDs and publishes the final Forgejo release after validating the expected asset list.
+- `ci/sync-github-mirror.sh` pushes the checked-out repository's origin branches and tags to `firebadnofire/centralssh` using `GH_KEY`.
+- `ci/publish-github-release.sh` reuses the validated release workspace and publishes the same artifacts plus `SHA256SUMS` and `SHA512SUMS` to the GitHub release for the tag.
 - `build.rs` and `src/version_support.rs` control the runtime `--version` / `-v` string. Local builds report `centralssh <version>`, CI distribution builds report `centralssh <version>-dist`.
 
 Do not reintroduce:
