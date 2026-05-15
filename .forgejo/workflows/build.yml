@@ -418,20 +418,11 @@ jobs:
               echo "failed to install required FreeBSD build packages" >&2
               exit 1
             }
-            $sudo_cmd pkg install -y node npm || \
-              $sudo_cmd pkg install -y node24 npm-node24 || \
-              $sudo_cmd pkg install -y node22 npm-node22 || \
-              $sudo_cmd pkg install -y node20 npm-node20 || {
-                echo "failed to install node/npm tooling on FreeBSD" >&2
-                exit 1
-              }
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
           command -v gmake >/dev/null 2>&1
           command -v jq >/dev/null 2>&1
-          command -v node >/dev/null 2>&1
-          command -v npm >/dev/null 2>&1
 
       - name: Check out repository
         shell: sh
@@ -598,20 +589,11 @@ jobs:
               echo "failed to install required FreeBSD build packages" >&2
               exit 1
             }
-            $sudo_cmd pkg install -y node npm || \
-              $sudo_cmd pkg install -y node24 npm-node24 || \
-              $sudo_cmd pkg install -y node22 npm-node22 || \
-              $sudo_cmd pkg install -y node20 npm-node20 || {
-                echo "failed to install node/npm tooling on FreeBSD" >&2
-                exit 1
-              }
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
           command -v gmake >/dev/null 2>&1
           command -v jq >/dev/null 2>&1
-          command -v node >/dev/null 2>&1
-          command -v npm >/dev/null 2>&1
 
       - name: Check out repository
         shell: sh
