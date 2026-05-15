@@ -137,7 +137,7 @@ refresh_release_assets() {
 
 log_release_assets() {
   printf 'release asset inventory for %s (release_id=%s):\n' "$tag" "$release_id" >&2
-  jq -r '.[] | "  - \(.name) id=\(.id) size=\(.size)"' "$release_assets" >&2
+  jq -r '.[] | "  - \(.name) id=\(.id) uuid=\(.uuid) size=\(.size)"' "$release_assets" >&2
 }
 
 preflight_expected_assets() {
@@ -159,21 +159,23 @@ preflight_expected_assets() {
 }
 
 download_asset_via_api() {
-  asset_id=$1
+  asset_uuid=$1
   asset_name=$2
   output_path=$3
 
-  log_cmd "curl --fail --silent --show-error --location ${api_url}/repos/${owner}/${repo}/releases/assets/${asset_id} (api download)"
+  attachment_base=${api_url%/api/v1}
+  attachment_url="${attachment_base}/attachments/${asset_uuid}"
+  log_cmd "curl --fail --silent --show-error --location ${attachment_url} (attachment download)"
   curl --fail --silent --show-error --location \
     --header "Authorization: token ${token}" \
     --header "Accept: application/octet-stream" \
     --output "$output_path" \
-    "${api_url}/repos/${owner}/${repo}/releases/assets/${asset_id}"
+    "$attachment_url"
 }
 
 require_release_asset() {
   asset_name=$1
-  jq -c --arg name "$asset_name" '.[] | select(.name == $name) | {id, name, size}' "$release_assets" | sed -n '1p'
+  jq -c --arg name "$asset_name" '.[] | select(.name == $name) | {id, uuid, name, size}' "$release_assets" | sed -n '1p'
 }
 
 download_asset() {
@@ -186,10 +188,16 @@ download_asset() {
   }
 
   asset_id=$(printf '%s' "$asset_json" | jq -r '.id')
+  asset_uuid=$(printf '%s' "$asset_json" | jq -r '.uuid')
   expected_size=$(printf '%s' "$asset_json" | jq -r '.size')
   output_path="$dist_dir/$asset_name"
   [ -n "$asset_id" ] && [ "$asset_id" != "null" ] || {
     echo "missing staged release asset id: $asset_name" >&2
+    log_release_assets
+    exit 1
+  }
+  [ -n "$asset_uuid" ] && [ "$asset_uuid" != "null" ] || {
+    echo "missing staged release asset uuid: $asset_name" >&2
     log_release_assets
     exit 1
   }
@@ -199,7 +207,7 @@ download_asset() {
     exit 1
   }
 
-  download_asset_via_api "$asset_id" "$asset_name" "$output_path"
+  download_asset_via_api "$asset_uuid" "$asset_name" "$output_path"
 
   actual_size=$(wc -c < "$output_path" | tr -d ' ')
   if [ "$actual_size" != "$expected_size" ]; then
@@ -214,9 +222,15 @@ download_asset() {
       exit 1
     }
     asset_id=$(printf '%s' "$asset_json" | jq -r '.id')
+    asset_uuid=$(printf '%s' "$asset_json" | jq -r '.uuid')
     expected_size=$(printf '%s' "$asset_json" | jq -r '.size')
     [ -n "$asset_id" ] && [ "$asset_id" != "null" ] || {
       echo "missing staged release asset id after refresh: $asset_name" >&2
+      log_release_assets
+      exit 1
+    }
+    [ -n "$asset_uuid" ] && [ "$asset_uuid" != "null" ] || {
+      echo "missing staged release asset uuid after refresh: $asset_name" >&2
       log_release_assets
       exit 1
     }
@@ -225,11 +239,11 @@ download_asset() {
       log_release_assets
       exit 1
     }
-    download_asset_via_api "$asset_id" "$asset_name" "$output_path"
+    download_asset_via_api "$asset_uuid" "$asset_name" "$output_path"
     actual_size=$(wc -c < "$output_path" | tr -d ' ')
     [ "$actual_size" = "$expected_size" ] || {
-      printf 'downloaded asset size mismatch for %s after retry: expected=%s actual=%s asset_id=%s\n' \
-        "$asset_name" "$expected_size" "$actual_size" "$asset_id" >&2
+      printf 'downloaded asset size mismatch for %s after retry: expected=%s actual=%s asset_uuid=%s\n' \
+        "$asset_name" "$expected_size" "$actual_size" "$asset_uuid" >&2
       exit 1
     }
   fi
