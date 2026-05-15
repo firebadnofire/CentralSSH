@@ -123,7 +123,7 @@ if [ "$run_runtime_validation" -eq 1 ]; then
   install_root="$work_root/install-root"
   runtime_root="$work_root/runtime"
   mkdir -p "$extract_root" "$install_root" "$runtime_root/etc/centralssh" "$runtime_root/var/lib/centralssh/keys" "$runtime_root/var/log/centralssh"
-  tar -C "$extract_root" -xzf "$tarball"
+  tar -C "$extract_root" -xzf "$systemd_tarball"
   (
     cd "$extract_root/centralssh"
     make install DESTDIR="$install_root"
