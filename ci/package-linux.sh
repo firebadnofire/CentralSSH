@@ -41,16 +41,18 @@ esac
 app_name=centralssh
 release_bin="$target_root/$target_triple/release/$app_name"
 release_tool="$repo_root/tools/cssh-keyscan"
-tarball="$dist_dir/${app_name}-${version}-linux-${arch}-systemd.tar.gz"
+systemd_tarball="$dist_dir/${app_name}-${version}-linux-${arch}-systemd.tar.gz"
+openrc_tarball="$dist_dir/${app_name}-${version}-linux-${arch}-openrc.tar.gz"
 deb_file="$dist_dir/${app_name}-${version}-debian-${deb_arch}.deb"
 rpm_file="$dist_dir/${app_name}-${version}-fedora-${rpm_arch}.rpm"
 staging_root="$work_root/stage"
-archive_root="$work_root/archive/$app_name"
+systemd_archive_root="$work_root/archive-systemd/$app_name"
+openrc_archive_root="$work_root/archive-openrc/$app_name"
 rpm_topdir="$work_root/rpmbuild"
 source_root="$work_root/rpm-source/${app_name}-${version}"
 rpm_target_platform="${rpm_arch}-unknown-linux"
 rm -rf "$work_root"
-mkdir -p "$dist_dir" "$staging_root" "$archive_root"
+mkdir -p "$dist_dir" "$staging_root" "$systemd_archive_root" "$openrc_archive_root"
 mkdir -p \
   "$rpm_topdir/BUILD" \
   "$rpm_topdir/BUILDROOT" \
@@ -72,20 +74,35 @@ make install \
   SYSTEMD_UNIT_DIR=/etc/systemd/system
 
 mkdir -p \
-  "$archive_root/bin" \
-  "$archive_root/examples" \
-  "$archive_root/packaging/systemd"
+  "$systemd_archive_root/bin" \
+  "$systemd_archive_root/examples" \
+  "$systemd_archive_root/packaging/systemd"
 
-install -m 0755 "$release_bin" "$archive_root/bin/$app_name"
-install -m 0755 "$release_tool" "$archive_root/bin/cssh-keyscan"
-install -m 0644 "$repo_root/examples/config.toml" "$archive_root/examples/config.toml"
-install -m 0644 "$repo_root/examples/servers.toml" "$archive_root/examples/servers.toml"
-install -m 0644 "$repo_root/packaging/systemd/centralssh.service" "$archive_root/packaging/systemd/centralssh.service"
-install -m 0644 "$repo_root/README-dist.md" "$archive_root/README.md"
-install -m 0644 "$repo_root/op-guide.md" "$archive_root/op-guide.md"
-install -m 0644 "$repo_root/Makefile-dist" "$archive_root/Makefile"
+install -m 0755 "$release_bin" "$systemd_archive_root/bin/$app_name"
+install -m 0755 "$release_tool" "$systemd_archive_root/bin/cssh-keyscan"
+install -m 0644 "$repo_root/examples/config.toml" "$systemd_archive_root/examples/config.toml"
+install -m 0644 "$repo_root/examples/servers.toml" "$systemd_archive_root/examples/servers.toml"
+install -m 0644 "$repo_root/packaging/systemd/centralssh.service" "$systemd_archive_root/packaging/systemd/centralssh.service"
+install -m 0644 "$repo_root/README-dist.md" "$systemd_archive_root/README.md"
+install -m 0644 "$repo_root/op-guide.md" "$systemd_archive_root/op-guide.md"
+install -m 0644 "$repo_root/Makefile-dist" "$systemd_archive_root/Makefile"
 
-tar -C "$work_root/archive" -czf "$tarball" "$app_name"
+mkdir -p \
+  "$openrc_archive_root/bin" \
+  "$openrc_archive_root/examples" \
+  "$openrc_archive_root/packaging/openrc"
+
+install -m 0755 "$release_bin" "$openrc_archive_root/bin/$app_name"
+install -m 0755 "$release_tool" "$openrc_archive_root/bin/cssh-keyscan"
+install -m 0644 "$repo_root/examples/config.toml" "$openrc_archive_root/examples/config.toml"
+install -m 0644 "$repo_root/examples/servers.toml" "$openrc_archive_root/examples/servers.toml"
+install -m 0644 "$repo_root/packaging/openrc/centralssh" "$openrc_archive_root/packaging/openrc/centralssh"
+install -m 0644 "$repo_root/README-openrc-dist.md" "$openrc_archive_root/README.md"
+install -m 0644 "$repo_root/op-guide.md" "$openrc_archive_root/op-guide.md"
+install -m 0644 "$repo_root/Makefile-openrc-dist" "$openrc_archive_root/Makefile"
+
+tar -C "$work_root/archive-systemd" -czf "$systemd_tarball" "$app_name"
+tar -C "$work_root/archive-openrc" -czf "$openrc_tarball" "$app_name"
 
 mkdir -p "$staging_root/DEBIAN"
 cat > "$staging_root/DEBIAN/control" <<EOF
@@ -181,4 +198,4 @@ rpm_built=$(find "$rpm_topdir/RPMS" -type f -name '*.rpm' | head -n 1)
 }
 cp "$rpm_built" "$rpm_file"
 
-printf '%s\n%s\n%s\n' "$tarball" "$deb_file" "$rpm_file"
+printf '%s\n%s\n%s\n%s\n' "$systemd_tarball" "$openrc_tarball" "$deb_file" "$rpm_file"

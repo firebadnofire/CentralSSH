@@ -45,7 +45,7 @@ The current Forgejo pipeline is intentionally stable. Do not change these pieces
 - release version derivation comes only from the pushed git tag
 - `Cargo.toml` and `Cargo.lock` are rewritten from that canonical tag version
 - staged release assets are uploaded to a draft release first, then downloaded from that same release during final publication
-- final publication uses one `sha256sums` file and one Forgejo release
+- final publication uses `SHA256SUMS`, `SHA512SUMS`, and one Forgejo release
 - runtime `centralssh --version` / `-v` output is `centralssh <version>` for local builds and `centralssh <version>-dist` for CI distribution builds
 
 Do not touch these without a real topology change:

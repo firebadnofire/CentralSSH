@@ -33,7 +33,8 @@ case "$arch" in
 esac
 
 app_name=centralssh
-tarball="$dist_dir/${app_name}-${version}-linux-${arch}-systemd.tar.gz"
+systemd_tarball="$dist_dir/${app_name}-${version}-linux-${arch}-systemd.tar.gz"
+openrc_tarball="$dist_dir/${app_name}-${version}-linux-${arch}-openrc.tar.gz"
 deb_file="$dist_dir/${app_name}-${version}-debian-${deb_arch}.deb"
 rpm_file="$dist_dir/${app_name}-${version}-fedora-${rpm_arch}.rpm"
 
@@ -51,13 +52,14 @@ require_members() {
 rm -rf "$work_root"
 mkdir -p "$work_root"
 
-test -f "$tarball"
+test -f "$systemd_tarball"
+test -f "$openrc_tarball"
 test -f "$deb_file"
 test -f "$rpm_file"
 
-tar_listing="$work_root/tar.list"
-tar -tzf "$tarball" > "$tar_listing"
-require_members "$tar_listing" \
+systemd_listing="$work_root/systemd-tar.list"
+tar -tzf "$systemd_tarball" > "$systemd_listing"
+require_members "$systemd_listing" \
   "centralssh/" \
   "centralssh/Makefile" \
   "centralssh/README.md" \
@@ -68,6 +70,20 @@ require_members "$tar_listing" \
   "centralssh/examples/servers.toml" \
   "centralssh/packaging/systemd/centralssh.service"
 
+openrc_listing="$work_root/openrc-tar.list"
+tar -tzf "$openrc_tarball" > "$openrc_listing"
+require_members "$openrc_listing" \
+  "centralssh/" \
+  "centralssh/Makefile" \
+  "centralssh/README.md" \
+  "centralssh/op-guide.md" \
+  "centralssh/bin/centralssh" \
+  "centralssh/bin/cssh-keyscan" \
+  "centralssh/examples/config.toml" \
+  "centralssh/examples/servers.toml" \
+  "centralssh/packaging/openrc/centralssh"
+
+tar_listing="$systemd_listing"
 dpkg-deb --info "$deb_file" >/dev/null
 deb_listing="$work_root/deb.list"
 dpkg-deb --contents "$deb_file" > "$deb_listing"

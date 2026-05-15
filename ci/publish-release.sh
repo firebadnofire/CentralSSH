@@ -37,6 +37,10 @@ command -v sha256sum >/dev/null 2>&1 || {
   echo "sha256sum is required for release publication" >&2
   exit 1
 }
+command -v sha512sum >/dev/null 2>&1 || {
+  echo "sha512sum is required for release publication" >&2
+  exit 1
+}
 
 release_env=$(sh "$repo_root/ci/release-version.sh") || exit $?
 eval "$release_env"
@@ -59,9 +63,11 @@ mkdir -p "$dist_dir"
 
 cat > "$expected_file" <<EOF
 centralssh-${version}-linux-amd64-systemd.tar.gz
+centralssh-${version}-linux-amd64-openrc.tar.gz
 centralssh-${version}-debian-amd64.deb
 centralssh-${version}-fedora-x86_64.rpm
 centralssh-${version}-linux-arm64-systemd.tar.gz
+centralssh-${version}-linux-arm64-openrc.tar.gz
 centralssh-${version}-debian-arm64.deb
 centralssh-${version}-fedora-aarch64.rpm
 centralssh-${version}-freebsd-amd64.pkg
@@ -106,7 +112,7 @@ api_request() {
 }
 
 release_name="CentralSSH ${tag}"
-release_body="Automated CentralSSH release for ${tag}. See sha256sums for checksums."
+release_body="Automated CentralSSH release for ${tag}. See SHA256SUMS and SHA512SUMS for checksums."
 public_payload=$(jq -n \
   --arg tag "$tag" \
   --arg name "$release_name" \
@@ -265,17 +271,26 @@ done < "$expected_file"
   while IFS= read -r asset_name; do
     sha256sum "$asset_name"
   done < "$expected_file"
-) > "$dist_dir/sha256sums"
+) > "$dist_dir/SHA256SUMS"
 
-sha_asset_id=$(jq -r '.[] | select(.name == "sha256sums") | .id' "$release_assets" | sed -n '1p')
-if [ -n "$sha_asset_id" ]; then
-  api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${sha_asset_id}" >/dev/null
-fi
-api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=sha256sums" \
-  --form "attachment=@${dist_dir}/sha256sums" >/dev/null
+(
+  cd "$dist_dir"
+  while IFS= read -r asset_name; do
+    sha512sum "$asset_name"
+  done < "$expected_file"
+) > "$dist_dir/SHA512SUMS"
+
+for checksum_file in SHA256SUMS SHA512SUMS; do
+  checksum_asset_id=$(jq -r --arg name "$checksum_file" '.[] | select(.name == $name) | .id' "$release_assets" | sed -n '1p')
+  if [ -n "$checksum_asset_id" ]; then
+    api_request DELETE "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets/${checksum_asset_id}" >/dev/null
+  fi
+  api_request POST "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets?name=${checksum_file}" \
+    --form "attachment=@${dist_dir}/${checksum_file}" >/dev/null
+done
 
 api_request PATCH "${api_url}/repos/${owner}/${repo}/releases/${release_id}" \
   --header "Content-Type: application/json" \
   --data "$public_payload" >/dev/null
 
-printf 'published release %s with %s artifacts plus sha256sums\n' "$tag" "$(wc -l < "$expected_file" | tr -d ' ')"
+printf 'published release %s with %s artifacts plus SHA256SUMS and SHA512SUMS\n' "$tag" "$(wc -l < "$expected_file" | tr -d ' ')"

@@ -243,6 +243,7 @@ jobs:
           ./ci/validate-linux-packages.sh "$version" amd64
           ./ci/stage-release-artifacts.sh linux-packages-amd64 \
             "dist/centralssh-${version}-linux-amd64-systemd.tar.gz" \
+            "dist/centralssh-${version}-linux-amd64-openrc.tar.gz" \
             "dist/centralssh-${version}-debian-amd64.deb" \
             "dist/centralssh-${version}-fedora-x86_64.rpm"
 
@@ -349,6 +350,7 @@ jobs:
           ./ci/validate-linux-packages.sh "$version" arm64
           ./ci/stage-release-artifacts.sh linux-packages-arm64 \
             "dist/centralssh-${version}-linux-arm64-systemd.tar.gz" \
+            "dist/centralssh-${version}-linux-arm64-openrc.tar.gz" \
             "dist/centralssh-${version}-debian-arm64.deb" \
             "dist/centralssh-${version}-fedora-aarch64.rpm"
 

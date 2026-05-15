@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+
+description="CentralSSH hardened SSH gateway"
+command="/usr/local/sbin/centralssh"
+command_args="--listen 0.0.0.0:7788 --config /etc/centralssh/config.toml --servers /etc/centralssh/servers.toml --known-hosts /etc/centralssh/known_hosts --user-key-root /var/lib/centralssh/keys --audit-log /var/log/centralssh/audit.jsonl"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	checkpath -d -m 0700 /etc/centralssh
+	checkpath -d -m 0700 /var/lib/centralssh/keys
+	checkpath -d -m 0700 /var/log/centralssh
+}

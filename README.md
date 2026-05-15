@@ -159,13 +159,13 @@ sudo make install
 `.forgejo/workflows/build.yml` now runs the project-specific CentralSSH build matrix described in `CI.md` for Linux and FreeBSD only, and it triggers only on version-tag pushes.
 
 - `linux-build-test`: locked host build plus unit tests.
-- `linux-packages-amd64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation and Linux runtime smoke checks.
-- `linux-packages-arm64`: systemd tarball, `.deb`, and `.rpm`, then explicit artifact validation.
+- `linux-packages-amd64`: `systemd` tarball, `openrc` tarball, `.deb`, and `.rpm`, then explicit artifact validation and Linux runtime smoke checks.
+- `linux-packages-arm64`: `systemd` tarball, `openrc` tarball, `.deb`, and `.rpm`, then explicit artifact validation.
 - `freebsd-amd64`: native FreeBSD runner build that emits `.pkg` and `.tar.gz`, then installs and rc-script checks the package on the FreeBSD runner itself when non-interactive root access is available.
 - `freebsd-aarch64`: native FreeBSD runner cross-build that emits `aarch64` `.pkg` and `.tar.gz` artifacts without the unstable Linux-hosted QEMU boot path. The cross path uses the FreeBSD `aarch64` sysroot plus `cargo +nightly -Z build-std`.
 
 The workflow intentionally avoids third-party `uses:` steps. Checkout, Rust toolchain setup, packaging, validation, artifact staging, and release publication are all done with repository-local shell logic so Forgejo mirror assumptions do not become hidden dependencies.
-Tagged package jobs stage their validated build outputs on a draft Forgejo release. The final `release-publish` job waits for every required Linux and FreeBSD package job, downloads the expected staged release attachments into one fresh release workspace, writes a single `sha256sums` file, uploads it beside the artifacts, and then publishes one Forgejo release.
+Tagged package jobs stage their validated build outputs on a draft Forgejo release. The final `release-publish` job waits for every required Linux and FreeBSD package job, downloads the expected staged release attachments into one fresh release workspace, writes `SHA256SUMS` and `SHA512SUMS`, uploads them beside the artifacts, and then publishes one Forgejo release.
 The release pipeline treats the git tag as canonical. CI rewrites `Cargo.toml` to the normalized tag version, refreshes `Cargo.lock`, and passes that version through the build and packaging steps. Runtime `centralssh --version` and `centralssh -v` report the normalized version, while CI/distribution builds append `-dist`.
 When a CI step fails, including release staging and release publication steps, the workflow now ships a filtered tail of the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87). The release publication path also includes the failing command and log file path so runner-local API or download failures are explicit instead of collapsing to a bare curl exit line.
 
