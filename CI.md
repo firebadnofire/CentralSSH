@@ -127,6 +127,35 @@ The logging system should prioritize simplicity, durability, and operational deb
 
 The logging system should also log real runs of the CI system, clearly marked in the logs.
 
+---
+
+# CentralSSH release contract
+
+For CentralSSH specifically, treat the current Forgejo pipeline as a frozen contract unless you are intentionally doing a coordinated release-topology change.
+
+Do not touch casually:
+
+- tag-derived versioning
+- `Cargo.toml` / `Cargo.lock` rewriting from tags
+- draft-release staging
+- attachment UUID-based release downloads
+- the single final `release-publish` job
+- the `-dist` suffix for CI distribution builds
+- the shell-only workflow structure that replaces external `uses:` actions
+
+If any of those change, update:
+
+- `.forgejo/workflows/build.yml`
+- `ci/release-version.sh`
+- `ci/rewrite-release-version.sh`
+- `ci/stage-release-artifacts.sh`
+- `ci/publish-release.sh`
+- `build.rs`
+- `src/version_support.rs`
+- `README.md`
+- `op-guide.md`
+- `disection.md`
+
 # Runner model
 
 The globally available runners are not all the same kind of environment.

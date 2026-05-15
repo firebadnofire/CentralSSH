@@ -169,6 +169,24 @@ Tagged package jobs stage their validated build outputs on a draft Forgejo relea
 The release pipeline treats the git tag as canonical. CI rewrites `Cargo.toml` to the normalized tag version, refreshes `Cargo.lock`, and passes that version through the build and packaging steps. Runtime `centralssh --version` and `centralssh -v` report the normalized version, while CI/distribution builds append `-dist`.
 When a CI step fails, including release staging and release publication steps, the workflow now ships a filtered tail of the captured error log to the internal ingestion endpoint defined in [CI.md](/Users/william/git/CentralSSH/CI.md:87). The release publication path also includes the failing command and log file path so runner-local API or download failures are explicit instead of collapsing to a bare curl exit line.
 
+### Frozen CI contract
+
+These pieces are now part of the release contract and should not be changed casually:
+
+- `ci/release-version.sh` is the only place that derives the canonical release version from a tag.
+- `ci/rewrite-release-version.sh` rewrites package metadata from that canonical version only.
+- `ci/stage-release-artifacts.sh` stages already-built artifacts on the draft release and should not reconstruct filenames.
+- `ci/publish-release.sh` downloads staged assets by their attachment UUIDs and publishes one final Forgejo release after validating the expected asset list.
+- `build.rs` and `src/version_support.rs` control the runtime `--version` / `-v` string. Local builds report `centralssh <version>`, CI distribution builds report `centralssh <version>-dist`.
+
+Do not reintroduce:
+
+- release version parsing from `Cargo.toml`
+- browser download URLs for staged release assets
+- ad hoc version string mutation like `0.43` vs `0.0.43`
+- extra JS release actions for the Forgejo pipeline
+- QEMU-based FreeBSD release staging
+
 ## Configuration
 
 CentralSSH reads config from TOML files.

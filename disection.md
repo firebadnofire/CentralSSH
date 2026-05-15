@@ -38,6 +38,24 @@ Support files:
 - `container.md`: container operations guide for Docker and Podman deployments.
 - `ACCESS.md`: intentionally redacted placeholder for external access notes; live inventory must stay outside source control.
 
+## 3. Pipeline invariants
+
+The current Forgejo pipeline is intentionally stable. Do not change these pieces without a matching update to the workflow, packaging scripts, validation scripts, and the operator-facing docs:
+
+- release version derivation comes only from the pushed git tag
+- `Cargo.toml` and `Cargo.lock` are rewritten from that canonical tag version
+- staged release assets are uploaded to a draft release first, then downloaded from that same release during final publication
+- final publication uses one `sha256sums` file and one Forgejo release
+- runtime `centralssh --version` / `-v` output is `centralssh <version>` for local builds and `centralssh <version>-dist` for CI distribution builds
+
+Do not touch these without a real topology change:
+
+- asset naming conventions
+- the draft-release staging model
+- the release-publish download path
+- shell-only workflow steps replacing JS `uses:` actions
+- the FreeBSD native runner split
+
 ## 2. Process startup flow
 
 Entry path in `src/main.rs`:

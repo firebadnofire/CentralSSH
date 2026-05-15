@@ -716,6 +716,20 @@ The Forgejo workflow at `.forgejo/workflows/build.yml` now follows the Linux plu
 - Runtime `centralssh --version` and `centralssh -v` report the normalized tag version. CI and distribution builds append `-dist` to that runtime version string, but package filenames stay on the plain semantic version.
 - Failing CI steps, including release staging and release publication stages, upload a filtered tail of their captured output to the internal HTTP ingestion endpoint from `CI.md`, which is the primary place to inspect ephemeral runner and VM-side error detail after the job exits. The release publication failure payload now also includes the exact failing command and captured log path.
 
+### Do not touch
+
+Treat these as pipeline invariants unless you are intentionally changing the release topology and updating all related scripts and docs together:
+
+- do not derive release versions from `Cargo.toml`
+- do not mutate canonical versions after `ci/release-version.sh` validates them
+- do not change release asset filenames without changing staging, publish, and validation together
+- do not reintroduce browser URL downloads for release assets
+- do not replace the shell-only workflow steps with third-party `uses:` actions
+- do not reintroduce QEMU-based FreeBSD packaging or staging
+- do not remove the `-dist` suffix from CI distribution builds
+
+If a release job fails, inspect the repo-local log capture first. The job log plus `jsonlogs --last` are the authoritative record of the failure path; the workflow is designed to make missing assets, bad versions, and API errors explicit there.
+
 ## 23. Recommended production setup
 
 1. Build and install CentralSSH.
