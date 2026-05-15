@@ -539,7 +539,7 @@ These denials are post-auth authorization events. They are audited as `denied_lo
 
 - `BackendSessionAction`
 
-Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Stock OpenSSH `sftp` and `scp` clients exit when their subsystem or exec channel closes, so those channels close normally instead of attempting an inline gateway menu. That inline menu now consumes cursor-control escape sequences instead of echoing them back into the selection prompt, so arrow keys do not visibly move the cursor across the line.
+Backend messages are still classified into `BackendSessionAction` values and applied to the frontend, preserving SSH request semantics instead of flattening everything into one shell byte stream. When `settings.drop_to_menu=true`, only a completed interactive shell suppresses the terminal close sequence and renders the server menu back onto that same frontend channel. Stock OpenSSH `sftp` and `scp` clients exit when their subsystem or exec channel closes, so those channels close normally instead of attempting an inline gateway menu. Interactive `sftp` filename completion stays intact because CentralSSH proxies the subsystem stream without replacing the client editor. That inline menu now consumes cursor-control escape sequences instead of echoing them back into the selection prompt, so arrow keys do not visibly move the cursor across the line.
 
 ### 11.4 Raw channel bridge structure
 

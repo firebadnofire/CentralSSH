@@ -255,6 +255,164 @@ file delete -force $batch_file
 puts "Upload complete"
 
 #
+# Verify that the stock interactive sftp client still performs local tab
+# completion when connected through CentralSSH.
+#
+
+puts "Checking interactive SFTP tab completion..."
+
+set completion_file [format "sftp-tab-completion-%d.txt" [pid]]
+set completion_fd [open $completion_file w]
+puts $completion_fd "tab completion smoke test"
+close $completion_fd
+set completion_prefix [string range $completion_file 0 [expr {[string length $completion_file] - 5}]]
+
+spawn sftp \
+    -o BatchMode=no \
+    -o PreferredAuthentications=password,keyboard-interactive \
+    -o PubkeyAuthentication=no \
+    -P $config(port) \
+    $config(user)@$config(host)
+
+expect {
+    "*Password:*" {
+        send "$password\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for SSH password prompt during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before SSH password prompt during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+}
+
+expect {
+    "*TOTP Code:*" {
+        send "$totp\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for TOTP prompt during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before TOTP prompt during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+}
+
+expect {
+    "*Enter selection*" {
+        send "$config(proxy_number)\r"
+    }
+
+    timeout {
+        send_user "Timed out waiting for proxy selection during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before proxy selection during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+}
+
+expect {
+    -re {sftp>} {
+        # Ready for interactive commands.
+    }
+
+    timeout {
+        send_user "Timed out waiting for SFTP prompt during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before SFTP prompt during tab-completion check\n"
+        file delete -force $completion_file
+        exit 1
+    }
+}
+
+send "put $completion_prefix"
+send "\t"
+send "\r"
+
+expect {
+    "Uploading $completion_file" {
+        puts "Interactive SFTP tab completion succeeded"
+    }
+
+    timeout {
+        send_user "Timed out waiting for tab-completed SFTP upload\n"
+        file delete -force $completion_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed during tab-completed SFTP upload\n"
+        file delete -force $completion_file
+        exit 1
+    }
+}
+
+expect {
+    -re {sftp>} {
+        # Upload completed.
+    }
+
+    timeout {
+        send_user "Timed out waiting for SFTP prompt after tab-completed upload\n"
+        file delete -force $completion_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed after tab-completed upload\n"
+        file delete -force $completion_file
+        exit 1
+    }
+}
+
+send "rm $completion_file\r"
+
+expect {
+    -re {sftp>} {
+        # Remote cleanup completed.
+    }
+
+    timeout {
+        send_user "Timed out waiting for SFTP prompt after remote cleanup\n"
+        file delete -force $completion_file
+        exit 1
+    }
+
+    eof {
+        send_user "Connection closed before remote cleanup completed\n"
+        file delete -force $completion_file
+        exit 1
+    }
+}
+
+send "bye\r"
+
+expect eof
+
+file delete -force $completion_file
+
+#
 # Remote verification over SSH
 #
 

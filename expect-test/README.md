@@ -6,6 +6,8 @@ All of these scripts assume the program [totp-cli](https://github.com/yitsushi/t
 
 They also assume you use the same password between the `totp-cli` program and the login of your user, so keep that in mind.
 
+The SFTP script now also includes an interactive tab-completion smoke test, so use a normal OpenSSH `sftp` build with line-editing support if you want that check to pass.
+
 Don't have Go on Linux yet? Use this script: [golang.sh](https://raw.githubusercontent.com/firebadnofire/zshrc-modern/refs/heads/main/golang.sh)
 
 Get started by copying the config:
