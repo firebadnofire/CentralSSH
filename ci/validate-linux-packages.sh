@@ -115,7 +115,7 @@ if [ "$run_runtime_validation" -eq 1 ]; then
 
   expected_version="$version"
   if [ -n "${CENTRALSSH_DIST_BUILD:-}" ] || [ -n "${CI:-}" ]; then
-    expected_version="${version}-distrb"
+    expected_version="${version}-dist"
   fi
   for flag in --version -v; do
     version_output=$("$install_root/usr/local/sbin/centralssh" "$flag")

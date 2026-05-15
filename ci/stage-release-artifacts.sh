@@ -107,7 +107,8 @@ upload_asset() {
   asset_path=$1
   asset_name=$(basename "$asset_path")
   asset_name_encoded=$(jq -nr --arg v "$asset_name" '$v|@uri')
-  existing_asset_id=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" \
+  existing_assets=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets")
+  existing_asset_id=$(printf '%s' "$existing_assets" \
     | jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' \
     | sed -n '1p')
   if [ -n "$existing_asset_id" ]; then
@@ -132,6 +133,7 @@ for artifact_path in "$@"; do
       exit 1
       ;;
   esac
+  printf 'staging release asset: %s\n' "$asset_name"
   upload_asset "$artifact_path"
 done
 

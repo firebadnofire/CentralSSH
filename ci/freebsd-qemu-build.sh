@@ -496,7 +496,7 @@ cargo build --locked --release
 sccache --show-stats || true
 
 CI_PACKAGE_NAME="\$(sed -n 's/^name = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
-CI_PACKAGE_VERSION="\${CI_RELEASE_VERSION:-\$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)}"
+CI_PACKAGE_VERSION="\${CI_RELEASE_VERSION:?Missing CI_RELEASE_VERSION for package version}"
 CI_PACKAGE_COMMENT="\$(sed -n 's/^description = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
 CI_PACKAGE_DESC="\${CI_PACKAGE_COMMENT}"
 CI_PACKAGE_ORIGIN="security/\${CI_PACKAGE_NAME}"

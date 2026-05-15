@@ -31,7 +31,7 @@ pub fn normalize_release_tag(tag: &str) -> Result<String, VersionError> {
 #[allow(dead_code)]
 pub fn runtime_version(version: &str, dist_build: bool) -> String {
     if dist_build {
-        format!("{version}-distrb")
+        format!("{version}-dist")
     } else {
         version.to_string()
     }
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn formats_distribution_version() {
         assert_eq!(runtime_version("0.0.36", false), "0.0.36");
-        assert_eq!(runtime_version("0.0.36", true), "0.0.36-distrb");
+        assert_eq!(runtime_version("0.0.36", true), "0.0.36-dist");
     }
 
     #[test]

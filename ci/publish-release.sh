@@ -113,7 +113,8 @@ public_payload=$(jq -n \
   --arg body "$release_body" \
   '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, hide_archive_links: false}')
 
-release_json=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases" \
+release_list=$(api_request GET "${api_url}/repos/${owner}/${repo}/releases")
+release_json=$(printf '%s' "$release_list" \
   | jq -c --arg tag "$tag" 'map(select(.tag_name == $tag)) | first // empty')
 
 if [ -z "$release_json" ]; then
@@ -134,33 +135,71 @@ refresh_release_assets() {
   api_request GET "${api_url}/repos/${owner}/${repo}/releases/${release_id}/assets" > "$release_assets"
 }
 
-download_asset_via_browser() {
-  browser_url=$1
-  output_path=$2
+log_release_assets() {
+  printf 'release asset inventory for %s (release_id=%s):\n' "$tag" "$release_id" >&2
+  jq -r '.[] | "  - \(.name) id=\(.id) size=\(.size)"' "$release_assets" >&2
+}
 
-  log_cmd "curl --fail --silent --show-error --location ${browser_url} (basic auth x-access-token)"
+preflight_expected_assets() {
+  missing_count=0
+  while IFS= read -r asset_name; do
+    asset_json=$(require_release_asset "$asset_name")
+    if [ -z "$asset_json" ]; then
+      printf 'missing expected release asset: %s\n' "$asset_name" >&2
+      missing_count=$((missing_count + 1))
+    fi
+  done < "$expected_file"
+
+  if [ "$missing_count" -ne 0 ]; then
+    printf 'expected release asset list:\n' >&2
+    sed 's/^/  - /' "$expected_file" >&2
+    log_release_assets
+    exit 1
+  fi
+}
+
+download_asset_via_api() {
+  asset_id=$1
+  asset_name=$2
+  output_path=$3
+
+  log_cmd "curl --fail --silent --show-error --location ${api_url}/repos/${owner}/${repo}/releases/assets/${asset_id} (api download)"
   curl --fail --silent --show-error --location \
-    --user "x-access-token:${token}" \
+    --header "Authorization: token ${token}" \
+    --header "Accept: application/octet-stream" \
     --output "$output_path" \
-    "$browser_url"
+    "${api_url}/repos/${owner}/${repo}/releases/assets/${asset_id}"
+}
+
+require_release_asset() {
+  asset_name=$1
+  jq -c --arg name "$asset_name" '.[] | select(.name == $name) | {id, name, size}' "$release_assets" | sed -n '1p'
 }
 
 download_asset() {
   asset_name=$1
-  browser_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
-  expected_size=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .size' "$release_assets" | sed -n '1p')
-
-  [ -n "$browser_url" ] && [ "$browser_url" != "null" ] || {
+  asset_json=$(require_release_asset "$asset_name")
+  [ -n "$asset_json" ] || {
     echo "missing staged release asset: $asset_name" >&2
+    log_release_assets
+    exit 1
+  }
+
+  asset_id=$(printf '%s' "$asset_json" | jq -r '.id')
+  expected_size=$(printf '%s' "$asset_json" | jq -r '.size')
+  output_path="$dist_dir/$asset_name"
+  [ -n "$asset_id" ] && [ "$asset_id" != "null" ] || {
+    echo "missing staged release asset id: $asset_name" >&2
+    log_release_assets
     exit 1
   }
   [ -n "$expected_size" ] && [ "$expected_size" != "null" ] || {
     echo "missing staged release size metadata: $asset_name" >&2
+    log_release_assets
     exit 1
   }
 
-  output_path="$dist_dir/$asset_name"
-  download_asset_via_browser "$browser_url" "$output_path"
+  download_asset_via_api "$asset_id" "$asset_name" "$output_path"
 
   actual_size=$(wc -c < "$output_path" | tr -d ' ')
   if [ "$actual_size" != "$expected_size" ]; then
@@ -168,21 +207,29 @@ download_asset() {
       "$asset_name" "$expected_size" "$actual_size" >&2
     rm -f "$output_path"
     refresh_release_assets
-    browser_url=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .browser_download_url' "$release_assets" | sed -n '1p')
-    expected_size=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .size' "$release_assets" | sed -n '1p')
-    [ -n "$browser_url" ] && [ "$browser_url" != "null" ] || {
-      echo "missing staged release browser URL after refresh: $asset_name" >&2
+    asset_json=$(require_release_asset "$asset_name")
+    [ -n "$asset_json" ] || {
+      echo "missing staged release asset after refresh: $asset_name" >&2
+      log_release_assets
+      exit 1
+    }
+    asset_id=$(printf '%s' "$asset_json" | jq -r '.id')
+    expected_size=$(printf '%s' "$asset_json" | jq -r '.size')
+    [ -n "$asset_id" ] && [ "$asset_id" != "null" ] || {
+      echo "missing staged release asset id after refresh: $asset_name" >&2
+      log_release_assets
       exit 1
     }
     [ -n "$expected_size" ] && [ "$expected_size" != "null" ] || {
       echo "missing staged release size metadata after refresh: $asset_name" >&2
+      log_release_assets
       exit 1
     }
-    download_asset_via_browser "$browser_url" "$output_path"
+    download_asset_via_api "$asset_id" "$asset_name" "$output_path"
     actual_size=$(wc -c < "$output_path" | tr -d ' ')
     [ "$actual_size" = "$expected_size" ] || {
-      printf 'downloaded asset size mismatch for %s after retry: expected=%s actual=%s url=%s\n' \
-        "$asset_name" "$expected_size" "$actual_size" "$browser_url" >&2
+      printf 'downloaded asset size mismatch for %s after retry: expected=%s actual=%s asset_id=%s\n' \
+        "$asset_name" "$expected_size" "$actual_size" "$asset_id" >&2
       exit 1
     }
   fi
@@ -191,6 +238,10 @@ download_asset() {
 }
 
 : > "$assets_file"
+log_release_assets
+printf 'expected release assets for %s:\n' "$tag" >&2
+sed 's/^/  - /' "$expected_file" >&2
+preflight_expected_assets
 while IFS= read -r asset_name; do
   download_asset "$asset_name"
 done < "$expected_file"

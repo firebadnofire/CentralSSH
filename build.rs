@@ -19,7 +19,7 @@ fn main() {
         .or_else(detect_git_tag_version)
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
-    let suffix = if dist_build_enabled() { "-distrb" } else { "" };
+    let suffix = if dist_build_enabled() { "-dist" } else { "" };
 
     println!("cargo:rustc-env=CENTRALSSH_VERSION={release_version}");
     println!("cargo:rustc-env=CENTRALSSH_VERSION_SUFFIX={suffix}");

@@ -397,7 +397,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git jq sudo nc; do
+          for cmd in sh pkg curl fetch git gmake jq node npm sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -414,11 +414,24 @@ jobs:
             echo "starting pkg update"
             $sudo_cmd pkg update -f
             echo "starting pkg install"
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git gmake jq || {
+              echo "failed to install required FreeBSD build packages" >&2
+              exit 1
+            }
+            $sudo_cmd pkg install -y node npm || \
+              $sudo_cmd pkg install -y node24 npm-node24 || \
+              $sudo_cmd pkg install -y node22 npm-node22 || \
+              $sudo_cmd pkg install -y node20 npm-node20 || {
+                echo "failed to install node/npm tooling on FreeBSD" >&2
+                exit 1
+              }
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
+          command -v gmake >/dev/null 2>&1
           command -v jq >/dev/null 2>&1
+          command -v node >/dev/null 2>&1
+          command -v npm >/dev/null 2>&1
 
       - name: Check out repository
         shell: sh
@@ -564,7 +577,7 @@ jobs:
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/install-deps"; fi' EXIT
           echo "PATH=$PATH"
           uname -a || true
-          for cmd in sh pkg curl fetch git jq sudo nc; do
+          for cmd in sh pkg curl fetch git gmake jq node npm sudo nc; do
             if command -v "$cmd" >/dev/null 2>&1; then
               echo "$cmd=$(command -v "$cmd")"
             else
@@ -581,11 +594,24 @@ jobs:
             echo "starting pkg update"
             $sudo_cmd pkg update -f
             echo "starting pkg install"
-            $sudo_cmd pkg install -y ca_root_nss curl git jq
+            $sudo_cmd pkg install -y ca_root_nss curl git gmake jq || {
+              echo "failed to install required FreeBSD build packages" >&2
+              exit 1
+            }
+            $sudo_cmd pkg install -y node npm || \
+              $sudo_cmd pkg install -y node24 npm-node24 || \
+              $sudo_cmd pkg install -y node22 npm-node22 || \
+              $sudo_cmd pkg install -y node20 npm-node20 || {
+                echo "failed to install node/npm tooling on FreeBSD" >&2
+                exit 1
+              }
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
+          command -v gmake >/dev/null 2>&1
           command -v jq >/dev/null 2>&1
+          command -v node >/dev/null 2>&1
+          command -v npm >/dev/null 2>&1
 
       - name: Check out repository
         shell: sh

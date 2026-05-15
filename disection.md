@@ -32,7 +32,7 @@ Support files:
 - `examples/*.toml`: sample runtime configuration.
 - `tools/cssh-keyscan`: helper for building target host trust entries.
 - `.forgejo/workflows/build.yml` and `ci/`: Forgejo CI for Linux amd64 or arm64 packaging plus native FreeBSD amd64 packaging and native FreeBSD aarch64 cross-packaging helpers. The aarch64 FreeBSD path uses the packaged `aarch64` sysroot and a nightly `build-std` cross-build. `ci/release-version.sh` derives the normalized version from the pushed tag, `ci/rewrite-release-version.sh` rewrites `Cargo.toml` and refreshes `Cargo.lock`, the package jobs stage validated build outputs on a draft Forgejo release, and the final publish helper downloads those staged release attachments into a fresh workspace before publishing one Forgejo release. Failures ship filtered logs to the `CI.md` ingestion endpoint, and the release publication path records the exact failing command.
-- `build.rs` and `src/version_support.rs`: compile-time version metadata for the binary. Build-time env or an exact git tag select the base version, and CI/distribution builds append `-distrb` without needing `.git` at runtime.
+- `build.rs` and `src/version_support.rs`: compile-time version metadata for the binary. Build-time env or an exact git tag select the base version, and CI/distribution builds append `-dist` without needing `.git` at runtime.
 - `packaging/`: FreeBSD rc and systemd service packaging.
 - `Dockerfile`, `compose.yaml`, `.dockerignore`, and `container/`: container build, runtime, and example deployment artifacts.
 - `container.md`: container operations guide for Docker and Podman deployments.
