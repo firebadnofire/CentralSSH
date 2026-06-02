@@ -59,6 +59,7 @@ jobs:
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
           commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
           repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
           remote_url="${server_url%/}/${repository}.git"
@@ -67,7 +68,11 @@ jobs:
           rm -rf "$repo_dir"
           git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" checkout --detach "$commit_sha"
+          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+            [ -n "$ref_name" ] || exit 1
+            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
+          fi
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
@@ -189,6 +194,7 @@ jobs:
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
           commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
           repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
           remote_url="${server_url%/}/${repository}.git"
@@ -197,7 +203,11 @@ jobs:
           rm -rf "$repo_dir"
           git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" checkout --detach "$commit_sha"
+          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+            [ -n "$ref_name" ] || exit 1
+            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
+          fi
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
@@ -294,6 +304,7 @@ jobs:
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
           commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
           repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
           remote_url="${server_url%/}/${repository}.git"
@@ -302,7 +313,11 @@ jobs:
           rm -rf "$repo_dir"
           git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" checkout --detach "$commit_sha"
+          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+            [ -n "$ref_name" ] || exit 1
+            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
+          fi
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
@@ -444,6 +459,7 @@ jobs:
               printf 'status=error\n\n'
               tail -n 250 "$log_file"
             } > "$payload_file"
+            tail -n 250 "$log_file" >&2 || true
             if command -v curl >/dev/null 2>&1; then
               curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
             fi
@@ -454,6 +470,7 @@ jobs:
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
           commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
           repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
           remote_url="${server_url%/}/${repository}.git"
@@ -462,7 +479,11 @@ jobs:
           rm -rf "$repo_dir"
           git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" checkout --detach "$commit_sha"
+          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+            [ -n "$ref_name" ] || exit 1
+            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
+          fi
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
@@ -612,6 +633,7 @@ jobs:
               printf 'status=error\n\n'
               tail -n 250 "$log_file"
             } > "$payload_file"
+            tail -n 250 "$log_file" >&2 || true
             if command -v curl >/dev/null 2>&1; then
               curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
             fi
@@ -622,6 +644,7 @@ jobs:
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
           commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
           repo_dir="${RUNNER_TEMP:-/tmp}/centralssh"
           remote_url="${server_url%/}/${repository}.git"
@@ -630,7 +653,11 @@ jobs:
           rm -rf "$repo_dir"
           git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" checkout --detach "$commit_sha"
+          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+            [ -n "$ref_name" ] || exit 1
+            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
+          fi
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
@@ -731,6 +758,7 @@ jobs:
           server_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?Missing server URL}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?Missing repository name}}"
           commit_sha="${FORGEJO_SHA:-${GITHUB_SHA:?Missing commit SHA}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:?Missing Forgejo token}}"
           repo_dir="${RUNNER_TEMP:-/tmp}/centralssh-release"
           remote_url="${server_url%/}/${repository}.git"
@@ -739,7 +767,11 @@ jobs:
           rm -rf "$repo_dir"
           git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
-          git -C "$repo_dir" checkout --detach "$commit_sha"
+          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+            [ -n "$ref_name" ] || exit 1
+            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
+          fi
 
           printf 'REPO_DIR=%s\n' "$repo_dir" >> "$GITHUB_ENV"
 
