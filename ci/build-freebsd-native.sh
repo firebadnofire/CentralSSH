@@ -203,8 +203,20 @@ fi
 
 if [ "$runtime_validation" -eq 1 ]; then
   if [ "$privileged_runtime" -eq 1 ]; then
+    printf 'runtime validation: pkg_file=%s rc_script=%s runtime_root=%s\n' \
+      "$pkg_file" "$rc_script" "$runtime_root" >&2
+    $sudo_cmd pkg info -F "$pkg_file" >&2
+    $sudo_cmd pkg contents -F "$pkg_file" | grep '/usr/local/etc/rc.d/centralssh$' >&2 || true
     $sudo_cmd pkg add -f "$pkg_file"
+    if [ ! -x "$rc_script" ]; then
+      printf 'installed rc script missing or not executable: %s\n' "$rc_script" >&2
+      $sudo_cmd pkg info centralssh >&2 || true
+      $sudo_cmd find /usr/local/etc /usr/local/sbin -maxdepth 3 \( -name centralssh -o -name 'centralssh*' \) -print >&2 || true
+      exit 1
+    fi
+    $sudo_cmd ls -l "$rc_script" >&2
     trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 "$rc_script" onestop >/dev/null 2>&1 || true; cleanup_runtime_root' EXIT INT TERM
+    printf 'runtime validation: starting rc service\n' >&2
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -214,6 +226,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
       "$rc_script" onestart
+    printf 'runtime validation: checking rc status\n' >&2
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -223,6 +236,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
       "$rc_script" onestatus
+    printf 'runtime validation: stopping rc service\n' >&2
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
