@@ -356,7 +356,7 @@ jobs:
             "dist/centralssh-${version}-fedora-aarch64.rpm"
 
   freebsd-amd64:
-    runs-on: freebsd
+    runs-on: freebsd-15
     steps:
       - name: Install FreeBSD build dependencies
         shell: sh
@@ -529,7 +529,7 @@ jobs:
             "$tarball"
 
   freebsd-aarch64:
-    runs-on: freebsd
+    runs-on: freebsd-15
     steps:
       - name: Install FreeBSD build dependencies
         shell: bash

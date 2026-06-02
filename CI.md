@@ -232,6 +232,8 @@ Prefer:
 
 Do not prefer `freebsd-15` in general documentation merely because it exists. The runner is intended to represent a native FreeBSD host environment, not a permanently frozen software image.
 
+CentralSSH is an explicit exception in its release workflow: the release-packaging jobs pin `runs-on: freebsd-15` and name the FreeBSD artifacts with the matching release slug so the produced binaries are unambiguous.
+
 Use the FreeBSD runner for:
 
 - native FreeBSD builds
