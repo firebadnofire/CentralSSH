@@ -217,6 +217,7 @@ if [ "$runtime_validation" -eq 1 ]; then
     $sudo_cmd ls -l "$rc_script" >&2
     trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 "$rc_script" onestop >/dev/null 2>&1 || true; cleanup_runtime_root' EXIT INT TERM
     printf 'runtime validation: starting rc service\n' >&2
+    start_rc=0
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -225,8 +226,21 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
-      "$rc_script" onestart
+      "$rc_script" onestart || start_rc=$?
+    if [ "$start_rc" -ne 0 ]; then
+      printf 'runtime validation failure: rc start returned %s\n' "$start_rc" >&2
+      $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
+      $sudo_cmd sockstat -4 -l >&2 || true
+      exit 1
+    fi
+    if ! $sudo_cmd sockstat -4 -l | grep '[.]47789' >&2; then
+      echo 'runtime validation failure: centralssh is not listening on 127.0.0.1:47789 after start' >&2
+      $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
+      $sudo_cmd cat /var/run/centralssh.pid >&2 || true
+      exit 1
+    fi
     printf 'runtime validation: checking rc status\n' >&2
+    status_rc=0
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -235,8 +249,15 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
-      "$rc_script" onestatus
+      "$rc_script" onestatus || status_rc=$?
+    if [ "$status_rc" -ne 0 ]; then
+      printf 'runtime validation warning: rc status returned %s\n' "$status_rc" >&2
+      $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
+      $sudo_cmd cat /var/run/centralssh.pid >&2 || true
+      $sudo_cmd sockstat -4 -l >&2 || true
+    fi
     printf 'runtime validation: stopping rc service\n' >&2
+    stop_rc=0
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -245,12 +266,13 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
-      "$rc_script" onestop || {
-        stop_rc=$?
-        printf 'runtime validation warning: rc stop returned %s\n' "$stop_rc" >&2
-        $sudo_cmd cat /var/run/centralssh.pid >&2 || true
-        $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
-      }
+      "$rc_script" onestop || stop_rc=$?
+    if [ "$stop_rc" -ne 0 ]; then
+      printf 'runtime validation warning: rc stop returned %s\n' "$stop_rc" >&2
+      $sudo_cmd cat /var/run/centralssh.pid >&2 || true
+      $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
+    fi
+    echo 'runtime validation: complete' >&2
     trap cleanup_runtime_root EXIT INT TERM
   else
     echo "Skipping privileged FreeBSD amd64 runtime validation because non-interactive root access is unavailable" >&2
