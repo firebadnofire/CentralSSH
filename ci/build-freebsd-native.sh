@@ -206,7 +206,7 @@ if [ "$runtime_validation" -eq 1 ]; then
     printf 'runtime validation: pkg_file=%s rc_script=%s runtime_root=%s\n' \
       "$pkg_file" "$rc_script" "$runtime_root" >&2
     $sudo_cmd pkg info -F "$pkg_file" >&2
-    $sudo_cmd pkg contents -F "$pkg_file" | grep '/usr/local/etc/rc.d/centralssh$' >&2 || true
+    $sudo_cmd pkg info -l -F "$pkg_file" | grep '/usr/local/etc/rc.d/centralssh$' >&2 || true
     $sudo_cmd pkg add -f "$pkg_file"
     if [ ! -x "$rc_script" ]; then
       printf 'installed rc script missing or not executable: %s\n' "$rc_script" >&2
@@ -245,7 +245,12 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
-      "$rc_script" onestop
+      "$rc_script" onestop || {
+        stop_rc=$?
+        printf 'runtime validation warning: rc stop returned %s\n' "$stop_rc" >&2
+        $sudo_cmd cat /var/run/centralssh.pid >&2 || true
+        $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
+      }
     trap cleanup_runtime_root EXIT INT TERM
   else
     echo "Skipping privileged FreeBSD amd64 runtime validation because non-interactive root access is unavailable" >&2
