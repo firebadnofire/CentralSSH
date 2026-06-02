@@ -15,6 +15,9 @@ if [ -n "${RELEASE_VERSION:-}" ] && [ "$version" != "$RELEASE_VERSION" ]; then
   exit 1
 fi
 version=${RELEASE_VERSION:-$version}
+artifact_stdout_fd=3
+exec 3>&1
+exec 1>&2
 
 repo_root=${REPO_ROOT:-$PWD}
 tmp_root=${TMPDIR:-/tmp}
@@ -304,4 +307,5 @@ else
   echo "Skipping runtime validation for cross-compiled FreeBSD ${arch} artifact" >&2
 fi
 
-printf '%s\n%s\n' "$pkg_file" "$tarball"
+printf '%s\n%s\n' "$pkg_file" "$tarball" >&3
+exec 3>&-
