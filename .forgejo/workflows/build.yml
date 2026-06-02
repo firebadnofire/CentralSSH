@@ -432,7 +432,7 @@ jobs:
             echo "starting pkg update"
             $sudo_cmd pkg update -f
             echo "starting pkg install"
-            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git || {
+            $sudo_cmd pkg install -y aarch64-freebsd-sysroot ca_root_nss curl git jq || {
               echo "failed to install required FreeBSD build packages" >&2
               exit 1
             }
@@ -617,7 +617,7 @@ jobs:
           echo "sudo_cmd=${sudo_cmd:-none}"
           if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
             $sudo_cmd pkg update -f
-            $sudo_cmd pkg install -y ca_root_nss curl git
+            $sudo_cmd pkg install -y ca_root_nss curl git jq
           fi
           command -v curl >/dev/null 2>&1
           command -v git >/dev/null 2>&1
