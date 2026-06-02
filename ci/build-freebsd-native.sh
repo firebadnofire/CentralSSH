@@ -175,6 +175,7 @@ runtime_etc="$runtime_root/etc-centralssh"
 runtime_log="$runtime_root/var-log-centralssh"
 runtime_keys="$runtime_root/var-lib-centralssh-keys"
 rc_script="/usr/local/etc/rc.d/centralssh"
+runtime_port=47789
 mkdir -p "$runtime_etc" "$runtime_log" "$runtime_keys"
 cat > "$runtime_etc/config.toml" <<EOF
 [[users]]
@@ -215,7 +216,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       exit 1
     fi
     $sudo_cmd ls -l "$rc_script" >&2
-    trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 "$rc_script" onestop >/dev/null 2>&1 || true; cleanup_runtime_root' EXIT INT TERM
+    trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:'"$runtime_port"' "$rc_script" onestop >/dev/null 2>&1 || true; cleanup_runtime_root' EXIT INT TERM
     printf 'runtime validation: starting rc service\n' >&2
     start_rc=0
     $sudo_cmd env \
@@ -225,18 +226,39 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_known_hosts="$runtime_etc/known_hosts" \
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
-      centralssh_listen=127.0.0.1:47789 \
+      centralssh_listen=127.0.0.1:${runtime_port} \
       "$rc_script" onestart || start_rc=$?
     if [ "$start_rc" -ne 0 ]; then
       printf 'runtime validation failure: rc start returned %s\n' "$start_rc" >&2
       $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
       $sudo_cmd sockstat -4 -l >&2 || true
+      $sudo_cmd sockstat -6 -l >&2 || true
+      cat "$runtime_log/audit.jsonl" >&2 || true
       exit 1
     fi
-    if ! $sudo_cmd sockstat -4 -l | grep '[.]47789' >&2; then
-      echo 'runtime validation failure: centralssh is not listening on 127.0.0.1:47789 after start' >&2
+    listen_ready=0
+    listen_probe=0
+    while [ "$listen_probe" -lt 10 ]; do
+      listen_probe=$((listen_probe + 1))
+      printf 'runtime validation: listener probe %s/10\n' "$listen_probe" >&2
+      echo '--- IPv4 listeners ---' >&2
+      $sudo_cmd sockstat -4 -l >&2 || true
+      echo '--- IPv6 listeners ---' >&2
+      $sudo_cmd sockstat -6 -l >&2 || true
+      if $sudo_cmd sh -c "sockstat -4 -l; sockstat -6 -l" | grep "[.:]${runtime_port}[[:space:]]" >/dev/null 2>&1; then
+        listen_ready=1
+        break
+      fi
+      sleep 1
+    done
+    if [ "$listen_ready" -ne 1 ]; then
+      printf 'runtime validation failure: centralssh is not listening on port %s after startup delay\n' "$runtime_port" >&2
+      echo '--- process list ---' >&2
       $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
+      echo '--- pidfile ---' >&2
       $sudo_cmd cat /var/run/centralssh.pid >&2 || true
+      echo '--- audit log ---' >&2
+      cat "$runtime_log/audit.jsonl" >&2 || true
       exit 1
     fi
     printf 'runtime validation: checking rc status\n' >&2
@@ -248,13 +270,14 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_known_hosts="$runtime_etc/known_hosts" \
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
-      centralssh_listen=127.0.0.1:47789 \
+      centralssh_listen=127.0.0.1:${runtime_port} \
       "$rc_script" onestatus || status_rc=$?
     if [ "$status_rc" -ne 0 ]; then
       printf 'runtime validation warning: rc status returned %s\n' "$status_rc" >&2
       $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
       $sudo_cmd cat /var/run/centralssh.pid >&2 || true
       $sudo_cmd sockstat -4 -l >&2 || true
+      $sudo_cmd sockstat -6 -l >&2 || true
     fi
     printf 'runtime validation: stopping rc service\n' >&2
     stop_rc=0
@@ -265,7 +288,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_known_hosts="$runtime_etc/known_hosts" \
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
-      centralssh_listen=127.0.0.1:47789 \
+      centralssh_listen=127.0.0.1:${runtime_port} \
       "$rc_script" onestop || stop_rc=$?
     if [ "$stop_rc" -ne 0 ]; then
       printf 'runtime validation warning: rc stop returned %s\n' "$stop_rc" >&2
