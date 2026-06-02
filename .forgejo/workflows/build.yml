@@ -450,6 +450,7 @@ jobs:
           export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64-checkout.log"
           : > "$log_file"
+          exec 3>&1 4>&2
           exec >>"$log_file" 2>&1
           post_log() {
             context=$1
@@ -459,7 +460,7 @@ jobs:
               printf 'status=error\n\n'
               tail -n 250 "$log_file"
             } > "$payload_file"
-            tail -n 250 "$log_file" >&2 || true
+            tail -n 250 "$log_file" >&4 || true
             if command -v curl >/dev/null 2>&1; then
               curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
             fi
@@ -477,11 +478,16 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
-            clone "$remote_url" "$repo_dir"
-          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+          printf 'checkout remote=%s ref=%s sha=%s\n' "$remote_url" "${ref_name:-<none>}" "$commit_sha"
+          git init "$repo_dir"
+          git -C "$repo_dir" remote add origin "$remote_url"
+          if git -C "$repo_dir" -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
+            fetch --depth=1 origin "${commit_sha}^{commit}"; then
+            git -C "$repo_dir" checkout --detach FETCH_HEAD
+          else
             [ -n "$ref_name" ] || exit 1
-            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
+              fetch --depth=1 origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
             git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
           fi
 
@@ -624,6 +630,7 @@ jobs:
           export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64-checkout.log"
           : > "$log_file"
+          exec 3>&1 4>&2
           exec >>"$log_file" 2>&1
           post_log() {
             context=$1
@@ -633,7 +640,7 @@ jobs:
               printf 'status=error\n\n'
               tail -n 250 "$log_file"
             } > "$payload_file"
-            tail -n 250 "$log_file" >&2 || true
+            tail -n 250 "$log_file" >&4 || true
             if command -v curl >/dev/null 2>&1; then
               curl --fail --silent --show-error --header "Content-Type: text/plain; charset=utf-8" --data-binary @"$payload_file" "$CI_LOG_ENDPOINT" >/dev/null 2>&1 || true
             fi
@@ -651,11 +658,16 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
-            clone "$remote_url" "$repo_dir"
-          if ! git -C "$repo_dir" checkout --detach "${commit_sha}^{commit}"; then
+          printf 'checkout remote=%s ref=%s sha=%s\n' "$remote_url" "${ref_name:-<none>}" "$commit_sha"
+          git init "$repo_dir"
+          git -C "$repo_dir" remote add origin "$remote_url"
+          if git -C "$repo_dir" -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
+            fetch --depth=1 origin "${commit_sha}^{commit}"; then
+            git -C "$repo_dir" checkout --detach FETCH_HEAD
+          else
             [ -n "$ref_name" ] || exit 1
-            git -C "$repo_dir" fetch origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
+            git -C "$repo_dir" -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
+              fetch --depth=1 origin "refs/tags/${ref_name}:refs/tags/${ref_name}"
             git -C "$repo_dir" checkout --detach "${ref_name}^{commit}"
           fi
 
