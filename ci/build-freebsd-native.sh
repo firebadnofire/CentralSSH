@@ -17,6 +17,7 @@ fi
 version=${RELEASE_VERSION:-$version}
 
 repo_root=${REPO_ROOT:-$PWD}
+tmp_root=${TMPDIR:-/tmp}
 dist_dir=${DIST_DIR:-"$repo_root/dist"}
 work_root=${WORK_ROOT:-"$repo_root/.ci-packaging/freebsd-$arch"}
 cache_root=$(./ci/select-cache-root.sh /build-cache "$repo_root/.ci-host-cache")
@@ -83,7 +84,7 @@ pkg_file="$dist_dir/${app_name}-${version}-${pkg_suffix}.pkg"
 tarball="$dist_dir/${app_name}-${version}-${pkg_suffix}.tar.gz"
 stage_root="$work_root/stage"
 archive_root="$work_root/archive/$app_name"
-runtime_root="$work_root/runtime"
+runtime_root=${RUNTIME_ROOT:-"$tmp_root/centralssh-runtime-$arch"}
 manifest_path="$work_root/+MANIFEST"
 plist_path="$work_root/pkg-plist"
 
@@ -92,6 +93,19 @@ if [ -e "$work_root" ]; then
     $sudo_cmd rm -rf "$work_root"
   fi
 fi
+if [ -e "$runtime_root" ]; then
+  if ! rm -rf "$runtime_root" 2>/dev/null; then
+    $sudo_cmd rm -rf "$runtime_root"
+  fi
+fi
+cleanup_runtime_root() {
+  if [ -e "$runtime_root" ]; then
+    if ! rm -rf "$runtime_root" 2>/dev/null; then
+      $sudo_cmd rm -rf "$runtime_root" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+trap cleanup_runtime_root EXIT INT TERM
 mkdir -p "$dist_dir" "$stage_root" "$archive_root" "$runtime_root"
 
 if [ "$arch" = "aarch64" ]; then
@@ -183,14 +197,14 @@ touch "$runtime_etc/known_hosts" "$runtime_log/audit.jsonl"
 chmod 700 "$runtime_etc" "$runtime_log" "$runtime_keys"
 chmod 600 "$runtime_etc/config.toml" "$runtime_etc/servers.toml" "$runtime_etc/known_hosts" "$runtime_log/audit.jsonl"
 
-if [ "$privileged_runtime" -eq 1 ]; then
+if [ "$runtime_validation" -eq 1 ] && [ "$privileged_runtime" -eq 1 ]; then
   $sudo_cmd chown -R root:wheel "$runtime_root"
 fi
 
 if [ "$runtime_validation" -eq 1 ]; then
   if [ "$privileged_runtime" -eq 1 ]; then
     $sudo_cmd pkg add -f "$pkg_file"
-    trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 "$rc_script" onestop >/dev/null 2>&1 || true' EXIT INT TERM
+    trap '$sudo_cmd env centralssh_enable=YES centralssh_config="$runtime_etc/config.toml" centralssh_servers="$runtime_etc/servers.toml" centralssh_known_hosts="$runtime_etc/known_hosts" centralssh_user_key_root="$runtime_keys" centralssh_audit_log="$runtime_log/audit.jsonl" centralssh_listen=127.0.0.1:47789 "$rc_script" onestop >/dev/null 2>&1 || true; cleanup_runtime_root' EXIT INT TERM
     $sudo_cmd env \
       centralssh_enable=YES \
       centralssh_config="$runtime_etc/config.toml" \
@@ -218,7 +232,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:47789 \
       "$rc_script" onestop
-    trap - EXIT INT TERM
+    trap cleanup_runtime_root EXIT INT TERM
   else
     echo "Skipping privileged FreeBSD amd64 runtime validation because non-interactive root access is unavailable" >&2
   fi

@@ -2,5 +2,6 @@
 *.toml text eol=lf
 *.lock text eol=lf
 Makefile text eol=lf
+packaging/freebsd/* text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
