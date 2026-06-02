@@ -1,4 +1,6 @@
 *.sh text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
 Makefile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf

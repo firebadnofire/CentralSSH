@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "centralssh"
-version = "0.0.0-dev"
+version = "1.3.6"
 dependencies = [
  "argon2",
  "base32",

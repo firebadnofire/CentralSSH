@@ -503,6 +503,7 @@ jobs:
           export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-amd64.log"
           : > "$log_file"
+          exec 3>&1 4>&2
           exec >>"$log_file" 2>&1
           post_log() {
             context=$1
@@ -534,6 +535,7 @@ jobs:
                 cat "$payload_file"
               } | nc "$host" "$port" >/dev/null 2>&1 || true
             fi
+            tail -n 250 "$log_file" >&4 || true
             rm -f "$payload_file"
           }
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-amd64/build-and-validate"; fi' EXIT
@@ -683,6 +685,7 @@ jobs:
           export PATH
           log_file="${RUNNER_TEMP:-/tmp}/freebsd-aarch64.log"
           : > "$log_file"
+          exec 3>&1 4>&2
           exec >>"$log_file" 2>&1
           post_log() {
             context=$1
@@ -714,6 +717,7 @@ jobs:
                 cat "$payload_file"
               } | nc "$host" "$port" >/dev/null 2>&1 || true
             fi
+            tail -n 250 "$log_file" >&4 || true
             rm -f "$payload_file"
           }
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then post_log "freebsd-aarch64/build-and-validate"; fi' EXIT
