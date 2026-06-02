@@ -65,7 +65,7 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
           git -C "$repo_dir" checkout --detach "$commit_sha"
 
@@ -195,7 +195,7 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
           git -C "$repo_dir" checkout --detach "$commit_sha"
 
@@ -300,7 +300,7 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
           git -C "$repo_dir" checkout --detach "$commit_sha"
 
@@ -460,7 +460,7 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
           git -C "$repo_dir" checkout --detach "$commit_sha"
 
@@ -628,7 +628,7 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
           git -C "$repo_dir" checkout --detach "$commit_sha"
 
@@ -737,7 +737,7 @@ jobs:
           auth_header="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 
           rm -rf "$repo_dir"
-          git -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+          git -c "http.extraHeader=AUTHORIZATION: basic ${auth_header}" \
             clone "$remote_url" "$repo_dir"
           git -C "$repo_dir" checkout --detach "$commit_sha"
 
