@@ -208,7 +208,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       "$pkg_file" "$rc_script" "$runtime_root" >&2
     $sudo_cmd pkg info -F "$pkg_file" >&2
     $sudo_cmd pkg info -l -F "$pkg_file" | grep '/usr/local/etc/rc.d/centralssh$' >&2 || true
-    $sudo_cmd pkg add -f "$pkg_file"
+    $sudo_cmd pkg add -f "$pkg_file" >&2
     if [ ! -x "$rc_script" ]; then
       printf 'installed rc script missing or not executable: %s\n' "$rc_script" >&2
       $sudo_cmd pkg info centralssh >&2 || true
@@ -227,7 +227,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:${runtime_port} \
-      "$rc_script" onestart || start_rc=$?
+      "$rc_script" onestart >&2 || start_rc=$?
     if [ "$start_rc" -ne 0 ]; then
       printf 'runtime validation failure: rc start returned %s\n' "$start_rc" >&2
       $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
@@ -271,7 +271,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:${runtime_port} \
-      "$rc_script" onestatus || status_rc=$?
+      "$rc_script" onestatus >&2 || status_rc=$?
     if [ "$status_rc" -ne 0 ]; then
       printf 'runtime validation warning: rc status returned %s\n' "$status_rc" >&2
       $sudo_cmd pgrep -fl '/usr/local/sbin/centralssh' >&2 || true
@@ -289,7 +289,7 @@ if [ "$runtime_validation" -eq 1 ]; then
       centralssh_user_key_root="$runtime_keys" \
       centralssh_audit_log="$runtime_log/audit.jsonl" \
       centralssh_listen=127.0.0.1:${runtime_port} \
-      "$rc_script" onestop || stop_rc=$?
+      "$rc_script" onestop >&2 || stop_rc=$?
     if [ "$stop_rc" -ne 0 ]; then
       printf 'runtime validation warning: rc stop returned %s\n' "$stop_rc" >&2
       $sudo_cmd cat /var/run/centralssh.pid >&2 || true
