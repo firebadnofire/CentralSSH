@@ -8,6 +8,7 @@ api_url=${FORGEJO_API_URL:-${GITHUB_API_URL:-}}
 token=${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}
 work_dir=${RELEASE_WORK_DIR:-${RUNNER_TEMP:-/tmp}/centralssh-release-publish}
 repo_root=${REPO_ROOT:-$PWD}
+freebsd_release_name=${FREEBSD_RELEASE_NAME:-${FREEBSD_RELEASE:-}}
 
 [ -n "$repository" ] || {
   echo "missing repository name for release publication" >&2
@@ -41,6 +42,15 @@ command -v sha512sum >/dev/null 2>&1 || {
   echo "sha512sum is required for release publication" >&2
   exit 1
 }
+[ -n "$freebsd_release_name" ] || {
+  echo "missing FREEBSD_RELEASE_NAME for release publication" >&2
+  exit 1
+}
+freebsd_release_slug=$(printf '%s' "$freebsd_release_name" | sed 's/[^A-Za-z0-9._-]/-/g')
+[ -n "$freebsd_release_slug" ] || {
+  echo "invalid FREEBSD_RELEASE_NAME for release publication" >&2
+  exit 1
+}
 
 release_env=$(sh "$repo_root/ci/release-version.sh") || exit $?
 eval "$release_env"
@@ -70,10 +80,10 @@ centralssh-${version}-linux-arm64-systemd.tar.gz
 centralssh-${version}-linux-arm64-openrc.tar.gz
 centralssh-${version}-debian-arm64.deb
 centralssh-${version}-fedora-aarch64.rpm
-centralssh-${version}-freebsd-amd64.pkg
-centralssh-${version}-freebsd-amd64.tar.gz
-centralssh-${version}-freebsd-aarch64.pkg
-centralssh-${version}-freebsd-aarch64.tar.gz
+centralssh-${version}-freebsd-${freebsd_release_slug}-amd64.pkg
+centralssh-${version}-freebsd-${freebsd_release_slug}-amd64.tar.gz
+centralssh-${version}-freebsd-${freebsd_release_slug}-aarch64.pkg
+centralssh-${version}-freebsd-${freebsd_release_slug}-aarch64.tar.gz
 EOF
 
 log_cmd() {

@@ -26,6 +26,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 export PATH
 privileged_runtime=0
 sudo_cmd=
+freebsd_release_name=${FREEBSD_RELEASE_NAME:-${FREEBSD_RELEASE:-}}
 
 if [ "$(id -u)" -eq 0 ]; then
   privileged_runtime=1
@@ -34,10 +35,24 @@ elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   privileged_runtime=1
 fi
 
+if [ -z "$freebsd_release_name" ]; then
+  if command -v freebsd-version >/dev/null 2>&1; then
+    freebsd_release_name=$(freebsd-version -u 2>/dev/null || freebsd-version 2>/dev/null || true)
+  fi
+fi
+if [ -z "$freebsd_release_name" ]; then
+  freebsd_release_name=$(uname -r 2>/dev/null || true)
+fi
+freebsd_release_slug=$(printf '%s' "$freebsd_release_name" | sed 's/[^A-Za-z0-9._-]/-/g')
+[ -n "$freebsd_release_slug" ] || {
+  echo "missing FreeBSD release name for artifact naming" >&2
+  exit 1
+}
+
 case "$arch" in
   amd64)
     target_triple=x86_64-unknown-freebsd
-    pkg_suffix=freebsd-amd64
+    pkg_suffix=freebsd-${freebsd_release_slug}-amd64
     pkg_arch=$host_pkg_abi
     runtime_validation=1
     cargo_toolchain=
@@ -45,7 +60,7 @@ case "$arch" in
     ;;
   aarch64)
     target_triple=aarch64-unknown-freebsd
-    pkg_suffix=freebsd-aarch64
+    pkg_suffix=freebsd-${freebsd_release_slug}-aarch64
     pkg_arch=$(printf '%s\n' "$host_pkg_abi" | awk -F: 'BEGIN { OFS=":" } { $NF = "aarch64"; print }')
     runtime_validation=0
     cargo_toolchain=+nightly

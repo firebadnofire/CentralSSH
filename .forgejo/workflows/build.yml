@@ -10,6 +10,7 @@ env:
   RUST_TOOLCHAIN: "1.95.0"
   RUSTUP_INIT_URL: "https://sh.rustup.rs"
   CI_LOG_ENDPOINT: "http://192.168.86.41:9000/ingest"
+  FREEBSD_RELEASE_NAME: "15.0-RELEASE"
 
 jobs:
   linux-build-test:
@@ -518,10 +519,14 @@ jobs:
           chmod +x ./ci/build-freebsd-native.sh
           eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
-          ./ci/build-freebsd-native.sh "$version" amd64
+          artifacts="$(./ci/build-freebsd-native.sh "$version" amd64)"
+          pkg_file="$(printf '%s\n' "$artifacts" | sed -n '1p')"
+          tarball="$(printf '%s\n' "$artifacts" | sed -n '2p')"
+          [ -f "$pkg_file" ]
+          [ -f "$tarball" ]
           ./ci/stage-release-artifacts.sh freebsd-amd64 \
-            "dist/centralssh-${version}-freebsd-amd64.pkg" \
-            "dist/centralssh-${version}-freebsd-amd64.tar.gz"
+            "$pkg_file" \
+            "$tarball"
 
   freebsd-aarch64:
     runs-on: freebsd
@@ -682,10 +687,14 @@ jobs:
           chmod +x ./ci/build-freebsd-native.sh
           eval "$(sh ./ci/rewrite-release-version.sh)"
           version="${RELEASE_VERSION:?Missing validated release version}"
-          ./ci/build-freebsd-native.sh "$version" aarch64
+          artifacts="$(./ci/build-freebsd-native.sh "$version" aarch64)"
+          pkg_file="$(printf '%s\n' "$artifacts" | sed -n '1p')"
+          tarball="$(printf '%s\n' "$artifacts" | sed -n '2p')"
+          [ -f "$pkg_file" ]
+          [ -f "$tarball" ]
           ./ci/stage-release-artifacts.sh freebsd-aarch64 \
-            "dist/centralssh-${version}-freebsd-aarch64.pkg" \
-            "dist/centralssh-${version}-freebsd-aarch64.tar.gz"
+            "$pkg_file" \
+            "$tarball"
 
   release-publish:
     runs-on: ubuntu-22.04
